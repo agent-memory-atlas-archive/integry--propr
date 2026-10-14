@@ -20,3 +20,8 @@ export async function importArchiveSkill(file: File): Promise<{ bundle: Extensio
   let encoded = ''; for (let i = 0; i < bytes.length; i += 8192) encoded += String.fromCharCode(...bytes.subarray(i, i + 8192));
   return request('/skills/archive', { filename: file.name, archive: btoa(encoded) });
 }
+
+export const discoverExtensionTools = (url: string) => request<{ tools: string[] }>('/tools/discover', { url });
+export type GithubSkillRef = { name: string; ref: string; kind: 'branch' | 'tag' };
+export const listGithubSkillRefs = (repository: string) => request<{ refs: GithubSkillRef[] }>('/skills/github-source', { repository });
+export const resolveGithubSkillRef = (repository: string, ref: string) => request<{ commit: string }>('/skills/github-source', { repository, ref });

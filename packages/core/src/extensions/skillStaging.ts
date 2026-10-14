@@ -169,6 +169,7 @@ export async function stagingValidator(root: string, directory: string, bundles:
 
 /** Reclaim dead local owners or expired foreign leases on this host and boot. */
 export async function sweepOrphanedExtensionStaging(extensionsRoot: string): Promise<number> {
+  if (process.platform !== 'linux') return 0;
   let root: Awaited<ReturnType<typeof openDirectory>>;
   try { root = await openDirectory(extensionsRoot); } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;

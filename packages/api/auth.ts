@@ -205,7 +205,7 @@ export function createSessionCsrfProtection(
         // Installed after Passport's session middleware and before any bearer
         // authentication. Explicit credentials without a logged-in session do
         // not confer ambient browser authority.
-        if (!/^\/api\/instance\/extensions\/v1(?:\/|$)/.test(req.path) || !req.isAuthenticated()) { next(); return; }
+        if (!/^\/api\/instance\/extensions\/v1(?:\/|$)/i.test(req.path) || !req.isAuthenticated()) { next(); return; }
 
         if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
             req.session.csrfToken ??= randomBytes(32).toString('base64url');

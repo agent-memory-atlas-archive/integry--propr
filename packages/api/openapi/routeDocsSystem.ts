@@ -48,6 +48,12 @@ export const SYSTEM_ROUTE_DOCS: Record<string, RouteDoc> = {
   'POST /api/instance/extensions/v1/skills/github': {
     operationId: 'importAgentExtensionGitSkill', summary: 'Import an authorized GitHub skill at an exact commit and relative directory.', tags: ['Configuration'], requestBody: { schema: JsonObject, description: 'repository, 40-character commit SHA, directory. Caller repository authorization is required.' }, responses: { 200: { description: 'Immutable digest and exact source commit.', schema: JsonObject } },
   },
+  'POST /api/instance/extensions/v1/tools/discover': {
+    operationId: 'discoverAgentExtensionTools', summary: 'Probe a public HTTPS MCP endpoint without credentials; return valid tool names only.', tags: ['Configuration'], requestBody: { schema: JsonObject, description: 'url only. Requires the extension preflight JSON header.' }, responses: { 200: { description: 'Tool names only.', schema: JsonObject } },
+  },
+  'POST /api/instance/extensions/v1/skills/github-source': {
+    operationId: 'resolveAgentExtensionGitSource', summary: 'List branches and tags or resolve a selected ref to an immutable commit.', tags: ['Configuration'], requestBody: { schema: JsonObject, description: 'Authorized repository and optional ref. Lists at most 100 branches and 100 tags.' }, responses: { 200: { description: 'Ref choices or exact commit for confirmation.', schema: JsonObject } },
+  },
   'POST /api/extensions/mcp/:serverName': {
     operationId: 'callAgentExtensionMcp', summary: 'Run-scoped bounded MCP gateway; no browser or OAuth authority.', tags: ['MCP'], requestBody: { schema: JsonObject, description: 'JSON-RPC initialize, ping, initialized notification, tools/list or explicitly authorized tools/call.' }, responses: { 200: { description: 'Sanitized MCP response.', schema: JsonObject }, 202: { description: 'Notification accepted.' } },
   },

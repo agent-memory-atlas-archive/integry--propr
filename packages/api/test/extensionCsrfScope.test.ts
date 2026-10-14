@@ -22,11 +22,12 @@ test('extension session CSRF protection leaves consent, desktop and unrelated AP
     const get = await fetch(base + route); assert.equal(get.status, 200); assert.equal(get.headers.get('cache-control'), null); assert.equal(get.headers.get('x-csrf-token'), null);
     for (const headers of [{}, { Origin: 'https://mcp.example.com' }]) assert.equal((await fetch(base + route, { method: 'POST', headers })).status, 200);
   }
-  const path = '/api/instance/extensions/v1/profiles';
+  for (const path of ['/api/instance/extensions/v1/profiles', '/API/Instance/Extensions/V1/Profiles']) {
   const get = await fetch(base + path); assert.equal(get.headers.get('cache-control'), 'no-store');
   const token = get.headers.get('x-csrf-token'); assert.ok(token);
   assert.equal((await fetch(base + path, { method: 'POST' })).status, 403);
   assert.equal((await fetch(base + path, { method: 'POST', headers: { Origin: 'https://evil.example.com' } })).status, 403);
   assert.equal((await fetch(base + path, { method: 'POST', headers: { Origin: 'https://ui.example.com' } })).status, 200);
   assert.equal((await fetch(base + path, { method: 'POST', headers: { 'X-CSRF-Token': token! } })).status, 200);
+  }
 });

@@ -43,6 +43,36 @@ export function createExtensionProfileRoutes(store = new ExtensionProfileStore(d
       }
       await store.authorize(actor); return { results };
     }),
+    discoverTools: handle(async (req, actor) => {
+      exact(req, ['url']);
+      if (typeof req.body.url !== 'string') throw new ExtensionError(400, 'HTTPS endpoint required');
+      // Discovery never reads saved credentials or accepts a customer token.
+      let response: unknown;
+      try { response = await requestExtensionMcp(req.body.url, { jsonrpc: '2.0', id: 1, method: 'tools/list' }); }
+      catch { throw new ExtensionError(502, 'MCP tool discovery unavailable'); }
+      const rpc = response as { jsonrpc?: unknown; id?: unknown; error?: unknown; result?: { tools?: unknown } } | null;
+      const tools = rpc?.result?.tools;
+      if (rpc?.jsonrpc !== '2.0' || rpc.id !== 1 || rpc.error || !Array.isArray(tools) || tools.length > EXTENSION_LIMITS.tools) throw new ExtensionError(502, 'MCP tool discovery unavailable');
+      const names = tools.flatMap(tool => tool && typeof tool === 'object' && typeof tool.name === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(tool.name) ? [tool.name] : []);
+      await store.authorize(actor);
+      return { tools: [...new Set(names)] };
+    }),
+    githubSource: handle(async (req, actor) => {
+      exact(req, ['repository', 'ref']);
+      const { repository, ref } = req.body;
+      if (typeof repository !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || (ref !== undefined && (typeof ref !== 'string' || !ref.length || ref.length > 256 || /[\x00-\x20\x7f]/.test(ref)))) throw new ExtensionError(400, 'An authorized repository and branch or tag are required');
+      const token = await resolveGitHubMetadataToken(req); await verifyGitHubRepositoryAccess(repository, token);
+      const [owner, repo] = repository.split('/'); const github = new Octokit({ auth: token, request: { timeout: EXTENSION_LIMITS.timeoutMs } });
+      if (ref !== undefined) {
+        const commit = (await github.request('GET /repos/{owner}/{repo}/commits/{ref}', { owner, repo, ref })).data.sha;
+        if (!/^[0-9a-f]{40}$/.test(commit)) throw new ExtensionError(502, 'Git source commit unavailable');
+        await store.authorize(actor); return { commit };
+      }
+      const branches = (await github.request('GET /repos/{owner}/{repo}/branches', { owner, repo, per_page: 100 })).data;
+      const tags = (await github.request('GET /repos/{owner}/{repo}/tags', { owner, repo, per_page: 100 })).data;
+      await store.authorize(actor);
+      return { refs: [...branches.map(b => ({ name: b.name, ref: `refs/heads/${b.name}`, kind: 'branch' })), ...tags.map(t => ({ name: t.name, ref: `refs/tags/${t.name}`, kind: 'tag' }))] };
+    }),
     importArchive: handle(async (req, actor) => {
       exact(req, ['archive', 'filename']);
       if (typeof req.body.archive !== 'string' || req.body.archive.length > Math.ceil(EXTENSION_LIMITS.archiveBytes / 3) * 4 || typeof req.body.filename !== 'string' || !/^[A-Za-z0-9_.-]{1,100}$/.test(req.body.filename)) throw new ExtensionError(400, 'Invalid skill archive');

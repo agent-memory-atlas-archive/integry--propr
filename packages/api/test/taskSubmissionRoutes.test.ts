@@ -516,6 +516,32 @@ test('extension scope preflight rejects mismatches and rechecks awaited boundari
   await routes.submit(make(bearerProfile), bearerResult.res);
   assert.equal(bearerResult.state.status, 400); assert.equal(sideEffects, beforeBearer);
   assert.match(String(bearerResult.state.body.error), /authentication is not configured/);
+  // Refusals after attachment upload still precede the GitHub POST. Preserve
+  // prepared state for every local ExtensionError, including demotion/503.
+  const { ExtensionError } = await import('../../core/src/extensions/extensionProfileStore.js');
+  for (const status of [403, 503, 404]) {
+    const localPending = await insertTaskSubmission(database, { user_id: '1', submission_key: randomUUID(), payload_hash: `local-${status}`, repository: 'owner/repo', payload: uploadPending.payload, attachments: uploadPending.attachments });
+    // Use a live selection so only the final awaited boundary refuses.
+    const live = await store.save('1', scopedInput);
+    await database('task_submissions').where({ id: localPending.id }).update({ payload: JSON.stringify({ ...JSON.parse(localPending.payload), extensionProfile: { instanceId: live.instanceId, profileId: live.profileId, revision: live.revision } }) });
+    const original = ExtensionProfileStore.prototype.assertLaunch;
+    let checks = 0;
+    const mocked = t.mock.method(ExtensionProfileStore.prototype, 'assertLaunch', async function (...args: Parameters<typeof original>) {
+      if (++checks === 2) throw new ExtensionError(status, 'Local extension refusal');
+      return original.apply(this, args);
+    });
+    const localRoutes = createTaskSubmissionRoutes({ db: database, services: {
+      authorize: async () => ({ id: 'repo', name: 'owner/repo', enabled: true, baseBranch: 'main' }),
+      routing: async () => ({ agentAlias: 'claude', model: 'model', routingLabel: 'route', runtime: 'claude' }),
+      getOctokit: async () => ({ request: async () => assert.fail('A local refusal must not POST or reconcile') }) as never,
+      images: { resolveToken: async () => 'fixture', upload: async () => 'https://github.com/user-attachments/assets/fixture' }, enqueue: async () => {},
+    } });
+    await localRoutes.retry(make(live, localPending.submission_key), response().res);
+    mocked.mock.restore();
+    assert.equal(checks, 2);
+    const row = await database('task_submissions').where({ id: localPending.id }).first();
+    assert.equal(row.state, 'prepared'); assert.equal(row.issue_number, null); assert.match(row.error, /Local extension refusal/);
+  }
   // Ambiguous external creation still needs reconciliation after scope changes.
   await database('task_submissions').where({ id: pending.id }).update({ state: 'creating' });
   const { submissionMarker } = await import('../../core/src/services/taskSubmissionService.js');

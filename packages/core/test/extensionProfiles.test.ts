@@ -824,3 +824,59 @@ test('staging reclaims expired foreign leases only on the same host boot and pre
   await assert.rejects(fs.stat(stale), /ENOENT/);
   for (const directory of [live.directory, fresh, otherBoot, legacy]) assert.ok((await fs.stat(directory)).isDirectory());
 });
+
+test('disabled profiles and servers can be saved without live DNS or removed catalog resources', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const profile = await store.save('1', input(), { docs: secret });
+  const unavailable = { ...input(), mcpServers: [
+    { ...input().mcpServers[0], kind: 'https' as const, url: 'https://unavailable.invalid/mcp' },
+    { kind: 'catalog' as const, name: 'removed', catalogId: 'removed', digest: 'a'.repeat(64), enabled: true, tools: ['lookup'], capability: 'read' as const },
+  ] };
+  const disabled = await store.save('1', { ...unavailable, enabled: false }, {}, select(profile));
+  assert.equal(disabled.enabled, false);
+  assert.deepEqual(disabled.secrets.removed, { count: 0, configured: false });
+  const inactiveServers = await store.save('1', { ...unavailable, mcpServers: unavailable.mcpServers.map(s => ({ ...s, enabled: false })) }, {}, select(disabled));
+  assert.equal(inactiveServers.enabled, true);
+  await assert.rejects(store.save('1', unavailable, {}, select(inactiveServers)));
+  await assert.rejects(store.save('1', { ...unavailable, enabled: false, mcpServers: [{ ...unavailable.mcpServers[0], url: 'http://localhost' }] } as any));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'disabled-catalog-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const entry = { id: 'docs', kind: 'stdio' as const, executable: '/usr/bin/env', args: ['node', '--version'], tools: ['lookup'], capability: 'read' as const, secretEnv: { API_KEY: 'OPERATOR_DOCS_KEY' } };
+  const filename = path.join(root, 'catalog.json'); await fs.writeFile(filename, JSON.stringify([entry]));
+  store.environment.PROPR_EXTENSION_CATALOG_FILE = filename; store.environment.OPERATOR_DOCS_KEY = secret;
+  const { operatorCatalogDigest } = await import('../src/extensions/operatorCatalog.js');
+  const catalogInput = { ...input(), mcpServers: [{ kind: 'catalog' as const, name: 'local', catalogId: entry.id, digest: operatorCatalogDigest(entry), enabled: true, tools: ['lookup'], capability: 'read' as const }] };
+  const catalogProfile = await store.save('1', catalogInput);
+  await fs.unlink(filename);
+  const recovery = await store.save('1', { ...catalogInput, enabled: false }, {}, select(catalogProfile));
+  assert.deepEqual(recovery.secrets.local, { count: 1, configured: true });
+  await assert.rejects(store.assertLaunch('1', select(recovery), context), /disabled/);
+
+});
+
+test('gateway records one final DNS decision per call while enforcing the second resolution', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const profile = await store.save('1', input(), { docs: secret });
+  const token = await store.createGrant('1', profile, 'single-decision'); await store.activateGrant(token, '1', select(profile));
+  for (const allowed of [true, false]) {
+    const transport = async (url: string, body: unknown, _secret?: string, policy?: any) => {
+      // Simulate a DNS change at the physical transport boundary.
+      await resolveExtensionEndpoint('https://tools.example.com', async () => [{ address: allowed ? '8.8.8.8' : '127.0.0.1', family: 4 }], policy);
+      return { jsonrpc: '2.0', id: (body as any).id, result: {} };
+    };
+    const call = extensionGatewayCall(store, token, 'docs', { jsonrpc: '2.0', id: 1, method: 'ping' }, transport);
+    if (allowed) await call; else await assert.rejects(call, /connection failed/);
+  }
+  const row = await database('extension_run_grants').where({ token_hash: extensionTokenHash(token) }).first();
+  assert.deepEqual(JSON.parse(row.network_events).map((e: any) => e.allowed), [true, false]);
+  assert.equal(row.network_denials, 1);
+});
+
+test('staging sweep quietly skips unsupported workers and absent roots', async t => {
+  const { sweepOrphanedExtensionStaging } = await import('../src/extensions/skillStaging.js');
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  t.after(() => Object.defineProperty(process, 'platform', platform));
+  Object.defineProperty(process, 'platform', { value: 'darwin' });
+  assert.equal(await sweepOrphanedExtensionStaging('/missing/extensions'), 0);
+  Object.defineProperty(process, 'platform', platform);
+  assert.equal(await sweepOrphanedExtensionStaging(path.join(os.tmpdir(), randomUUID(), 'extensions')), 0);
+});

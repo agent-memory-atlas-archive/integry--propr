@@ -9,6 +9,10 @@ import type {
   ExtensionSkillBundle,
 } from '@propr/shared';
 import {
+  discoverExtensionTools,
+  listGithubSkillRefs,
+  resolveGithubSkillRef,
+  type GithubSkillRef,
   deleteExtensionProfile,
   extensionProfileHistory,
   importArchiveSkill,
@@ -108,6 +112,20 @@ function ServerEditor({
   onSecret: (value: string) => void;
   onRemove: () => void;
 }) {
+  const url = server.kind === 'https' ? server.url : '';
+  const [probe, setProbe] = useState<{ url: string; attempt: number }>();
+  const [discovered, setDiscovered] = useState<{ url: string; tools: string[] }>();
+  const [discoveryStatus, setDiscoveryStatus] = useState('');
+  useEffect(() => {
+    setDiscoveryStatus('');
+    if (!probe || probe.url !== url) return;
+    let active = true;
+    setDiscoveryStatus('Discovering tools…');
+    void discoverExtensionTools(url).then(result => {
+      if (active) { setDiscovered({ url, tools: result.tools }); setDiscoveryStatus(result.tools.length ? 'Tools discovered. Select the allowed tools below.' : 'No tools discovered.'); }
+    }).catch(() => { if (active) setDiscoveryStatus('Discovery unavailable. This probe uses no credentials; Advanced entry remains available.'); });
+    return () => { active = false; };
+  }, [probe, url]);
   return (
     <div className="space-y-3 rounded-md border border-slate-200 bg-white p-4">
       <div className="grid gap-3 sm:grid-cols-2">
@@ -156,15 +174,21 @@ function ServerEditor({
           </div>
         )}
       </div>
+      {server.kind === 'https' && <div className="space-y-2 text-sm">
+        <button type="button" className={buttonClass} disabled={!url || discoveryStatus === 'Discovering tools…'}
+          onClick={() => setProbe({ url, attempt: (probe?.attempt ?? 0) + 1 })}>Discover tools</button>
+        <p className="text-xs text-slate-500">Probe this endpoint without credentials to find selectable tools.</p>
+        {discoveryStatus && <p role="status">{discoveryStatus}</p>}
+      </div>}
       <ItemPicker
         label="Allowed tools"
         options={server.kind === 'catalog'
           ? catalog.find((c) => c.id === server.catalogId && c.digest === server.digest)?.tools ?? server.tools
-          : knownTools}
+          : [...new Set([...knownTools, ...(discovered?.url === url ? discovered.tools : [])])]}
         selected={server.tools}
         onChange={(tools) => onChange({ tools })}
         allowManual={server.kind === 'https'}
-        hint={server.kind === 'https' ? 'Choose tools from saved configurations for this endpoint. If none are listed, add an exact tool name under Advanced.' : undefined}
+        hint={server.kind === 'https' ? 'Discover tools or choose from saved configurations for this endpoint. Use Advanced for tools that cannot be discovered.' : undefined}
       />
       <div className="flex flex-wrap items-end gap-4">
         <label className="text-sm">
@@ -251,6 +275,29 @@ function SkillsEditor({
   onRemove: (id: string) => void;
 }) {
   const repositoryId = useId();
+  const [refs, setRefs] = useState<GithubSkillRef[]>([]);
+  const [chosenRef, setChosenRef] = useState<{ repository: string; ref: string }>();
+  const [sourceStatus, setSourceStatus] = useState('');
+  useEffect(() => {
+    let active = true;
+    setRefs([]); setChosenRef(undefined); setSourceStatus('');
+    if (github.repository) {
+      setSourceStatus('Loading branches and tags…');
+      void listGithubSkillRefs(github.repository).then(result => {
+        if (active) { setRefs(result.refs); setSourceStatus(result.refs.length ? '' : 'No branches or tags available.'); }
+      }).catch(() => { if (active) setSourceStatus('Branches and tags unavailable. Use an exact commit under Advanced.'); });
+    }
+    return () => { active = false; };
+  }, [github.repository]);
+  useEffect(() => {
+    if (!chosenRef || chosenRef.repository !== github.repository) return;
+    let active = true;
+    setSourceStatus('Resolving exact commit…');
+    void resolveGithubSkillRef(github.repository, chosenRef.ref).then(result => {
+      if (active) { setGithub(g => ({ ...g, commit: result.commit })); setSourceStatus('Commit resolved. Confirm the SHA below before importing.'); }
+    }).catch(() => { if (active) setSourceStatus('Commit resolution unavailable. Select again or use Advanced.'); });
+    return () => { active = false; };
+  }, [chosenRef, github.repository, setGithub]);
   return (
     <>
       <h4 className="text-sm font-semibold">Validated skills</h4>
@@ -304,7 +351,7 @@ function SkillsEditor({
         <div className="mt-3 grid gap-3">
           <div>
           <label htmlFor={repositoryId}>Repository</label>
-            <select id={repositoryId} className={inputClass} value={github.repository} onChange={(e) => setGithub((g) => ({ ...g, repository: e.target.value }))}>
+            <select id={repositoryId} className={inputClass} value={github.repository} onChange={(e) => setGithub((g) => ({ ...g, repository: e.target.value, commit: '' }))}>
               <option value="">Select an authorized repository</option>
               {[...new Set([...repositories, github.repository].filter(Boolean))].map((repository) =>
                 <option key={repository} value={repository}>{repository}</option>)}
@@ -313,18 +360,25 @@ function SkillsEditor({
               <summary className="cursor-pointer text-slate-600">Advanced: use an unlisted repository</summary>
               <label>Unlisted repository
                 <input className={inputClass} value={github.repository} placeholder="team/project"
-                  onChange={(e) => setGithub((g) => ({ ...g, repository: e.target.value }))} />
+                  onChange={(e) => setGithub((g) => ({ ...g, repository: e.target.value, commit: '' }))} />
               </label>
             </details>
           </div>
-          <label>
-            Exact 40-character commit
-            <input
-              className={inputClass}
-              value={github.commit}
-              onChange={(e) => setGithub((g) => ({ ...g, commit: e.target.value }))}
-            />
+          <label>Branch or tag
+            <select className={inputClass} value={chosenRef?.repository === github.repository ? chosenRef.ref : ''}
+              onChange={(e) => { setGithub(g => ({ ...g, commit: '' })); setChosenRef(e.target.value ? { repository: github.repository, ref: e.target.value } : undefined); }}>
+              <option value="">Select a branch or tag</option>
+              {refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.kind === 'branch' ? 'Branch' : 'Tag'}: {ref.name}</option>)}
+            </select>
           </label>
+          {sourceStatus && <p role="status" className="text-xs text-slate-600">{sourceStatus}</p>}
+          {github.commit && <p className="break-all text-sm">Confirmed import commit: <code>{github.commit}</code></p>}
+          <details className="text-sm">
+            <summary className="cursor-pointer text-slate-600">Advanced: use an exact commit</summary>
+            <label>Exact 40-character commit
+              <input className={inputClass} value={github.commit} onChange={(e) => { setChosenRef(undefined); setGithub(g => ({ ...g, commit: e.target.value })); }} />
+            </label>
+          </details>
           <label>
             Relative skill directory
             <input
@@ -337,6 +391,7 @@ function SkillsEditor({
           <button
             type="button"
             className={buttonClass}
+            disabled={!/^[0-9a-f]{40}$/.test(github.commit) || !github.repository || !github.directory}
             onClick={() =>
               void action(async () =>
                 addBundle(

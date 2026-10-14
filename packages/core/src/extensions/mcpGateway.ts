@@ -10,6 +10,8 @@ export async function extensionGatewayCall(store: ExtensionProfileStore, token: 
   // bypass the run budget. Successful responses charge actual wire bytes,
   // including whitespace that disappears during JSON parsing.
   let responseBytes: number = EXTENSION_LIMITS.responseBytes;
+  let recordedDecision = false;
+  let decision: { host: string; allowed: boolean } | undefined;
   try {
   const server = snapshot.mcpServers.find(s => s.enabled && s.name === serverName);
   if (!server || !body || typeof body !== 'object' || Array.isArray(body)) throw new ExtensionError(403, 'MCP capability unavailable');
@@ -27,10 +29,24 @@ export async function extensionGatewayCall(store: ExtensionProfileStore, token: 
   const endpoint = server.kind === 'https' ? server.url : entry!.kind === 'https' ? entry!.url : '';
   const operatorToken = entry?.kind === 'https' ? store.catalog.secrets(entry).bearerToken : undefined;
   if (operatorToken) secrets[serverName] = operatorToken;
-  const policy = { network, ...(entry?.kind === 'https' ? { internalAddresses: entry.addresses } : {}), onDecision: async (host: string, allowed: boolean) => { await store.recordGatewayNetwork(token, server.kind === 'catalog' ? `catalog:${server.catalogId}@${server.digest}` : host, allowed); } };
+  const recordDecision = async () => {
+    if (decision && !recordedDecision) {
+      await store.recordGatewayNetwork(token, decision.host, decision.allowed);
+      recordedDecision = true;
+    }
+  };
+  const policy = { network, ...(entry?.kind === 'https' ? { internalAddresses: entry.addresses } : {}), onDecision: async (host: string, allowed: boolean) => {
+    decision = { host: server.kind === 'catalog' ? `catalog:${server.catalogId}@${server.digest}` : host, allowed };
+    await recordDecision();
+  } };
   // Check even with an injected transport; the real transport resolves again and
   // pins the checked address immediately before TLS dialing.
-  await resolveExtensionEndpoint(endpoint, undefined, policy);
+  await resolveExtensionEndpoint(endpoint, undefined, { ...policy, onDecision: async (host, allowed) => {
+    decision = { host: server.kind === 'catalog' ? `catalog:${server.catalogId}@${server.digest}` : host, allowed };
+    // Successful prechecks are recorded by the physical transport. A denied
+    // precheck never reaches that transport and must be retained here.
+    if (!allowed) await recordDecision();
+  } });
   await store.database('extension_run_grants').where({ token_hash: extensionTokenHash(token) }).increment('request_bytes', Buffer.byteLength(JSON.stringify(forwarded)));
   try { upstream = await send(endpoint, forwarded, secrets[serverName], policy); } catch { throw new ExtensionError(502, 'MCP connection failed'); }
   if (upstream === null && rpc.id === undefined) { responseBytes = 0; return null; }
@@ -57,5 +73,8 @@ export async function extensionGatewayCall(store: ExtensionProfileStore, token: 
   const redacted = redactExtensionOutput({ jsonrpc: '2.0', id: rpc.id, result: projection }, [...Object.values(secrets), token]);
   if (Buffer.byteLength(JSON.stringify(redacted)) > EXTENSION_LIMITS.responseBytes) throw new ExtensionError(502, 'MCP response too large');
   return redacted;
-  } finally { await store.finishGatewayCall(token, responseBytes); }
+  } finally {
+    try { if (decision && !recordedDecision) await store.recordGatewayNetwork(token, decision.host, decision.allowed); }
+    finally { await store.finishGatewayCall(token, responseBytes); }
+  }
 }

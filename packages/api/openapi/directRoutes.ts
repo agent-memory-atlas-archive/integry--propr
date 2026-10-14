@@ -21,6 +21,8 @@ export const DIRECT_ROUTE_REGISTRATIONS: readonly RegisteredRoute[] = [
   { method: 'post', path: '/api/instance/extensions/v1/validate', auth: 'member', permission: 'instance.manage_settings', source: 'server.ts' },
   { method: 'post', path: '/api/instance/extensions/v1/skills/archive', auth: 'member', permission: 'instance.manage_settings', source: 'server.ts' },
   { method: 'post', path: '/api/instance/extensions/v1/skills/github', auth: 'member', permission: 'instance.manage_settings', source: 'server.ts' },
+  { method: 'post', path: '/api/instance/extensions/v1/skills/github-source', auth: 'member', permission: 'instance.manage_settings', source: 'server.ts' },
+  { method: 'post', path: '/api/instance/extensions/v1/tools/discover', auth: 'member', permission: 'instance.manage_settings', source: 'server.ts' },
   { method: 'get', path: '/health', auth: 'public', source: 'server.ts' },
   { method: 'post', path: '/webhook', auth: 'webhook', source: 'server.ts' },
   { method: 'get', path: '/api/compatibility', auth: 'public', source: 'server.ts' },

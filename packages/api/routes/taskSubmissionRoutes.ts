@@ -333,7 +333,7 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
     } catch (error) {
       // These local rejections precede the GitHub POST. Mark them definite,
       // so the submission retains permission to retry rather than reconcile.
-      if (error instanceof ExtensionError && (error.status === 409 || /Profile (agent|repository) scope/.test(error.message))) throw new ExtensionError(400, error.message);
+      if (error instanceof ExtensionError) throw new ExtensionError(400, error.message);
       throw error;
     }
   };

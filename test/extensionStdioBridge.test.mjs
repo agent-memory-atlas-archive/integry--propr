@@ -31,3 +31,28 @@ test('stdio errors release requests and concurrency rejection preserves pending 
   await new Promise(r => setTimeout(r, 10_100)); // A leaked error timer would kill the server here.
   assert.deepEqual(await call(7), { jsonrpc: '2.0', id: 7, result: {} });
 });
+
+test('stdio timeout releases one request, ignores its late reply and permits reuse of the client ID', async t => {
+  const code = `let first=true; require('node:readline').createInterface({input:process.stdin}).on('line', line => {
+    const rpc=JSON.parse(line); const slow=first; first=false;
+    setTimeout(()=>console.log(JSON.stringify({jsonrpc:'2.0',id:rpc.id,result:{slow}})),slow?10500:1000);
+  });`;
+  const config = Buffer.from(JSON.stringify({ name: 'timeout', executable: '/usr/bin/env', args: [process.execPath, '-e', code], tools: [], secretEnv: {} })).toString('base64url');
+  const child = spawn(process.execPath, [path.resolve('scripts/extension-stdio-bridge.mjs'), config]);
+  const reader = createInterface({ input: child.stdout });
+  const replies = []; let notify;
+  reader.on('line', line => { replies.push(JSON.parse(line)); notify?.(); });
+  t.after(async () => { reader.close(); child.kill(); await new Promise(r => child.once('close', r)); });
+  const next = () => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('No bridge reply')), 12000);
+    notify = () => { clearTimeout(timer); notify = undefined; resolve(replies.shift()); };
+    if (replies.length) notify();
+  });
+  const send = () => child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:'reused',method:'ping'})+'\n');
+  send();
+  assert.deepEqual(await next(), {jsonrpc:'2.0',id:'reused',error:{code:-32000,message:'MCP request timed out'}});
+  send();
+  assert.deepEqual(await next(), {jsonrpc:'2.0',id:'reused',result:{slow:false}});
+  send();
+  assert.deepEqual(await next(), {jsonrpc:'2.0',id:'reused',result:{slow:false}});
+});

@@ -47,6 +47,8 @@ test('extension HTTP boundary requires fresh durable administration, preflight J
   app.post('/validate', routes.validate);
   app.post('/skills/archive', routes.importArchive);
   app.post('/skills/github', routes.importGithub);
+  app.post('/skills/github-source', routes.githubSource);
+  app.post('/tools/discover', routes.discoverTools);
   app.post('/mcp/:serverName', routes.gateway);
   const server = app.listen(0, '127.0.0.1'); await new Promise<void>(r => server.once('listening', r));
   t.after(async () => { await new Promise<void>(r => server.close(() => r())); await database.destroy(); await (await import('@propr/core')).closeConnection(); await fs.rm(root, { recursive: true, force: true }); });
@@ -67,7 +69,7 @@ test('extension HTTP boundary requires fresh durable administration, preflight J
   const input = { version: 1, name: 'Synthetic tools', enabled: true, agentScope: [], repositoryScope: [], mcpServers: [{ kind: 'https', name: 'synthetic', url: 'https://8.8.8.8/mcp', enabled: true, tools: ['lookup'], capability: 'read', authentication: 'bearer' }], skillBundleIds: [] };
   // Every cookie-authenticated mutation must reject browser-simple requests
   // and JSON requests lacking the custom header that forces a CORS preflight.
-  for (const route of ['/profiles', '/delete', '/validate', '/skills/archive', '/skills/github']) {
+  for (const route of ['/profiles', '/delete', '/validate', '/skills/archive', '/skills/github', '/skills/github-source', '/tools/discover']) {
     for (const requestHeaders of [
       { 'x-test-actor': '1', 'content-type': 'application/json' },
       { 'x-test-actor': '1', 'content-type': 'application/json', 'x-propr-extensions': 'wrong' },
@@ -131,7 +133,7 @@ test('extension HTTP boundary requires fresh durable administration, preflight J
   for (const [method, route] of [
     ['GET', '/profiles'], ['GET', `/profiles/${profile.profileId}/history`],
     ['POST', '/profiles'], ['POST', '/delete'], ['POST', '/validate'],
-    ['POST', '/skills/archive'], ['POST', '/skills/github'], ['POST', '/mcp/synthetic'],
+    ['POST', '/skills/archive'], ['POST', '/skills/github'], ['POST', '/skills/github-source'], ['POST', '/tools/discover'], ['POST', '/mcp/synthetic'],
   ]) {
     const limited = await fetch(base + route, { method });
     assert.equal(limited.status, 429, route);

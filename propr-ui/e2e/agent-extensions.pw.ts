@@ -113,6 +113,7 @@ test('extension profile configuration uses selections and keeps unlisted values 
   };
   let saved: typeof profile;
   await page.route('**/api/instance/extensions/v1**', route => {
+    if (route.request().url().endsWith('/skills/github-source')) return route.fulfill({ json: { refs: [] } });
     if (route.request().method() === 'POST') {
       saved = { ...profile, ...route.request().postDataJSON().input };
       return route.fulfill({ json: { profile: saved } });
@@ -256,4 +257,73 @@ test('extension editor keeps server names and pending tokens attached to rows an
   await expect(section.getByText('Session import · 1 files · 120 bytes')).toBeVisible();
   await section.getByLabel('Profile name', { exact: true }).fill('Imported skills');
 
+});
+
+test('new HTTPS tools and GitHub branch imports can be selected with immutable confirmation', async ({ page }) => {
+  await installSettingsFixture(page);
+  await page.route('**/api/instance/catalog', route => route.fulfill({ json: { agents: [], repositories: [{ name: 'example/docs', enabled: true }, { name: 'example/app', enabled: true }] } }));
+  const sha = 'b'.repeat(40);
+  let imported: unknown;
+  let releaseDiscovery: () => void;
+  const held = new Promise<void>(resolve => { releaseDiscovery = resolve; });
+  let releaseRef: () => void;
+  const heldRef = new Promise<void>(resolve => { releaseRef = resolve; });
+  await page.route('**/api/instance/extensions/v1**', async route => {
+    const url = route.request().url();
+    if (url.endsWith('/tools/discover')) {
+      const body = route.request().postDataJSON(); expect(Object.keys(body)).toEqual(['url']);
+      if (body.url.endsWith('/slow')) { await held; return route.fulfill({ json: { tools: ['stale_tool'] } }); }
+      return route.fulfill({ json: { tools: ['lookup', 'search_docs'] } });
+    }
+    if (url.endsWith('/skills/github-source')) {
+      const body = route.request().postDataJSON();
+      if (body.ref === 'refs/tags/v1') await heldRef;
+      return route.fulfill({ json: body.ref ? { commit: sha } : { refs: [{ name: 'main', ref: 'refs/heads/main', kind: 'branch' }, { name: 'v1', ref: 'refs/tags/v1', kind: 'tag' }] } });
+    }
+    if (url.endsWith('/skills/github')) {
+      imported = route.request().postDataJSON();
+      return route.fulfill({ json: { bundle: { id: '075bb20e-4156-4f6c-a7e2-20fd6c8ba84e', name: 'Review skill', digest: 'd'.repeat(64), files: 1, bytes: 512, source: { kind: 'github', repository: 'example/docs', commit: sha, directory: 'skills/review' }, requirements: [] } } });
+    }
+    return route.fulfill({ json: { profiles: [], bundles: [], catalog: [] } });
+  });
+  await page.setViewportSize({ width: 1280, height: 1500 });
+  await page.goto('/settings?tab=integrations');
+  const section = page.getByRole('region', { name: 'Agent extensions', exact: true });
+  await section.getByRole('button', { name: 'New profile' }).click();
+  await section.getByLabel('Profile name', { exact: true }).fill('Documentation assistant');
+  await section.getByRole('button', { name: 'Add HTTPS server' }).click();
+  const endpoint = section.getByLabel('HTTPS endpoint', { exact: true });
+  await endpoint.fill('https://tools.example.com/slow');
+  const probeRequest = page.waitForRequest(r => r.url().endsWith('/tools/discover'));
+  await section.getByRole('button', { name: 'Discover tools' }).click(); await probeRequest;
+  await endpoint.fill('https://tools.example.com/new');
+  await section.getByRole('button', { name: 'Discover tools' }).click();
+  await section.getByLabel('lookup', { exact: true }).check();
+  const staleReply = page.waitForResponse(r => r.url().endsWith('/tools/discover') && r.request().postDataJSON().url.endsWith('/slow'));
+  releaseDiscovery!(); await staleReply;
+  await expect(section.getByLabel('stale_tool', { exact: true })).toHaveCount(0);
+  await expect(section.getByLabel('search_docs', { exact: true })).toBeVisible();
+  await section.getByText('Import from an authorized GitHub repository', { exact: true }).click();
+  await section.getByLabel('Repository', { exact: true }).selectOption('example/docs');
+  await section.getByRole('combobox', { name: 'Branch or tag', exact: true }).selectOption('refs/heads/main');
+  await expect(section.getByText('Confirmed import commit:')).toContainText(sha);
+  await section.getByLabel('Relative skill directory', { exact: true }).fill('skills/review');
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    const directory = path.resolve('../.propr/previews'); await mkdir(directory, { recursive: true });
+    await section.getByRole('group', { name: 'Allowed tools', exact: true }).locator('..').screenshot({ path: path.join(directory, 'extension-discovered-tools.png'), animations: 'disabled' });
+    await section.getByRole('combobox', { name: 'Branch or tag', exact: true }).locator('..').locator('..').screenshot({ path: path.join(directory, 'extension-github-ref.png'), animations: 'disabled' });
+    await writeFile(path.join(directory, 'manifest.json'), JSON.stringify({ previews: [
+      { path: '.propr/previews/extension-discovered-tools.png', title: 'Discover HTTPS tools', description: 'A first-time HTTPS endpoint provides selectable tool names from a secret-free probe.' },
+      { path: '.propr/previews/extension-github-ref.png', title: 'Resolve branch to pinned commit', description: 'Select a GitHub branch or tag, confirm its exact commit and import an immutable skill bundle.' },
+    ], toolSuggestions: [] }));
+  }
+  await section.getByRole('button', { name: 'Import pinned skill' }).click();
+  expect(imported).toEqual({ repository: 'example/docs', commit: sha, directory: 'skills/review' });
+  const tagRequest = page.waitForRequest(r => r.url().endsWith('/skills/github-source') && r.postDataJSON().ref === 'refs/tags/v1');
+  await section.getByRole('combobox', { name: 'Branch or tag', exact: true }).selectOption('refs/tags/v1'); await tagRequest;
+  await section.getByLabel('Repository', { exact: true }).selectOption('example/app');
+  const staleRefReply = page.waitForResponse(r => r.url().endsWith('/skills/github-source') && r.request().postDataJSON().ref === 'refs/tags/v1');
+  releaseRef!(); await staleRefReply;
+  await expect(section.getByText('Confirmed import commit:')).toHaveCount(0);
+  await expect(section.getByRole('button', { name: 'Import pinned skill' })).toBeDisabled();
 });

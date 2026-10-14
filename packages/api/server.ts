@@ -506,6 +506,8 @@ export function setupRoutes(): void {
   app.post('/api/instance/extensions/v1/validate', extensionRoutes.validate);
   app.post('/api/instance/extensions/v1/skills/archive', express.json({ limit: '7mb' }), extensionRoutes.importArchive);
   app.post('/api/instance/extensions/v1/skills/github', extensionRoutes.importGithub);
+  app.post('/api/instance/extensions/v1/skills/github-source', extensionRoutes.githubSource);
+  app.post('/api/instance/extensions/v1/tools/discover', extensionRoutes.discoverTools);
 }
 
 function setupWebhookRoute(): void {

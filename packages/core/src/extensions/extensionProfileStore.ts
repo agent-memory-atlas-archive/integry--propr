@@ -53,8 +53,17 @@ export class ExtensionProfileStore {
     let parsed: ExtensionProfileInput; try { parsed = extensionProfileInputSchema.parse(input); } catch { throw new ExtensionError(400, 'Invalid extension profile'); }
     if (!replacements || typeof replacements !== 'object' || Array.isArray(replacements) || Object.entries(replacements).some(([name, token]) => !parsed.mcpServers.some(s => s.name === name && s.kind === 'https' && s.authentication === 'bearer') || (token !== null && (typeof token !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(token))))) throw new ExtensionError(400, 'Invalid secret replacement');
     await this.authorize(actor);
+    for (const server of parsed.mcpServers) if (server.kind === 'https') extensionEndpoint(server.url);
     const operatorSecretValues: string[] = [];
-    for (const server of parsed.mcpServers) { if (server.kind === 'catalog') { const entry = await this.catalog.resolve(server.catalogId, server.digest, server.tools, server.capability, false); operatorSecretValues.push(...Object.values(this.catalog.secrets(entry))); } else { extensionEndpoint(server.url); await resolveExtensionEndpoint(server.url); } }
+    const catalogSecrets = new Map<string, { count: number; configured: boolean }>();
+    for (const server of parsed.mcpServers.filter(s => parsed.enabled && s.enabled)) {
+      if (server.kind === 'catalog') {
+        const entry = await this.catalog.resolve(server.catalogId, server.digest, server.tools, server.capability, false);
+        const values = Object.values(this.catalog.secrets(entry));
+        operatorSecretValues.push(...values);
+        catalogSecrets.set(server.name, { count: values.length, configured: values.every(Boolean) });
+      } else await resolveExtensionEndpoint(server.url);
+    }
     if (operatorSecretValues.some(value => value && JSON.stringify(parsed).includes(value))) throw new ExtensionError(400, 'Secrets cannot appear in public profile fields');
     return this.database.transaction(async trx => {
       await this.authorize(actor, trx); const instanceId = await this.instanceId(trx);
@@ -86,8 +95,8 @@ export class ExtensionProfileStore {
       };
       for (const server of parsed.mcpServers.filter(s => s.kind === 'catalog')) {
         if (server.kind !== 'catalog') continue;
-        const entry = await this.catalog.resolve(server.catalogId, server.digest, server.tools, server.capability, false);
-        snapshot.secrets[server.name] = { count: Object.keys(this.catalog.secrets(entry)).length, configured: Object.values(this.catalog.secrets(entry)).every(Boolean) };
+        const previous = old?.mcpServers.find(s => s.kind === 'catalog' && s.name === server.name && s.catalogId === server.catalogId && s.digest === server.digest);
+        snapshot.secrets[server.name] = catalogSecrets.get(server.name) ?? (previous ? old?.secrets[server.name] : undefined) ?? { count: 0, configured: false };
       }
       await trx('extension_profile_revisions').insert({ profile_id: profileId, revision: snapshot.revision, snapshot: JSON.stringify(snapshot), secrets_encrypted: sealExtensionSecrets(nextSecrets, identity(snapshot), this.environment) });
       return snapshot;
