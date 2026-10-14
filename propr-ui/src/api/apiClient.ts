@@ -190,12 +190,8 @@ export class DemoModeReadOnlyError extends Error {
   }
 }
 
-interface CommittedConfigWriteBody {
+interface CommittedConfigWriteBody extends ApiErrorBody {
   committed: true;
-  error?: string;
-  warning?: string;
-  lock_lost_after_commit?: boolean;
-  [key: string]: unknown;
 }
 
 interface ApiErrorBody {
@@ -277,6 +273,12 @@ const isCurrentDesktopScope = (scope: DesktopConnectionScope | null): boolean =>
 
 const scopeForResponse = (response: Response): DesktopConnectionScope | null =>
   responseScopes.has(response) ? responseScopes.get(response) ?? null : desktopConnectionScope;
+
+const isCurrentDesktopGrantFailure = (
+  response: Response, data: ApiErrorBody | null, scope: DesktopConnectionScope | null,
+): scope is DesktopConnectionScope =>
+  (response.status === 401 || response.status === 403)
+  && GITHUB_USER_GRANT_CODES.has(data?.code ?? '') && scope !== null && isCurrentDesktopScope(scope);
 
 export const handleDesktopAccessCode = async (
   code: string | undefined,
@@ -430,8 +432,7 @@ export const handleApiResponse = async (response: Response): Promise<Response> =
   // A user grant failure leaves the Desktop instance token and current form intact.
   // Only these statuses describe the caller's grant (an agent owner's 409 does not).
   const scope = scopeForResponse(response);
-  if ((response.status === 401 || response.status === 403)
-    && GITHUB_USER_GRANT_CODES.has(data?.code ?? '') && scope && isCurrentDesktopScope(scope)) {
+  if (isCurrentDesktopGrantFailure(response, data, scope)) {
     window.dispatchEvent(new CustomEvent(DESKTOP_GITHUB_AUTHORIZATION_REQUIRED_EVENT, {
       detail: { profileId: scope.profileId, transportScope: scope.transportScope, code: data?.code },
     }));
@@ -452,10 +453,7 @@ export const handleApiResponse = async (response: Response): Promise<Response> =
       committed: true,
     });
   }
-  if (isSafePublicError(data) && errorMessage) {
-    throw new Error(errorMessage);
-  }
-  if (response.status < 500 && errorMessage) {
+  if ((isSafePublicError(data) || response.status < 500) && errorMessage) {
     throw new Error(errorMessage);
   }
   throw new Error(
