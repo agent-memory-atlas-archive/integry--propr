@@ -11,7 +11,7 @@ vi.mock('./apiClient', () => ({
 }));
 
 import { AGENT_TANK_LEGACY_BACKEND_MESSAGE } from '@propr/shared';
-import { enableAgentTank, postTaskFollowup, updateAgentTankSettings } from './revertApi';
+import { enableAgentTank, postTaskReview, postTaskFollowup, updateAgentTankSettings } from './revertApi';
 
 beforeEach(() => {
   apiClientMocks.apiFetch.mockReset();
@@ -81,4 +81,12 @@ it('writes bundled mode when the backend reports one', async () => {
   await updateAgentTankSettings({ mode: 'bundled', url: 'http://0.0.0.0:3456' });
 
   expect(lastPostBody()).toEqual({ mode: 'bundled', enabled: true, url: 'http://0.0.0.0:3456' });
+});
+
+it('requests a review without falling back to an implementation follow-up on older servers', async () => {
+  apiClientMocks.apiFetch.mockResolvedValue(new Response('{}', { status: 404 }));
+  await expect(postTaskReview('task/model')).rejects.toThrow('Review is unavailable');
+  expect(apiClientMocks.apiFetch).toHaveBeenCalledTimes(1);
+  expect(apiClientMocks.apiFetch).toHaveBeenCalledWith('https://api.gitfix.dev/api/tasks/task%2Fmodel/review',
+    { method: 'POST', credentials: 'include' });
 });

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Check, Loader2, MoreHorizontal, Terminal } from 'lucide-react';
-import { postTaskFollowup, type PostFollowupResponse } from '../../api/proprApi';
+import { postTaskReview, postTaskFollowup, type PostFollowupResponse } from '../../api/proprApi';
 import { useToast } from '../ui/useToast';
 import {
   claimFollowup,
@@ -107,7 +107,7 @@ export const FollowupCommands: React.FC<FollowupCommandsProps> = ({
     }
     let response: PostFollowupResponse | undefined;
     try {
-      response = await postTaskFollowup(taskId, command, 'pull_request');
+      response = command === '/review' ? await postTaskReview(taskId) : await postTaskFollowup(taskId, command, 'pull_request');
     } catch (error) {
       settleFollowup(taskId, false);
       addToast({
@@ -130,6 +130,13 @@ export const FollowupCommands: React.FC<FollowupCommandsProps> = ({
         type: 'warning',
         message: `${command} for PR #${prNumber} may not have been queued. ${handles.message}${named ? ` (${named})` : ''}`,
       });
+      return;
+    }
+    if (command === '/review' && !(response?.success === true && response.commandMode === 'review'
+      && (response.state === 'queued' || response.state === 'batched'))) {
+      settleFollowupUncertain(taskId, { ...reconciliation(response),
+        message: 'The server did not confirm an accepted review. Inspect the pull request and update the ProPR server before retrying.' });
+      addToast({ type: 'error', message: 'The server did not confirm an accepted review. Inspect the pull request and update the ProPR server before retrying.' });
       return;
     }
     settleFollowup(taskId, true);

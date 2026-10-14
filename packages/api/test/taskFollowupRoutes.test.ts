@@ -50,6 +50,7 @@ await mock.module('../../core/src/queue/taskQueue.js', {
   namedExports: { ...queueModule, issueQueue: queue, getIssueQueue: async () => queue },
 });
 let webhookFirst = false;
+let prState = 'open';
 async function deliverWebhook(body: string, login = 'propr-dev[bot]', repo = 'propr') {
   return processCommentEvent({
     repository: { owner: { login: 'integry' }, name: repo },
@@ -66,7 +67,7 @@ const request = mock.fn(async (route: string, options: { body?: string }) => {
     id: 6157569382, body: options.body, user: { login: 'propr-dev[bot]', type: 'Bot' },
     created_at: '2026-10-13T00:00:00Z', updated_at: '2026-10-13T00:00:00Z',
   } };
-  if (route.startsWith('GET') && route.includes('/pulls/')) return { data: { head: { ref: 'acceptance' }, labels: [] } };
+  if (route.startsWith('GET') && route.includes('/pulls/')) return { data: { state: prState, head: { ref: 'acceptance' }, labels: [] } };
   return { data: {} };
 });
 const authModule = await import('../../core/src/auth/githubAuth.js');
@@ -99,7 +100,7 @@ setUltrafixDeps({
   getPendingReviewState: async () => ({ hasPendingReview: pendingReview }),
 });
 beforeEach(() => {
-  startLoopFails = false;
+  startLoopFails = false; prState = 'open';
   claims.clear(); existingJobs = []; queueFails = false; pendingReview = false; webhookFirst = false; acceptBeforeFailure = false; acceptedJobs.clear();
   for (const fn of [add, request, invalidate, startLoop, clearState, updateLabels, redis.rpush]) fn.mock.resetCalls();
 });
@@ -392,4 +393,92 @@ test('webhook startLoop failure still rethrows after rollback', async () => {
   await assert.rejects(deliverWebhook('/ultrafix'), /startLoop failed/);
   assert.equal(clearState.mock.callCount(), 1);
   assert.equal(add.mock.callCount(), 0);
+});
+
+async function postReview(overrides: Record<string, unknown> = {}, user: unknown = { id: 'user-1', login: 'human' }) {
+  const result = { status: 200, json: {} as Record<string, unknown> };
+  const response = { status(code: number) { result.status = code; return this; },
+    json(payload: Record<string, unknown>) { result.json = payload; return this; } } as unknown as Response;
+  await createTaskRoutes({ db: database,
+    resolveMetadataToken: async () => 'fixture-token', verifyRepositoryAccess: async () => {},
+    reviewAssignmentGate: async () => ({ allowed: true, reason: 'author_assigned' }), ...overrides,
+  }).postReview({ params: { taskId: 'completed-task' }, user } as unknown as Request, response);
+  return result;
+}
+
+test('dedicated desktop review accepts a bot-posted command for the authenticated user only once', async () => {
+  webhookFirst = true;
+  const result = await postReview();
+  assert.equal(result.status, 202);
+  assert.equal(result.json.success, true);
+  assert.equal(result.json.commandMode, 'review');
+  assert.equal(result.json.state, 'queued');
+  const job = add.mock.calls[0].arguments[1];
+  assert.equal(job.commandMode, 'review');
+  assert.equal(job.userId, 'user-1');
+  assert.equal(job.comments![0].author, 'propr-dev[bot]');
+  assert.equal(job.comments![0].body, '');
+  assert.deepEqual(await postReview(), result);
+  assert.equal(add.mock.callCount(), 1);
+  assert.equal(request.mock.calls.filter(call => call.arguments[0].startsWith('POST')).length, 1);
+});
+
+test('review checks the real user grant, repository and PR assignment before posting', async () => {
+  const checked: string[] = [];
+  const result = await postReview({
+    resolveMetadataToken: async (req: Request) => { checked.push(req.user!.id); return 'user-token'; },
+    verifyRepositoryAccess: async (repo: string, token: string) => { checked.push(repo, token); },
+    reviewAssignmentGate: async (input: { authorId: string; authorLogin: string; pullRequestNumber: number }) => {
+      assert.equal(input.authorId, 'user-1'); assert.equal(input.authorLogin, 'human');
+      assert.equal(input.pullRequestNumber, 7);
+      return { allowed: false, reason: 'author_not_assigned' };
+    },
+  });
+  assert.deepEqual(checked, ['user-1', 'integry/propr', 'user-token']);
+  assert.equal(result.status, 403);
+  assert.equal(request.mock.callCount(), 0);
+  assert.equal(add.mock.callCount(), 0);
+});
+
+test('inaccessible repositories and anonymous review requests do not post or queue', async () => {
+  assert.equal((await postReview({}, null)).status, 401);
+  assert.equal((await postReview({ verifyRepositoryAccess: async () => { throw { status: 404 }; } })).status, 404);
+  assert.equal(request.mock.callCount(), 0);
+  assert.equal(add.mock.callCount(), 0);
+});
+
+test('uncertain review receipt is retained on retry without a second implementation or review run', async () => {
+  queueFails = true; acceptBeforeFailure = true;
+  const result = await postReview();
+  assert.equal(result.json.success, false);
+  assert.equal(result.json.state, 'unknown');
+  assert.deepEqual(await postReview(), result);
+  assert.equal(add.mock.callCount(), 1);
+  assert.equal(acceptedJobs.size, 1);
+});
+
+test('closed PR and unavailable assignment never post review commands', async () => {
+  prState = 'closed';
+  assert.equal((await postReview()).status, 409);
+  assert.equal((await postReview({ reviewAssignmentGate: async () => ({ allowed: false, reason: 'assignment_unavailable' }) })).status, 503);
+  assert.equal(add.mock.callCount(), 0);
+  assert.equal(request.mock.calls.filter(call => call.arguments[0].startsWith('POST')).length, 0);
+});
+
+test('dedicated review batched behind manual work retains review metadata and its idempotent receipt', async () => {
+  existingJobs = [{ name: 'processPullRequestComment', data: { repoOwner: 'integry', repoName: 'propr', pullRequestNumber: 7, commandMode: 'fix' } }];
+  const result = await postReview();
+  assert.equal(result.json.success, true);
+  assert.equal(result.json.state, 'batched');
+  assert.equal(JSON.parse(redis.rpush.mock.calls[0].arguments[1]).commandMode, 'review');
+  assert.deepEqual(await postReview(), result);
+  assert.equal(redis.rpush.mock.callCount(), 1);
+  assert.equal(add.mock.callCount(), 0);
+});
+
+test('concurrent desktop requests share one review submission', async () => {
+  const results = await Promise.all([postReview(), postReview()]);
+  assert.equal(results.filter(result => result.json.state === 'queued').length, 1);
+  assert.equal(results.filter(result => result.json.state === 'unknown').length, 1);
+  assert.equal(add.mock.callCount(), 1);
 });

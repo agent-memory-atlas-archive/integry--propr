@@ -268,6 +268,7 @@ export function createOperationalRouteEntries(deps: OperationalRouteDeps): Route
     ['get', '/api/tasks/revert-preview', taskRoutes.getRevertPreview],
     ['post', '/api/tasks/revert', taskRoutes.revertChanges],
     ['post', '/api/tasks/:taskId/followup', taskRoutes.postFollowup],
+    ['post', '/api/tasks/:taskId/review', taskRoutes.postReview],
     ...createTaskDeleteRouteEntries({ taskRoutes }),
     ['get', '/api/task/:taskId/history', taskHistoryRoutes.getTaskHistory],
     ['get', '/api/task/:taskId/live-details', liveDetailsRoutes.getLiveDetails],

@@ -10,6 +10,7 @@ import {
   TaskAssigneesUpdate,
   TaskFollowupRequest,
   TaskFollowupResult,
+  TaskReviewResult,
   TaskHistory,
   TaskPage,
   TaskSubmission,
@@ -99,6 +100,20 @@ export const TASK_ROUTE_DOCS: Record<string, RouteDoc> = {
       404: { description: 'Task not found.' },
       409: { description: 'The task has no GitHub issue or pull request to assign.' },
       502: { description: 'GitHub could not be reached.' },
+    },
+  },
+  'POST /api/tasks/:taskId/review': {
+    operationId: 'postTaskReview', summary: 'Request an AI review for a task pull request',
+    description: 'Checks the signed-in user’s repository access and PR assignment, dispatches /review through command handling, and returns the same receipt on repeated requests for the source run.',
+    tags: ['Tasks'], pathParams: { taskId: TASK_ID },
+    responses: {
+      202: { description: 'Review submission receipt. Only queued or batched is accepted; unknown requires reconciliation.', schema: TaskReviewResult },
+      400: { description: 'Invalid task or missing pull request.' },
+      401: { description: 'Authentication required.' },
+      403: { description: 'GitHub authorization or PR assignment required.' },
+      404: { description: 'Task or repository not accessible.' },
+      409: { description: 'Pull request is closed.' },
+      503: { description: 'Authorization could not be verified.' },
     },
   },
   'POST /api/tasks/:taskId/followup': {
