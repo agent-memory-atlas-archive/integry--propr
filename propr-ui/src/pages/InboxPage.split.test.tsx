@@ -261,15 +261,16 @@ describe('Inbox triage console', () => {
     fireEvent.keyDown(window, { key: 'ArrowDown' });
     expect(pane()).not.toBeInTheDocument();
     fireEvent.keyDown(window, { key: 'j' });
-    expect(search().get('notification')).toBe(review.id);
+    // Keyboard navigation commits the URL in a React Router transition.
+    await waitFor(() => expect(search().get('notification')).toBe(review.id));
     fireEvent.keyDown(window, { key: 'j' });
     fireEvent.keyDown(window, { key: 'ArrowDown' });
-    expect(search().get('notification')).toBe(failed.id);
+    await waitFor(() => expect(search().get('notification')).toBe(failed.id));
     fireEvent.keyDown(window, { key: 'j' });
     expect(search().get('notification')).toBe(failed.id);
     fireEvent.keyDown(window, { key: 'k' });
     fireEvent.keyDown(window, { key: 'ArrowUp' });
-    expect(search().get('notification')).toBe(review.id);
+    await waitFor(() => expect(search().get('notification')).toBe(review.id));
 
     const field = document.createElement('input');
     document.body.appendChild(field);
@@ -278,7 +279,7 @@ describe('Inbox triage console', () => {
     field.remove();
 
     fireEvent.keyDown(window, { key: 'Escape' });
-    expect(search().get('notification')).toBeNull();
+    await waitFor(() => expect(search().get('notification')).toBeNull());
     expect(pane()).not.toBeInTheDocument();
   });
 
