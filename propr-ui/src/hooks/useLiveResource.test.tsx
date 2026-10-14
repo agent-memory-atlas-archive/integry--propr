@@ -39,6 +39,8 @@ const socket = vi.hoisted(() => {
       onActivityUpdate: register(activity),
       onGoalUpdate: register(goal),
       onTaskUpdate: register(task),
+      subscribeToTask: vi.fn(),
+      unsubscribeFromTask: vi.fn(),
       onNotificationUpdate: register(notification),
       onUsageUpdate: register(usage),
     },
@@ -102,11 +104,35 @@ describe('useLiveResource', () => {
     expect(socket.listeners.task.size).toBe(0);
   });
 
+  it('owns only the enabled current task room and re-subscribes on reconnect', async () => {
+    const read = vi.fn().mockResolvedValue({});
+    const view = renderHook(({ taskId, disabled }) => useLiveResource({
+      read, scopeKey: taskId, interest: { taskId }, disabled,
+    }), { initialProps: { taskId: 'goal-1', disabled: false } });
+    await flush();
+    expect(socket.value.subscribeToTask).toHaveBeenLastCalledWith('goal-1');
+    view.rerender({ taskId: 'goal-2', disabled: false });
+    expect(socket.value.unsubscribeFromTask).toHaveBeenLastCalledWith('goal-1');
+    expect(socket.value.subscribeToTask).toHaveBeenLastCalledWith('goal-2');
+    socket.value.isConnected = false;
+    view.rerender({ taskId: 'goal-2', disabled: false });
+    expect(socket.value.unsubscribeFromTask).toHaveBeenLastCalledWith('goal-2');
+    socket.value.isConnected = true;
+    view.rerender({ taskId: 'goal-2', disabled: false });
+    expect(socket.value.subscribeToTask).toHaveBeenCalledTimes(3);
+    view.rerender({ taskId: 'goal-2', disabled: true });
+    expect(socket.value.unsubscribeFromTask).toHaveBeenCalledTimes(3);
+    view.unmount();
+    expect(socket.value.unsubscribeFromTask).toHaveBeenCalledTimes(3);
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
     setVisibility('visible');
     socket.value.isConnected = true;
     socket.value.shellSnapshots = false;
+    socket.value.subscribeToTask.mockClear();
+    socket.value.unsubscribeFromTask.mockClear();
     socket.value.subscribeToActivity.mockClear();
     socket.value.unsubscribeFromActivity.mockClear();
     Object.values(socket.listeners).forEach(registry => registry.clear());

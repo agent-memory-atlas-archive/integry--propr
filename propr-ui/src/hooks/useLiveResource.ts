@@ -132,6 +132,8 @@ export function useLiveResource<T>({
     onActivityUpdate,
     onGoalUpdate,
     onTaskUpdate,
+    subscribeToTask,
+    unsubscribeFromTask,
     onNotificationUpdate,
     onUsageUpdate,
   } = useSocket();
@@ -230,6 +232,14 @@ export function useLiveResource<T>({
   }, [disabled, subscribeToActivity, unsubscribeFromActivity]);
 
   const { goals, taskId, notifications, usage } = interest;
+  // TASK_UPDATE is routed to the lifecycle room, not the live-output room.
+  // Provider ownership is shared with other readers of this same task.
+  useEffect(() => {
+    if (disabled || receivesSnapshots || !taskId || !isConnected) return;
+    subscribeToTask(taskId);
+    return () => unsubscribeFromTask(taskId);
+  }, [disabled, receivesSnapshots, taskId, isConnected, subscribeToTask, unsubscribeFromTask]);
+
   useEffect(() => {
     if (disabled || receivesSnapshots) return;
     const unsubscribers: Array<() => void> = [
