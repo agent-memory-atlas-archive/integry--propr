@@ -16,6 +16,10 @@ interface ExtensionProfileSaveOptions {
   guard?: (database?: Knex) => Promise<void>;
   preflight?: (snapshot: ExtensionProfileRevision) => void;
 }
+export interface ExtensionSkillImportOptions {
+  guard?: (database?: Knex) => Promise<void>;
+  preflight?: (bundle: ExtensionSkillBundle) => void;
+}
 export class ExtensionProfileStore {
   constructor(readonly database: Knex, readonly environment: NodeJS.ProcessEnv = process.env) {}
   get catalog(): OperatorCatalog { return new OperatorCatalog(this.environment); }
@@ -125,14 +129,20 @@ export class ExtensionProfileStore {
       await guard(trx);
     });
   }
-  async importSkill(actor: string, files: SkillFile[], source: ExtensionSkillBundle['source'], guard: (database?: Knex) => Promise<void> = async () => {}): Promise<ExtensionSkillBundle> {
+  async importSkill(actor: string, files: SkillFile[], source: ExtensionSkillBundle['source'], options: ExtensionSkillImportOptions = {}): Promise<ExtensionSkillBundle> {
+    const { guard = async () => {}, preflight = () => {} } = options;
     await this.authorize(actor); const validated = validateSkillFiles(files);
     if (source.kind === 'github' && !/^[0-9a-f]{40}$/.test(source.commit)) throw new ExtensionError(400, 'Skill source must pin an exact Git commit');
-    const descriptor: ExtensionSkillBundle = { id: randomUUID(), instanceId: await this.instanceId(), digest: validated.digest, name: validated.name, files: files.length, bytes: validated.bytes, source, requirements: validated.requirements, createdAt: Date.now(), auditActor: actor };
+    // Project provenance explicitly; TypeScript structural types cannot exclude extra runtime fields.
+    const publicSource: ExtensionSkillBundle['source'] = source.kind === 'github'
+      ? { kind: 'github', repository: source.repository, commit: source.commit, directory: source.directory }
+      : { kind: 'archive', filename: source.filename };
+    const descriptor: ExtensionSkillBundle = { id: randomUUID(), instanceId: await this.instanceId(), digest: validated.digest, name: validated.name, files: files.length, bytes: validated.bytes, source: publicSource, requirements: validated.requirements, createdAt: Date.now(), auditActor: actor };
     await this.authorize(actor);
     await this.database.transaction(async trx => {
       await guard(trx); await this.authorize(actor, trx);
       if (descriptor.instanceId !== await this.instanceId(trx)) throw new ExtensionError(409, 'Skill instance changed');
+      preflight(descriptor);
       await trx('extension_skill_bundles').insert({ id: descriptor.id, instance_id: descriptor.instanceId, descriptor: JSON.stringify(descriptor), files_json: JSON.stringify(validated.files) });
       await guard(trx);
     });

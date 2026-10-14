@@ -6,7 +6,7 @@ import os from 'node:os';
 import { request as httpRequest } from 'node:http';
 import knex from 'knex';
 import { createHash, createHmac, randomBytes, randomUUID, ECDH } from 'node:crypto';
-import { canonicalFleetJson, FLEET_EXTENSION_CONTRACT, FLEET_EXTENSION_SCOPE, FLEET_EXTENSION_SCHEMA, FLEET_EXTENSION_LIMITS, fleetExtensionEnvelopeSchema, fleetExtensionProfileInputSchema, fleetExtensionRecipientSchema, encryptFleetExtensionSecret, type FleetExtensionRequest, type FleetExtensionIntent, type FleetExtensionAssertion } from '@propr/shared';
+import { canonicalFleetJson, FLEET_EXTENSION_CONTRACT, FLEET_EXTENSION_SCOPE, FLEET_EXTENSION_SCHEMA, FLEET_EXTENSION_LIMITS, fleetExtensionEnvelopeSchema, fleetExtensionProfileInputSchema, fleetExtensionRecipientSchema, fleetExtensionSkillBundleSchema, encryptFleetExtensionSecret, type FleetExtensionRequest, type FleetExtensionIntent, type FleetExtensionAssertion } from '@propr/shared';
 import { up } from '../src/db/migrations/20261013210000_extension_profiles.js';
 import { up as grants } from '../src/db/migrations/20261013220000_extension_grant_network.js';
 import { ExtensionProfileStore } from '../src/extensions/extensionProfileStore.js';
@@ -65,11 +65,19 @@ async function fixture(t: any) {
 }
 
 test('pinned fixtures cover every operation, exact canonical bytes and checksum bundle; v2 unchanged', async () => {
-  const root = 'docs/contracts/fleet-extensions-v1/';
+  const root = 'docs/contracts/fleet-extensions-v1-qualified/';
   const schema = await fs.readFile(root + 'schema.json', 'utf8'); assert.equal(schema, FLEET_EXTENSION_SCHEMA); assert.equal(hash(schema), extensionContractPin);
   const fixtures = JSON.parse(await fs.readFile(root + 'fixtures.json', 'utf8'));
   assert.equal(fixtures.contractPin, extensionContractPin);
   assert.equal(fixtures.requests.length, 14);
+  const skillReply = JSON.parse(fixtures.skillImportResult.canonical);
+  fleetExtensionSkillBundleSchema.parse(skillReply.result.bundle);
+  assert.equal(canonicalFleetJson(skillReply), fixtures.skillImportResult.canonical);
+  assert.equal(hash(fixtures.skillImportResult.canonical), fixtures.skillImportResult.sha256);
+  const capability = JSON.parse(await fs.readFile(root + 'capabilities.json', 'utf8'));
+  assert.equal(capability.contractPin, extensionContractPin);
+  assert.equal(capability.supersedesContractPin, hash(await fs.readFile('docs/contracts/fleet-extensions-v1/schema.json', 'utf8')));
+  assert.notEqual(capability.supersedesContractPin, extensionContractPin);
   for (const fixture of fixtures.requests) {
     const parsed = fleetExtensionEnvelopeSchema.parse(JSON.parse(fixture.canonical));
     assert.equal(canonicalFleetJson(parsed), fixture.canonical); assert.equal(hash(fixture.canonical), fixture.sha256);
@@ -80,7 +88,7 @@ test('pinned fixtures cover every operation, exact canonical bytes and checksum 
   assert.equal(canonicalFleetJson(recipient), fixtures.recipient.canonical); assert.equal(hash(fixtures.recipient.canonical), fixtures.recipient.sha256);
   const encrypted = await encryptFleetExtensionSecret(recipient, 'PUBLIC_SYNTHETIC_FIXTURE_TOKEN', { verificationKey: fixtures.recipient.verificationKey, expectedBinding: recipient.binding });
   assert.equal(Buffer.from(encrypted.ciphertext, 'base64url').length, 4112);
-  for (const version of ['fleet-extensions-v1', 'fleet-data-v2']) for (const line of (await fs.readFile(`docs/contracts/${version}/SHA256SUMS`, 'utf8')).trim().split('\n')) {
+  for (const version of ['fleet-extensions-v1', 'fleet-extensions-v1-qualified', 'fleet-data-v2']) for (const line of (await fs.readFile(`docs/contracts/${version}/SHA256SUMS`, 'utf8')).trim().split('\n')) {
     const [checksum, name] = line.split('  '); assert.equal(hash(await fs.readFile(`docs/contracts/${version}/${name}`, 'utf8')), checksum);
   }
 });
@@ -96,7 +104,9 @@ test('private channel: browser encrypted create/rotation, all capabilities, exac
     }); req.on('error', reject); req.end(raw);
   }));
   const bundle = (await f.invoke({ action: 'skill.import', repository: 'synthetic/skills', commit: 'a'.repeat(40), directory: 'skills/demo' })).bundle;
-  assert.equal((await f.invoke({ action: 'skill.list' })).bundles[0].digest, bundle.digest);
+  fleetExtensionSkillBundleSchema.parse(bundle);
+  assert.deepEqual(bundle.source, { kind: 'github', repository: 'synthetic/skills', commit: 'a'.repeat(40), directory: 'skills/demo' });
+  assert.deepEqual((await f.invoke({ action: 'skill.list' })).bundles[0], bundle);
   const intent = { action: 'profile.create' as const, input: { ...input, skillBundleIds: [bundle.id] } };
   const acquired = await f.recipient(intent);
   const sealed = await f.encrypt(acquired.recipient, sentinel);
@@ -452,4 +462,99 @@ test('recipient issuance zeroes private buffers on signing, capacity and awaited
   assert.ok(buffers.at(-1)!.every(byte => byte === 0));
   assert.equal((f.plane as any).recipients.size, 0);
   shutdown.mock.restore();
+});
+
+
+test('skill import projects request and secret fields away, and preflights before persistence with replay fenced', async t => {
+  const f = await fixture(t);
+  const source = { kind: 'github' as const, repository: 'synthetic/skills', commit: 'a'.repeat(40), directory: 'skills/demo', action: 'skill.import', token: sentinel, headers: { authorization: sentinel } };
+  const files = [{ path: 'SKILL.md', content: skill.toString('base64') }];
+  const native = await f.store.importSkill('100', files, source);
+  assert.deepEqual(native.source, { kind: 'github', repository: source.repository, commit: source.commit, directory: source.directory });
+  assert.equal(JSON.stringify(await f.database('extension_skill_bundles')).includes(sentinel), false);
+  const { importExactGitSkill } = await import('../src/extensions/remoteGitSkill.js');
+  const exact = await importExactGitSkill(f.store, '100', source, { guard: async () => {} });
+  fleetExtensionSkillBundleSchema.parse(exact);
+  assert.deepEqual(exact.source, native.source);
+  const original = f.store.importSkill.bind(f.store);
+  const malformed = mock.method(f.store, 'importSkill', (actor, entries, provenance, options) => original(actor, entries, provenance, { ...options, preflight: bundle => {
+    options!.preflight!({ ...bundle, source: { ...bundle.source, action: 'skill.import' } } as typeof bundle);
+  } }));
+  const request = { action: 'skill.import' as const, repository: source.repository, commit: source.commit, directory: source.directory };
+  const raw = f.envelope(request); const { assertion } = JSON.parse(raw);
+  await assert.rejects(f.plane.invoke(raw), /unavailable/);
+  assert.equal((await f.database('extension_skill_bundles')).length, 2);
+  await assert.rejects(f.plane.invoke(raw), /unavailable/);
+  assert.equal((await f.invoke({ action: 'operation.status', targetOperationId: assertion.operationId })).state, 'fenced');
+  malformed.mock.restore();
+  const oversized = mock.method(f.store, 'importSkill', (actor, entries, provenance, options) => original(actor, entries, provenance, { ...options, preflight: bundle => {
+    options!.preflight!({ ...bundle, name: 'x'.repeat(FLEET_EXTENSION_LIMITS.responseBytes) });
+  } }));
+  await assert.rejects(f.invoke(request), /unavailable/);
+  assert.equal((await f.database('extension_skill_bundles')).length, 2);
+  oversized.mock.restore();
+  await assert.rejects(f.store.importSkill('100', files, source, { preflight: () => { throw new Error('Oversized reply'); } }), /Oversized/);
+  assert.equal((await f.database('extension_skill_bundles')).length, 2);
+});
+
+test('private HTTP denies every remote action to managed/bootstrap/implicit admins, nonadmins, revoked and permissionless actors', async t => {
+  const f = await fixture(t);
+  const { listenFleetData } = await import('../../api/fleetDataListener.js');
+  const listener = await listenFleetData(f.fleet, f.plane); f.cleanup(() => listener.shutdown());
+  const fixtures = JSON.parse(await fs.readFile('docs/contracts/fleet-extensions-v1-qualified/fixtures.json', 'utf8'));
+  for (const identity of [
+    { role: 'admin', source: 'managed' }, { role: 'admin', source: 'bootstrap' }, { role: 'admin', source: 'implicit' },
+    { role: 'member', source: 'local' }, { role: 'revoked', source: 'local' }, { role: 'admin', source: 'local', permission: false },
+  ]) {
+    await f.database('instance_members').where({ github_user_id: '100' }).delete();
+    if (identity.role !== 'revoked') await f.database('instance_members').insert({ github_user_id: '100', role: identity.role, source: identity.source });
+    f.permission(identity.permission !== false);
+    for (const fixture of fixtures.requests) {
+      const request = JSON.parse(fixture.canonical).request;
+      const response = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = httpRequest({ socketPath: listener.address()!, path: '/extensions/v1/invoke', method: 'POST', headers: { 'Content-Type': 'application/json' } }, res => {
+          const chunks: Buffer[] = []; res.on('data', chunk => chunks.push(chunk));
+          res.on('end', () => resolve({ status: res.statusCode!, body: Buffer.concat(chunks).toString() }));
+        }); req.on('error', reject); req.end(f.envelope(request));
+      });
+      assert.equal(response.status, 403, `${identity.source}/${identity.role}: ${request.action}`);
+      assert.deepEqual(JSON.parse(response.body), { error: 'fleet_extensions_unavailable' });
+    }
+  }
+  assert.equal((await fs.readdir(f.control)).filter(n => n.startsWith('extension-')).length, 0);
+  // Native same-origin store still accepts a durable managed administrator.
+  await f.database('instance_members').where({ github_user_id: '100' }).update({ role: 'admin', source: 'managed' });
+  assert.deepEqual(await f.store.list('100'), []);
+});
+
+test('local-to-managed changes fence every acquisition, consumption, mutation, status and completion authorization', async t => {
+  for (const action of ['recipient.issue', 'profile.create', 'consume', 'skill.import', 'operation.status'] as const) {
+    const prepare = async (f: Awaited<ReturnType<typeof fixture>>): Promise<FleetExtensionRequest> => {
+      if (action === 'recipient.issue') return { action, intent: { action: 'profile.create', input }, mutationOperationId: randomUUID(), server: 'docs', field: 'bearerToken' };
+      if (action === 'skill.import') return { action, repository: 'synthetic/skills', commit: 'a'.repeat(40), directory: 'skills/demo' };
+      if (action === 'operation.status') {
+        const raw = f.envelope({ action: 'profile.list' }); await f.plane.invoke(raw);
+        return { action, targetOperationId: JSON.parse(raw).assertion.operationId };
+      }
+      return { action: 'profile.create', input, sealed: [] };
+    };
+    const baseline = await fixture(t); const request = await prepare(baseline); let checks = 0;
+    baseline.hook(async () => { checks++; });
+    if (action === 'consume') {
+      // Use the binding recorded in memory only for this synthetic fixture.
+      const acquired = await baseline.recipient({ action: 'profile.create', input }); checks = 0;
+      await baseline.invoke({ action: 'profile.create', input, sealed: [await baseline.encrypt(acquired.recipient, sentinel)] }, { operationId: acquired.operationId });
+    } else await baseline.invoke(request);
+    assert.ok(checks >= 6);
+    for (let boundary = 1; boundary <= checks; boundary++) {
+      const f = await fixture(t); let r = await prepare(f); let overrides = {};
+      if (action === 'consume') {
+        const acquired = await f.recipient({ action: 'profile.create', input });
+        r = { action: 'profile.create', input, sealed: [await f.encrypt(acquired.recipient, sentinel)] }; overrides = { operationId: acquired.operationId };
+      }
+      let count = 0;
+      f.hook(async db => { if (++count === boundary) await db('instance_members').where({ github_user_id: '100' }).update({ source: 'managed' }); });
+      await assert.rejects(f.invoke(r, overrides), /unavailable/, `${action} boundary ${boundary}`);
+    }
+  }
 });

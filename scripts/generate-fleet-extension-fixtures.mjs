@@ -3,9 +3,10 @@ import { createHash, createHmac, createECDH, createPrivateKey, createPublicKey, 
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { canonicalFleetJson } from '../packages/shared/dist/fleetData.js';
 import { FLEET_EXTENSION_SCHEMA, FLEET_EXTENSION_CONTRACT, FLEET_EXTENSION_SCOPE } from '../packages/shared/dist/fleetExtensions.js';
-const root = new URL('../docs/contracts/fleet-extensions-v1/', import.meta.url);
+const root = new URL('../docs/contracts/fleet-extensions-v1-qualified/', import.meta.url);
 await mkdir(root, { recursive: true });
 const hash = s => createHash('sha256').update(s).digest('hex');
+const supersedesContractPin = hash(await readFile(new URL('../docs/contracts/fleet-extensions-v1/schema.json', import.meta.url), 'utf8'));
 const pin = hash(FLEET_EXTENSION_SCHEMA); const testSecret = 'PUBLIC-FIXTURE-KEY-NOT-A-PRODUCTION-SECRET';
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const selection = { instanceId: id(200), profileId: id(201), revision: 1 };
@@ -33,8 +34,10 @@ const intentDigest = hash(canonicalFleetJson({ action: 'profile.create', input }
 const publicRecipient = { recipientId: id(300), algorithm: 'P-256-ECDH/HKDF-SHA256/AES-256-GCM', publicKey: agreement.getPublicKey().toString('base64url'), binding: { contract: FLEET_EXTENSION_CONTRACT, audience: 'core-extension-mutation', assertion: acquisition, extensionInstanceId: id(200), action: 'profile.create', intentDigest, target: { kind: 'create', intentDigest }, mutationOperationId: id(4), server: 'docs', field: 'bearerToken', recipientId: id(300), expiresAt: acquisition.expiresAt } };
 const recipientCanonical = canonicalFleetJson({ ...publicRecipient, signature: sign(null, Buffer.from(canonicalFleetJson(publicRecipient)), signing).toString('base64url') });
 fixtureBundle.recipient = { verificationKey: createPublicKey(signing).export({ format: 'der', type: 'spki' }).toString('base64url'), canonical: recipientCanonical, sha256: hash(recipientCanonical) };
+const skillResultCanonical = canonicalFleetJson({ contract: FLEET_EXTENSION_CONTRACT, operationId: id(10), state: 'completed', result: { bundle: { id: id(400), instanceId: id(200), digest: 'c'.repeat(64), name: 'demo', files: 1, bytes: 100, source: { kind: 'github', repository: 'synthetic/skills', commit: 'a'.repeat(40), directory: 'skills/demo' }, requirements: [], createdAt: 1791892800000, auditActor: '100' } } });
+fixtureBundle.skillImportResult = { canonical: skillResultCanonical, sha256: hash(skillResultCanonical) };
 const completeFixtures = JSON.stringify(fixtureBundle, null, 2) + '\n';
-const capability = JSON.stringify({ contract: FLEET_EXTENSION_CONTRACT, contractPin: pin, transport: 'existing-private-fleet-unix-listener', path: '/extensions/v1/invoke', actions: requests.map(r => r.action), skillSources: ['github-exact-commit'], skillUpload: false, secretAlgorithm: 'P-256-ECDH/HKDF-SHA256/AES-256-GCM', recipientAuthentication: 'Ed25519-independent-native-SPKI-pin-and-exact-expected-binding', downstreamReady: false, compatibility: { fleetDataV1: 'unchanged', fleetDataV2: 'unchanged', nativeSameOrigin: 'preserved', publicEndpoint: false }, consumerGates: { fleet: 'reciprocal-suite-required', routing: 'reciprocal-suite-required', connect: 'separate-follow-up' }, localProof: 'packages/core/test/fleetExtensions.test.ts' }, null, 2) + '\n';
+const capability = JSON.stringify({ contract: FLEET_EXTENSION_CONTRACT, contractPin: pin, supersedesContractPin, transport: 'existing-private-fleet-unix-listener', path: '/extensions/v1/invoke', actions: requests.map(r => r.action), authority: { role: 'admin', source: 'local', permission: 'instance.manage_settings', durable: true }, skillSources: ['github-exact-commit'], skillUpload: false, secretAlgorithm: 'P-256-ECDH/HKDF-SHA256/AES-256-GCM', recipientAuthentication: 'Ed25519-independent-native-SPKI-pin-and-exact-expected-binding', downstreamReady: false, compatibility: { fleetDataV1: 'unchanged', fleetDataV2: 'unchanged', nativeSameOrigin: 'preserved', publicEndpoint: false }, consumerGates: { fleet: 'reciprocal-suite-required', routing: 'reciprocal-suite-required', connect: 'separate-follow-up' }, localProof: 'packages/core/test/fleetExtensions.test.ts' }, null, 2) + '\n';
 await writeFile(new URL('schema.json', root), FLEET_EXTENSION_SCHEMA);
 await writeFile(new URL('fixtures.json', root), completeFixtures);
 await writeFile(new URL('capabilities.json', root), capability);

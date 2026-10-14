@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { Octokit } from '@octokit/core';
 import { EXTENSION_LIMITS } from '@propr/shared';
-import type { ExtensionProfileStore } from './extensionProfileStore.js';
+import type { ExtensionProfileStore, ExtensionSkillImportOptions } from './extensionProfileStore.js';
 import { skillPath, type SkillFile } from './skillBundles.js';
 
 /** Native GitHub client owns credentials. The remote request supplies only exact immutable provenance. */
-export async function importExactGitSkill(store: ExtensionProfileStore, actor: string, source: { repository: string; commit: string; directory: string }, guard: () => Promise<void>) {
+export async function importExactGitSkill(store: ExtensionProfileStore, actor: string, source: { repository: string; commit: string; directory: string }, options: ExtensionSkillImportOptions & { guard: NonNullable<ExtensionSkillImportOptions['guard']> }) {
+  const { guard } = options;
   skillPath(source.directory); await guard();
   // Resolve the configured native installation client, never a relay-supplied credential.
   const { getAuthenticatedOctokit } = await import('../auth/githubAuth.js');
@@ -28,5 +29,5 @@ export async function importExactGitSkill(store: ExtensionProfileStore, actor: s
     if (bytes > EXTENSION_LIMITS.bytes) throw new Error('Unavailable');
     files.push({ path: entry.path!.slice(source.directory.length + 1), content });
   }
-  await guard(); return store.importSkill(actor, files, { kind: 'github', ...source }, guard);
+  await guard(); return store.importSkill(actor, files, { kind: 'github', repository: source.repository, commit: source.commit, directory: source.directory }, options);
 }

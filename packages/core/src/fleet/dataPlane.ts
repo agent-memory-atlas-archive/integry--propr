@@ -72,7 +72,7 @@ export class FleetDataPlane {
     return { contract: FLEET_DATA_ACTOR_CONTRACT, contractPin, hostedInstanceId: authority.hostedInstanceId, placementGeneration: authority.placementGeneration,
       scope: authority.scope, storageInstanceId: capabilities.instanceId, runtimeGeneration: capabilities.generation, storageGeneration: this.storage.generation };
   }
-  private async validate(op: Pick<Operation, 'binding' | 'secretHash' | 'expiresAt' | 'githubActorId'>, database?: Knex) {
+  private async validate(op: Pick<Operation, 'binding' | 'secretHash' | 'expiresAt' | 'githubActorId'>, database?: Knex, localOnly = false) {
     if (!Number.isSafeInteger(op.githubActorId) || op.githubActorId <= 0 || !this.authorizeActor) throw new FleetRefusal();
     const current = await this.runtime();
     const published = JSON.parse(await this.files.read('runtime.json'));
@@ -80,7 +80,7 @@ export class FleetDataPlane {
     const { secret } = await this.authority();
     if (digest(binding(current)) !== digest(op.binding) || secretHash(secret) !== op.secretHash || Date.now() >= op.expiresAt) throw new FleetRefusal();
     const authorization = await this.authorizeActor(op.githubActorId, database);
-    if (authorization.role !== 'admin' || !['local', 'managed'].includes(authorization.source) || !authorization.permissions.includes('instance.manage_settings')) throw new FleetRefusal();
+    if (authorization.role !== 'admin' || !(localOnly ? ['local'] : ['local', 'managed']).includes(authorization.source) || !authorization.permissions.includes('instance.manage_settings')) throw new FleetRefusal();
   }
   /** Share the existing bounded private namespace with separately pinned contracts. */
   reserveExtensionEntries(count: number) {
@@ -96,7 +96,7 @@ export class FleetDataPlane {
   /** Reuse the provisioned private boundary without extending the pinned data contract. */
   async extensionAuthority(assertion: { githubActorId: number; hostedInstanceId: string; storageInstanceId: string; runtimeGeneration: string; storageGeneration: string; placementGeneration: string; expiresAt: number }, database?: Knex) {
     const { secret } = await this.authority();
-    await this.validate({ githubActorId: assertion.githubActorId, binding: binding({ ...assertion, scope: FLEET_DATA_SCOPE }), secretHash: secretHash(secret), expiresAt: assertion.expiresAt * 1000 }, database);
+    await this.validate({ githubActorId: assertion.githubActorId, binding: binding({ ...assertion, scope: FLEET_DATA_SCOPE }), secretHash: secretHash(secret), expiresAt: assertion.expiresAt * 1000 }, database, true);
     // Check filesystem generations/authority again after the uncached database lookup.
     const current = await this.runtime();
     const published = JSON.parse(await this.files.read('runtime.json'));
