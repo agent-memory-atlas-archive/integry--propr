@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import express from 'express';
 import knex from 'knex';
 import https from 'node:https';
+import dns from 'node:dns/promises';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import type { AddressInfo } from 'node:net';
+import { createApiRequestRateLimiter } from '../requestRateLimits.js';
 import { ExtensionProfileStore } from '../../core/src/extensions/extensionProfileStore.js';
 import { up } from '../../core/src/db/migrations/20261013210000_extension_profiles.js';
 let repositoryChecks: string[] = [];
@@ -27,6 +29,7 @@ await mock.module('@octokit/core', { namedExports: { Octokit: class {
   }
 } } });
 const { createExtensionProfileRoutes } = await import('../routes/extensionProfileRoutes.js');
+const { requestExtensionMcp } = await import('../../core/src/extensions/endpointPolicy.js');
 after(closeConnection);
 
 test('admin discovery is secret-free and bounded; Git refs resolve separately from immutable import', async t => {
@@ -36,7 +39,10 @@ test('admin discovery is secret-free and bounded; Git refs resolve separately fr
   await database.schema.createTable('agent_definitions', c => c.string('id').primary());
   await database('instance_members').insert({ github_user_id: '1', role: 'admin' }); await up(database);
   const store = new ExtensionProfileStore(database); const routes = createExtensionProfileRoutes(store);
-  const app = express(); app.use(express.json());
+  const app = express();
+  // Match production: bound requests before parsing and authorization.
+  app.use(createApiRequestRateLimiter({ PROPR_API_RATE_LIMIT_MAX: '15' }));
+  app.use(express.json());
   app.use((req, _res, next) => {
     if (req.get('x-test-actor')) req.user = { id: req.get('x-test-actor')! } as any;
     req.authorization = { role: 'admin', permissions: ['instance.manage_settings'], source: 'local' }; next();
@@ -53,7 +59,9 @@ test('admin discovery is secret-free and bounded; Git refs resolve separately fr
   }
   let tools: unknown[] = [{ name: 'lookup', description: 'PRIVATE_DESCRIPTION', inputSchema: { secret: 'PRIVATE_SCHEMA' } }, { name: 'bad name' }, { name: 'lookup' }, { name: 123 }, { name: 'update-docs' }];
   let calls = 0; let beforeProbeReply = async () => {};
-  t.mock.method(https, 'request', (_url: unknown, options: any, callback: any) => {
+  t.mock.method(https, 'request', (url: URL, options: any, callback: any) => {
+    assert.equal(url.href, 'https://8.8.8.8/mcp');
+    assert.equal(options.headers.Host, '8.8.8.8');
     calls++; assert.equal(options.headers.Authorization, undefined); assert.equal(options.agent, false);
     const request = new EventEmitter() as any;
     request.end = async (payload: string) => {
@@ -87,4 +95,47 @@ test('admin discovery is secret-free and bounded; Git refs resolve separately fr
   assert.equal(gitRequests.find(r => r.route.endsWith('/git/commits/{commit_sha}'))!.params.commit_sha, sha);
   beforeGitReply = async () => { await database('instance_members').update({role:'member'}); };
   assert.equal((await post('/source', {repository:'team/repo',ref:'refs/heads/main'})).status,403);
+  const requestsBeforeLimit = { git: gitRequests.length, mcp: calls };
+  for (const route of ['/tools', '/source', '/import']) {
+    assert.equal((await post(route, {})).status, 429);
+  }
+  assert.equal(gitRequests.length, requestsBeforeLimit.git);
+  assert.equal(calls, requestsBeforeLimit.mcp);
+});
+
+test('MCP transport dials vetted addresses while retaining endpoint Host, TLS identity and path', async t => {
+  let addresses = [{ address: '8.8.8.8', family: 4 }];
+  let calls = 0;
+  let expectedHost = 'tools.example.com';
+  t.mock.method(dns, 'lookup', async () => addresses as any);
+  t.mock.method(https, 'request', (url: URL, options: any, callback: any) => {
+    calls++;
+    assert.equal(url.hostname, addresses[0].family === 6 ? `[${addresses[0].address}]` : addresses[0].address);
+    assert.equal(url.pathname, '/mcp%2Ftools');
+    assert.equal(options.headers.Host, expectedHost);
+    assert.equal(options.servername, expectedHost);
+    assert.equal(options.agent, false);
+    const request = new EventEmitter() as any;
+    request.end = () => {
+      const response = Object.assign(Readable.from([Buffer.from('{}')]), { statusCode: 200, headers: { 'content-type': 'application/json' } });
+      callback(response); response.on('end', () => request.emit('close'));
+    };
+    request.destroy = () => request.emit('close');
+    return request;
+  });
+  const endpoint = 'https://tools.example.com/mcp%2Ftools';
+  assert.deepEqual(await requestExtensionMcp(endpoint, {}), {});
+  addresses = [{ address: '2606:4700:4700::1111', family: 6 }];
+  assert.deepEqual(await requestExtensionMcp(endpoint, {}), {});
+  addresses = [{ address: '127.0.0.1', family: 4 }];
+  await assert.rejects(requestExtensionMcp(endpoint, {}), /public/);
+  addresses = [{ address: '8.8.8.8', family: 4 }, { address: '10.0.0.1', family: 4 }];
+  await assert.rejects(requestExtensionMcp(endpoint, {}), /public/);
+  assert.equal(calls, 2);
+  expectedHost = 'catalog.internal';
+  addresses = [{ address: '10.0.0.1', family: 4 }];
+  assert.deepEqual(await requestExtensionMcp('https://catalog.internal/mcp%2Ftools', {}, undefined, { internalAddresses: ['10.0.0.1'] }), {});
+  addresses = [{ address: '10.0.0.2', family: 4 }];
+  await assert.rejects(requestExtensionMcp('https://catalog.internal/mcp%2Ftools', {}, undefined, { internalAddresses: ['10.0.0.1'] }), /authorized/);
+  assert.equal(calls, 3);
 });

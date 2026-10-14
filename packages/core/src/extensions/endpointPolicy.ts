@@ -37,7 +37,9 @@ export async function resolveExtensionEndpoint(value: string, lookup: ExtensionL
   if (policy.network?.mode === 'restricted' && !compileEgressAllowlist(policy.network.allow).allows(host, 443)) {
     await policy.onDecision?.(host, false); throw new Error('MCP endpoint outside run network policy');
   }
-  const addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await Promise.race([
+  // Node's lookup also accepts IP literals without making a DNS request. Keep
+  // the dial address separate from the caller's URL for both names and IPs.
+  const addresses = await Promise.race([
     lookup(host), new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error('Endpoint DNS timeout')), EXTENSION_LIMITS.timeoutMs); timer.unref(); }),
   ]);
   const pinned = policy.internalAddresses?.map(normalizeEgressHost);
@@ -56,14 +58,20 @@ export async function resolveExtensionEndpoint(value: string, lookup: ExtensionL
  * upstream response headers cross this boundary. */
 export async function requestExtensionMcp(endpoint: string, body: unknown, token?: string, policy: ExtensionEndpointPolicy = {}): Promise<unknown> {
   const { url, address, family } = await resolveExtensionEndpoint(endpoint, undefined, policy);
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  // Construct the transport destination solely from the vetted address. The
+  // original endpoint supplies only the path, HTTP Host and TLS identity.
+  const destination = new URL(`https://${family === 6 ? `[${address}]` : address}`);
+  destination.pathname = url.pathname;
   const payload = JSON.stringify(body);
   if (Buffer.byteLength(payload) > 64 * 1024) throw new Error('MCP request too large');
   return new Promise((resolve, reject) => {
     const unavailable = () => reject(new Error('MCP connection failed'));
-    const request = https.request(url, {
+    const request = https.request(destination, {
       method: 'POST', agent: false,
+      servername: isIP(host) ? undefined : host,
       lookup: (_host, _options, callback) => callback(null, address, family),
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'MCP-Protocol-Version': '2025-03-26', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: { Host: url.host, 'Content-Type': 'application/json', Accept: 'application/json', 'MCP-Protocol-Version': '2025-03-26', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     }, response => {
       if (response.statusCode === 202 || response.statusCode === 204) { response.destroy(); resolve(null); return; }
       if (response.statusCode !== 200 || !response.headers['content-type']?.startsWith('application/json')) { response.destroy(); unavailable(); return; }
