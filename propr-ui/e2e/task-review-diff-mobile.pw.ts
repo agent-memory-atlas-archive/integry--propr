@@ -197,23 +197,45 @@ test('390px completed PR: inspect the review, then open and close an added file\
   await dialogLayout();
   await capture(page, 'mobile-added-file-diff-390');
 
-  // The diff scrolls inside the dialog, down and across its long lines; the header and close control
-  // stay put and the page behind does not move.
-  const scrolled = await diff.evaluate(element => {
-    const before = { top: element.scrollTop, left: element.scrollLeft };
-    element.scrollTop = element.scrollHeight;
-    element.scrollLeft = element.scrollWidth;
-    return { before, after: { top: element.scrollTop, left: element.scrollLeft } };
-  });
-  expect(scrolled.after.top).toBeGreaterThan(scrolled.before.top);
-  expect(scrolled.after.left).toBeGreaterThan(scrolled.before.left);
+  // The diff scrolls inside the dialog under real input, down and across its long lines. Input carried on past
+  // the diff's ends does not chain to the page behind, and the header and close control stay put.
+  const position = () => diff.evaluate(element => ({ top: element.scrollTop, left: element.scrollLeft,
+    bottom: element.scrollHeight - element.clientHeight, right: element.scrollWidth - element.clientWidth }));
+  const start = await position();
+  expect(start).toMatchObject({ top: 0, left: 0 });
+  expect(start.bottom).toBeGreaterThan(0);
+  expect(start.right).toBeGreaterThan(0);
+  const diffBox = (await diff.boundingBox())!;
+  const centre = { x: diffBox.x + diffBox.width / 2, y: diffBox.y + diffBox.height / 2 };
+  // Neither the task's own scroller nor the window behind the popup has moved.
+  const pageStill = async () => {
+    expect(await scroller.evaluate(element => element.scrollTop)).toBe(pageScroll);
+    expect(await page.evaluate(() => [window.scrollX, window.scrollY])).toEqual([0, 0]);
+  };
+  // Each wheel run carries well past the diff's end, so any surplus that chained would have moved the page.
+  await page.mouse.move(centre.x, centre.y);
+  for (let step = 0; step < 12; step++) await page.mouse.wheel(0, 400);
+  await expect.poll(async () => (await position()).top).toBe(start.bottom);
+  for (let step = 0; step < 12; step++) await page.mouse.wheel(400, 0);
+  await expect.poll(async () => (await position()).left).toBe(start.right);
+  await pageStill();
   // Scrolled across, the diff's dark background still runs under the end of its longest line.
   expect(await diff.evaluate(element =>
     element.querySelector('pre')!.getBoundingClientRect().right >= element.getBoundingClientRect().right - 1)).toBe(true);
-  await diff.evaluate(element => { element.scrollLeft = 0; });
+  // A finger swiping right brings the start of the lines back, and swiping on past it moves nothing behind.
+  const touch = await page.context().newCDPSession(page);
+  const swipe = async (distance: number) => {
+    const point = (dx: number) => ({ touchPoints: [{ x: Math.round(diffBox.x + 20 + dx), y: Math.round(centre.y) }] });
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', ...point(0) });
+    for (let step = 1; step <= 10; step++) await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', ...point(distance * step / 10) });
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  };
+  for (let swipes = 0; swipes < 8; swipes++) await swipe(300);
+  await expect.poll(async () => (await position()).left).toBe(0);
+  expect((await position()).top).toBe(start.bottom);
   await expect(dialog.getByText('// END OF ADDED FILE', { exact: false })).toBeInViewport();
   await dialogLayout();
-  expect(await scroller.evaluate(element => element.scrollTop)).toBe(pageScroll);
+  await pageStill();
   await capture(page, 'mobile-added-file-diff-scrolled-390');
 
   await close.click();
