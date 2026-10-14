@@ -39,7 +39,7 @@ const TAGS: { name: string; description: string; prefixes: string[] }[] = [
   { name: 'Agents', description: 'Agent login, images, runtime packages and health.', prefixes: ['/api/agents', '/api/agent-runtime'] },
   { name: 'Automations', description: 'Saved automation definitions, their runs, reports and approvals. The agent-definitions and agent-runs paths are deprecated compatibility aliases.', prefixes: ['/api/automation-definitions', '/api/automation-runs', '/api/agent-definitions', '/api/agent-runs', '/api/internal/agent-runs'] },
   { name: 'Administration', description: 'Instance members and MCP administration.', prefixes: ['/api/admin'] },
-  { name: 'MCP', description: 'The Model Context Protocol endpoint, its OAuth 2.1 authorization server and its browser pages.', prefixes: ['/api/mcp', '/mcp', '/.well-known', '/authorize', '/token', '/register', '/revoke'] },
+  { name: 'MCP', description: 'The Model Context Protocol endpoint, its OAuth 2.1 authorization server and its browser pages.', prefixes: ['/api/extensions/mcp', '/api/mcp', '/mcp', '/.well-known', '/authorize', '/token', '/register', '/revoke'] },
   { name: 'Webhooks', description: 'GitHub webhook intake.', prefixes: ['/webhook'] },
 ];
 
@@ -48,6 +48,7 @@ const SECURITY: Record<RouteAuth, Record<string, string[]>[]> = {
   public: [],
   instanceToken: [{ bearerAuth: [] }],
   mcp: [{ mcpOAuth: ['read'] }],
+  extensionGrant: [{ extensionBearer: [] }],
   webhook: [{ webhookSignature: [] }],
   browserSession: [{ sessionCookie: [] }],
   fleetSecret: [{ fleetSecret: [] }],
@@ -336,6 +337,7 @@ export function buildOpenApiDocument(routes: RegisteredRoute[] = listRegisteredR
           scheme: 'bearer',
           description: 'A GitHub token (when `ENABLE_BEARER_AUTH` is not `false`) or a desktop/CLI instance token (`propr_it_…`).',
         },
+        extensionBearer: { type: 'http', scheme: 'bearer', description: 'Ephemeral, run-scoped extension gateway token. Not a GitHub, Connect or MCP OAuth grant.' },
         mcpOAuth: {
           type: 'oauth2',
           description: 'OAuth 2.1 access token issued to MCP clients by `/authorize` and `/token` (PKCE, public clients). Every token carries `read`, which is all `/api/mcp` itself requires; each MCP tool then checks its own scope, as listed in the MCP guide (docs/features/mcp).',

@@ -1,3 +1,4 @@
+import { ExtensionProfileSelector } from '../Extensions/ExtensionProfileSelector';
 import React from 'react';
 import { Loader2, Plus, Save, Trash2 } from 'lucide-react';
 import { AUTOMATION_DESCRIPTION_MAX_LENGTH, AUTOMATION_NAME_MAX_LENGTH } from '@propr/shared';
@@ -71,6 +72,7 @@ export const AgentSettingsForm: React.FC<AgentSettingsFormProps> = ({ editor, is
           />
         </AgentFormRow>
 
+        <div className="px-4 py-4"><ExtensionProfileSelector value={form.extensionProfile} onChange={extensionProfile => update({ extensionProfile })} disabled={readOnly} /></div>
         <AgentScopeSection repositories={form.repositories} onChange={repositories => update({ repositories })} disabled={readOnly} />
 
         <AgentPromptSection

@@ -170,6 +170,7 @@ export function buildCodexDockerArgs(config: AgentConfig, params: CodexDockerArg
     const workerOwnedGit = !agentOwnsGit(params);
     const envVars = [
         ...buildEnvironmentVariableArgs([config.envVars, environment], true),
+        ...(params.toolPolicy?.exclusiveMcp ? ['-e', 'PROPR_EXTENSION_EXCLUSIVE_MCP=1'] : []),
         // Name only: docker copies the value from its own environment.
         ...Object.keys(params.toolPolicy ? codexToolPolicyArgs(params.toolPolicy).env : {}).flatMap(name => ['-e', name]),
     ];

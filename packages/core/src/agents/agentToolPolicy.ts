@@ -36,23 +36,31 @@ function tokenEnv(servers: NonNullable<AgentToolPolicy['mcpServers']>): Record<s
     return Object.fromEntries(servers.map(server => [server.bearerTokenEnv, server.bearerToken]));
 }
 
+function launchArgs(policy: AgentToolPolicy, cliArgs: string[], servers: NonNullable<AgentToolPolicy['mcpServers']>): ToolPolicyLaunchArgs {
+    const env = { ...tokenEnv(servers), ...Object.assign({}, ...(policy.localMcpServers ?? []).map(s => s.env)) };
+    // Operator secret values remain usable by the process launcher while being
+    // absent from accidental argument/config JSON serialization.
+    return policy.localMcpServers?.length ? Object.defineProperty({ cliArgs } as ToolPolicyLaunchArgs, 'env', { value: env, enumerable: false }) : { cliArgs, env };
+}
+
 /** Claude Code: `--disallowedTools` for web, inline `--mcp-config` with env-expanded auth. */
 export function claudeToolPolicyArgs(policy: AgentToolPolicy): ToolPolicyLaunchArgs {
     const servers = mcpServers(policy);
     const cliArgs: string[] = [];
     if (!policy.allowWeb) cliArgs.push('--disallowedTools', ...CLAUDE_WEB_TOOLS);
-    if (servers.length > 0) {
+    if (policy.exclusiveMcp) cliArgs.push('--strict-mcp-config');
+    if (servers.length > 0 || policy.localMcpServers?.length || policy.exclusiveMcp) {
         const config = {
-            mcpServers: Object.fromEntries(servers.map(server => [server.name, {
+            mcpServers: { ...Object.fromEntries((policy.localMcpServers ?? []).map(s => [s.name, { type: 'stdio', command: '/usr/local/bin/node', args: ['/opt/propr/extension-stdio-bridge.mjs', s.bridgeConfig] }])), ...Object.fromEntries(servers.map(server => [server.name, {
                 type: 'http',
                 url: server.url,
                 // Claude Code expands `${VAR}` from its own environment.
                 headers: { Authorization: `Bearer \${${server.bearerTokenEnv}}` },
-            }])),
+            }])) },
         };
         cliArgs.push('--mcp-config', JSON.stringify(config));
     }
-    return { cliArgs, env: tokenEnv(servers) };
+    return launchArgs(policy, cliArgs, servers);
 }
 
 /**
@@ -64,13 +72,18 @@ export function codexToolPolicyArgs(policy: AgentToolPolicy): ToolPolicyLaunchAr
     const servers = mcpServers(policy);
     const cliArgs: string[] = [];
     if (!policy.allowWeb) cliArgs.push('-c', 'web_search="disabled"');
-    for (const server of servers) {
+    if (policy.exclusiveMcp) {
+        const catalog = [...(policy.localMcpServers ?? []).map(s => `${s.name}={command="/usr/local/bin/node",args=["/opt/propr/extension-stdio-bridge.mjs",${JSON.stringify(s.bridgeConfig)}],env_vars=${JSON.stringify(Object.keys(s.env))}}`), ...servers.map(server => `${server.name}={url=${JSON.stringify(server.url)},bearer_token_env_var=${JSON.stringify(server.bearerTokenEnv)}}`)].join(',');
+        // The pinned runtime merges table overrides with its user catalog.
+        // Ignore that catalog while retaining auth custody in CODEX_HOME.
+        cliArgs.push('--ignore-user-config', '-c', `mcp_servers={${catalog}}`);
+    } else for (const server of servers) {
         cliArgs.push(
             '-c', `mcp_servers.${server.name}.url=${JSON.stringify(server.url)}`,
             '-c', `mcp_servers.${server.name}.bearer_token_env_var=${JSON.stringify(server.bearerTokenEnv)}`,
         );
     }
-    return { cliArgs, env: tokenEnv(servers) };
+    return launchArgs(policy, cliArgs, servers);
 }
 
 /**

@@ -292,3 +292,22 @@ test('rejects invalid overrides instead of silently disabling protection', () =>
     /must be at most 2147483647/,
   );
 });
+
+
+test('distinct well-formed forged grants share the global IP quota before the handler', async () => {
+  const app = express();
+  app.use('/api', createApiRequestRateLimiter({ PROPR_API_RATE_LIMIT_MAX: '2' }));
+  let lookups = 0;
+  app.post('/api/extensions/mcp/:serverName', (_req, res) => { lookups++; res.sendStatus(401); });
+  app.get('/api/resource', (_req, res) => res.sendStatus(200));
+  const server = await listenTestApp(app);
+  openServers.push(server.close);
+  for (const [index, token] of ['a'.repeat(43), 'b'.repeat(43), 'c'.repeat(43)].entries()) {
+    const response = await fetch(`${server.origin}/api/extensions/mcp/${index === 1 ? 'other' : 'docs'}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(response.status, index < 2 ? 401 : 429);
+  }
+  assert.equal(lookups, 2, 'excess requests never reach grant lookup or database writes');
+  assert.equal((await fetch(`${server.origin}/api/resource`)).status, 429);
+});

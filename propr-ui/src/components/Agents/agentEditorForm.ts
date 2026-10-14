@@ -9,6 +9,7 @@ import type { AutomationDefinitionRecord } from '../../api/automationDefinitions
 
 /** The editor's working copy of a definition, shaped for its inputs. */
 export interface AgentEditorForm {
+  extensionProfile?: import('@propr/shared').ExtensionSelection | null;
   name: string;
   description: string;
   repositories: string[];
@@ -40,6 +41,7 @@ export const emptyAgentForm = (): AgentEditorForm => ({
 });
 
 export const formFromDefinition = (definition: AutomationDefinitionRecord): AgentEditorForm => ({
+  extensionProfile: definition.extensionProfile,
   name: definition.name,
   description: definition.description ?? '',
   repositories: [...definition.repositories],
@@ -55,6 +57,7 @@ export const formFromDefinition = (definition: AutomationDefinitionRecord): Agen
 
 /** The request body for a create or a full-form update, in the shared input contract. */
 export const formToInput = (form: AgentEditorForm): AutomationDefinitionInput => ({
+  ...(form.extensionProfile !== undefined ? { extensionProfile: form.extensionProfile } : {}),
   name: form.name.trim(),
   description: form.description.trim() || null,
   prompt: form.prompt,

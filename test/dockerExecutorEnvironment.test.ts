@@ -77,3 +77,36 @@ test('measured diagnostics capacity warns without blocking a provider launch', a
         fs.rmSync(root, { recursive: true, force: true });
     }
 });
+
+
+test('non-enumerable stdio launch environments reach the Docker subprocess for both runtimes', async t => {
+    const fs = await import('node:fs/promises');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { claudeToolPolicyArgs, codexToolPolicyArgs } = await import('../packages/core/src/agents/agentToolPolicy.js');
+    const key = 'PROPR_EXTENSION_STDIO_0_0_SECRET';
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'stdio-docker-env-'));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    // Stand in for the Docker executable at the process boundary, without requiring a daemon.
+    await fs.writeFile(path.join(directory, 'docker'), `#!${process.execPath}
+const args = process.argv.slice(2);
+const name = '${key}';
+const forwarded = args.some((arg, index) => arg === '-e' && args[index + 1] === name);
+process.stdout.write(JSON.stringify({ forwarded, value: process.env[name], args }));
+`, { mode: 0o755 });
+    const previousPath = process.env.PATH;
+    process.env.PATH = directory + path.delimiter + previousPath;
+    t.after(() => { process.env.PATH = previousPath; });
+    for (const build of [claudeToolPolicyArgs, codexToolPolicyArgs]) {
+        const launch = build({ allowWeb: false, exclusiveMcp: true, localMcpServers: [{ name: 'docs', bridgeConfig: 'synthetic', env: { [key]: TOKEN } }] });
+        assert.ok(!Object.keys(launch).includes('env'));
+        const result = await executeDockerCommand('docker', ['run', '-e', key, 'synthetic-image'], {
+            taskId: 'stdio-env', timeout: 10_000, costCapExempt: true, networkPolicyExempt: 'Synthetic Docker environment fixture', extraEnvVars: launch.env,
+        });
+        assert.equal(result.exitCode, 0);
+        const captured = JSON.parse(result.stdout);
+        assert.equal(captured.forwarded, true);
+        assert.equal(captured.value, TOKEN);
+        assert.ok(!JSON.stringify(captured.args).includes(TOKEN));
+    }
+});

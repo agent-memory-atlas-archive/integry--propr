@@ -1,3 +1,4 @@
+import AgentExtensionsSection from './AgentExtensionsSection';
 import InstanceStorageSection from './InstanceStorageSection';
 import VisualPreviewAuthSection from './VisualPreviewAuthSection';
 import ManagedPreviewStorageSection from './ManagedPreviewStorageSection';
@@ -5,6 +6,7 @@ import type { SettingsNavigationSection } from './SettingsNavigation';
 
 export function settingsDataSections(): SettingsNavigationSection[] {
   return [
+    { id: 'agent-extensions', category: 'integrations', searchText: 'agent extensions profiles MCP skills instance admin security bundles', content: <AgentExtensionsSection /> },
     {
       id: 'instance-storage',
       category: 'integrations',

@@ -252,6 +252,7 @@ COPY --chown=node:node \
     scripts/opencode-entrypoint.sh \
     scripts/vibe-entrypoint.sh \
     /home/node/
+COPY scripts/extension-stdio-bridge.mjs /opt/propr/extension-stdio-bridge.mjs
 COPY --chown=node:node scripts/opencode-run.sh /usr/local/bin/opencode-run
 COPY --chown=node:node scripts/vibe-prompt-file-runner.py /usr/local/bin/propr-vibe-prompt-file
 RUN set -eu; \

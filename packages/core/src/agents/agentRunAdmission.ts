@@ -171,7 +171,7 @@ export async function agentAdmissionMetrics(client: AdmissionRedis, instance: st
 
 export interface AdmissionOptions {
     /** Resolve time-sensitive arguments synchronously at the physical create boundary. */
-    createArgs?: () => string[];
+    createArgs?: () => string[] | Promise<string[]>;
     signal?: AbortSignal;
     taskId?: string;
     extraEnvVars?: Record<string, string>;
@@ -312,7 +312,7 @@ export async function prepareAdmittedAgent(args: string[], options: AdmissionOpt
         // names, environment and network policy arguments intact. Do not race or
         // abandon create on cancellation: collect its immutable ID (the Docker
         // call is separately bounded), then remove it without ever starting it.
-        const createArgs = options.createArgs?.() ?? args;
+        const createArgs = await options.createArgs?.() ?? args;
         assertNativeLogAdmission(createArgs);
         id = await runtime.create(['run', '--label', `propr.agent-admission.token=${token}`, '--label', `propr.agent-admission.instance=${createHash('sha256').update(config.instance).digest('hex')}`, ...createArgs.slice(1)], options.extraEnvVars, options.cwd);
         await checkCancelled();

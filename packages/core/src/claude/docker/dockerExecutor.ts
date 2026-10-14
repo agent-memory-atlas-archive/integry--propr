@@ -1,3 +1,6 @@
+/* eslint-disable max-lines -- subprocess capture, cancellation and settlement share one execution lifecycle */
+import { ExtensionStreamRedactor } from '../../extensions/extensionOutput.js';
+import { currentExtensionLaunch, extensionLaunchForDockerRun } from '../../extensions/extensionLaunch.js';
 import { assertNativeLogAdmission, prepareCommandCapture, finishDiagnosticOutput, scheduleProviderCapture, type DiagnosticAgent } from '../../diagnostics/managedLogRuntime.js';
 import { createExecutionDeadline, type ExecutionDeadline } from './dockerExecutionDeadline.js';
 import { prepareAdmittedAgent, type AdmittedAgent } from '../../agents/agentRunAdmission.js';
@@ -72,6 +75,8 @@ export interface DockerCommandOptions extends Pick<ExecutionWatchdogOptions, 'wa
     model?: string;
     /** A container that runs no agent and spends nothing (e.g. a usage probe): not counted toward, or refused by, the run's spend cap. */
     costCapExempt?: boolean;
+    /** Explicitly identifies the selected agent launch, excluding helper containers. */
+    extensionAgentLaunch?: boolean;
 }
 
 /**
@@ -195,6 +200,10 @@ function spawnCommandProcess(
 }
 
 export async function executeDockerCommand(command: string, args: string[], options: DockerCommandOptions = {}): Promise<ExecutionResult> {
+    const extensions = extensionLaunchForDockerRun(command, args, options);
+    if (extensions) {
+        args = [args[0], ...extensions.mounts, ...args.slice(1)];
+    }
     const ownershipContext = getExecutionOwnershipContext();
     const timeout = options.timeout ?? 300000;
     const { deadline, executionSignal, timeoutError } = createExecutionDeadline(timeout, options.signal, ownershipContext?.signal);
@@ -224,10 +233,15 @@ async function startDockerCommand(
 ): Promise<ExecutionResult> {
     if (command === 'docker' && args[0] === 'run') assertNativeLogAdmission(options.diagnostics);
     const executionArgs = resolveExecutionArgs(command, args, options.taskId, ownershipContext?.attemptGeneration);
+    const extensionValidationWindow = {};
     deadline.remaining();
+    await extensionLaunchForDockerRun(command, args, options)?.beforeLaunch(extensionValidationWindow, false);
     const admission = command === 'docker' && args[0] === 'run' && !options.costCapExempt
         ? await prepareAdmittedAgent(executionArgs, {
-            createArgs: () => withWorkflowExecutionDeadline(command, executionArgs, deadline.remaining()),
+            createArgs: async () => {
+                await extensionLaunchForDockerRun(command, args, options)?.beforeLaunch(extensionValidationWindow);
+                return withWorkflowExecutionDeadline(command, executionArgs, deadline.remaining());
+            },
             signal: executionSignal, taskId: options.taskId, extraEnvVars: options.extraEnvVars,
             cwd: options.cwd && fs.existsSync(options.cwd) ? options.cwd : undefined,
         })
@@ -235,6 +249,7 @@ async function startDockerCommand(
     try {
         const abortError = getExecutionAbortError(admission?.signal);
         if (abortError) throw abortError;
+        await extensionLaunchForDockerRun(command, args, options)?.beforeLaunch(extensionValidationWindow);
         const remainingMs = deadline.remaining();
         // Transfer the same budget to the subprocess timer. Keep timeout reporting
         // in terms of the caller's original limit and preserve partial output.
@@ -254,6 +269,7 @@ function runDockerCommand(
     command: string, args: string[], options: DockerCommandOptions,
     { ownershipContext, executionSignal, admission, remainingMs }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined; admission: AdmittedAgent | null; remainingMs: number },
 ): Promise<ExecutionResult> {
+    // eslint-disable-next-line complexity -- subprocess capture, cancellation and settlement share one execution lifecycle
     return new Promise((resolve, reject) => {
         const { timeout = 300000, cwd, onSessionId, onContainerId, worktreePath, stdinData, extraEnvVars, taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, preserveOutputOnTimeout = false, model, costCapExempt } = options;
         const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, remainingMs), taskId, ownershipContext?.attemptGeneration);
@@ -283,6 +299,9 @@ function runDockerCommand(
         // Built on read only (it costs the whole bounded output), never per chunk.
         const stdoutBuffer = new BoundedProviderRecordBuffer();
         const readStdout = (): string => stdoutBuffer.output;
+        const extensionSecrets = currentExtensionLaunch()?.secrets;
+        const extensionStdout = extensionSecrets ? new ExtensionStreamRedactor(extensionSecrets) : undefined;
+        const extensionStderr = extensionSecrets ? new ExtensionStreamRedactor(extensionSecrets) : undefined;
         const stdoutDecoder = new StringDecoder('utf8');
         const stderrDecoder = new StringDecoder('utf8');
         const state = createDockerExecutionState();
@@ -395,7 +414,8 @@ function runDockerCommand(
 
         const diagnosticTimer = scheduleProviderCapture(capture);
         child.stdout?.on('data', (data: Buffer) => {
-            const chunk = stdoutDecoder.write(data), ts = new Date().toISOString();
+            const decoded = stdoutDecoder.write(data);
+            const chunk = extensionStdout ? extensionStdout.push(decoded) : decoded, ts = new Date().toISOString();
             recordWatchdogActivity();
             stdoutBuffer.append(chunk);
             diagnosticStdout?.write(chunk);
@@ -403,7 +423,8 @@ function runDockerCommand(
             inspectSessionLines(chunk, ts);
         });
         child.stderr?.on('data', (data: Buffer) => {
-            const chunk = stderrDecoder.write(data);
+            const decoded = stderrDecoder.write(data);
+            const chunk = extensionStderr ? extensionStderr.push(decoded) : decoded;
             recordWatchdogActivity();
             stderrTail.append(chunk);
             workflowMarkers?.append(chunk);
@@ -424,9 +445,11 @@ function runDockerCommand(
             capture?.snapshot();
             clearTimeout(timeoutHandle);
             watchdog.stop();
-            const finalStdout = stdoutDecoder.end();
+            const stdoutEnd = stdoutDecoder.end();
+            const finalStdout = extensionStdout ? extensionStdout.push(stdoutEnd) + extensionStdout.finish() : stdoutEnd;
             if (finalStdout) stdoutBuffer.append(finalStdout);
-            const finalStderr = stderrDecoder.end();
+            const stderrEnd = stderrDecoder.end();
+            const finalStderr = extensionStderr ? extensionStderr.push(stderrEnd) + extensionStderr.finish() : stderrEnd;
             finishDiagnosticOutput(capture, finalStdout, finalStderr);
             stderrTail.append(finalStderr);
             const stderr = stderrTail.value;
