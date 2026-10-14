@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- related lifecycle regression cases share the same fixtures and module mocks */
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import { randomBytes } from 'node:crypto';

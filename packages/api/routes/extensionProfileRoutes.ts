@@ -60,7 +60,7 @@ export function createExtensionProfileRoutes(store = new ExtensionProfileStore(d
     githubSource: handle(async (req, actor) => {
       exact(req, ['repository', 'ref']);
       const { repository, ref } = req.body;
-      if (typeof repository !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || (ref !== undefined && (typeof ref !== 'string' || !ref.length || ref.length > 256 || /[\x00-\x20\x7f]/.test(ref)))) throw new ExtensionError(400, 'An authorized repository and branch or tag are required');
+      if (typeof repository !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || (ref !== undefined && (typeof ref !== 'string' || !ref.length || ref.length > 256 || Array.from(ref).some(character => character.charCodeAt(0) <= 32 || character.charCodeAt(0) === 127)))) throw new ExtensionError(400, 'An authorized repository and branch or tag are required');
       const token = await resolveGitHubMetadataToken(req); await verifyGitHubRepositoryAccess(repository, token);
       const [owner, repo] = repository.split('/'); const github = new Octokit({ auth: token, request: { timeout: EXTENSION_LIMITS.timeoutMs } });
       if (ref !== undefined) {

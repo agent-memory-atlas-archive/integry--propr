@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- subprocess capture, cancellation and settlement share one execution lifecycle */
 import { ExtensionStreamRedactor } from '../../extensions/extensionOutput.js';
 import { currentExtensionLaunch, extensionLaunchForDockerRun } from '../../extensions/extensionLaunch.js';
 import { assertNativeLogAdmission, prepareCommandCapture, finishDiagnosticOutput, scheduleProviderCapture, type DiagnosticAgent } from '../../diagnostics/managedLogRuntime.js';
@@ -268,6 +269,7 @@ function runDockerCommand(
     command: string, args: string[], options: DockerCommandOptions,
     { ownershipContext, executionSignal, admission, remainingMs }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined; admission: AdmittedAgent | null; remainingMs: number },
 ): Promise<ExecutionResult> {
+    // eslint-disable-next-line complexity -- subprocess capture, cancellation and settlement share one execution lifecycle
     return new Promise((resolve, reject) => {
         const { timeout = 300000, cwd, onSessionId, onContainerId, worktreePath, stdinData, extraEnvVars, taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, preserveOutputOnTimeout = false, model, costCapExempt } = options;
         const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, remainingMs), taskId, ownershipContext?.attemptGeneration);

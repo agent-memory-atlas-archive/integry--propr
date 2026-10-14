@@ -39,6 +39,7 @@ async function openDirectory(directory: string, create = false) {
   try {
     for (const component of path.resolve(directory).slice(1).split('/').filter(Boolean)) {
       const target = `/proc/self/fd/${handle.fd}/${component}`;
+      // eslint-disable-next-line max-depth -- directory handles and ownership checks stay within their try/finally cleanup boundaries
       if (create) try { await fs.mkdir(target, { mode: 0o700 }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
       const next = await fs.open(target, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
       await handle.close(); handle = next;
@@ -168,6 +169,8 @@ export async function stagingValidator(root: string, directory: string, bundles:
 }
 
 /** Reclaim dead local owners or expired foreign leases on this host and boot. */
+/* eslint-disable max-depth -- nested try/finally blocks retain root and parent handles across ownership checks */
+// eslint-disable-next-line complexity -- dead-owner and expired-lease checks share the handle-anchored deletion boundary
 export async function sweepOrphanedExtensionStaging(extensionsRoot: string): Promise<number> {
   if (process.platform !== 'linux') return 0;
   let root: Awaited<ReturnType<typeof openDirectory>>;
@@ -214,3 +217,4 @@ export async function sweepOrphanedExtensionStaging(extensionsRoot: string): Pro
   } finally { await root.close(); }
   return removed;
 }
+/* eslint-enable max-depth */

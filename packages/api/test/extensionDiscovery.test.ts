@@ -10,8 +10,12 @@ import type { AddressInfo } from 'node:net';
 import { createApiRequestRateLimiter } from '../requestRateLimits.js';
 import { ExtensionProfileStore } from '../../core/src/extensions/extensionProfileStore.js';
 import { up } from '../../core/src/db/migrations/20261013210000_extension_profiles.js';
-let repositoryChecks: string[] = [];
-let gitRequests: Array<{ route: string; params: any }> = [];
+
+type ProbeResponse = Readable & { statusCode: number; headers: Record<string, string> };
+type ProbeOptions = { headers: Record<string, string | undefined>; agent: boolean; servername?: string };
+
+const repositoryChecks: string[] = [];
+const gitRequests: Array<{ route: string; params: Record<string, string | number> }> = [];
 let beforeGitReply = async () => {};
 const sha = 'a'.repeat(40);
 await mock.module('../githubMetadataAuth.js', { namedExports: {
@@ -20,7 +24,7 @@ await mock.module('../githubMetadataAuth.js', { namedExports: {
 } });
 const { closeConnection } = await import('@propr/core');
 await mock.module('@octokit/core', { namedExports: { Octokit: class {
-  async request(route: string, params: any) {
+  async request(route: string, params: Record<string, string | number>) {
     gitRequests.push({ route, params }); await beforeGitReply();
     if (route.endsWith('/git/commits/{commit_sha}')) return { data: { sha: params.commit_sha, tree: { sha: 'c'.repeat(40) } } };
     if (route.endsWith('/git/trees/{tree_sha}')) return { data: { truncated: false, tree: [{ path: 'skills/test/SKILL.md', type: 'blob', mode: '100644', sha: 'd'.repeat(40), size: 100 }] } };
@@ -44,7 +48,7 @@ test('admin discovery is secret-free and bounded; Git refs resolve separately fr
   app.use(createApiRequestRateLimiter({ PROPR_API_RATE_LIMIT_MAX: '15' }));
   app.use(express.json());
   app.use((req, _res, next) => {
-    if (req.get('x-test-actor')) req.user = { id: req.get('x-test-actor')! } as any;
+    if (req.get('x-test-actor')) req.user = { id: req.get('x-test-actor')! } as typeof req.user;
     req.authorization = { role: 'admin', permissions: ['instance.manage_settings'], source: 'local' }; next();
   });
   app.post('/tools', routes.discoverTools); app.post('/source', routes.githubSource); app.post('/import', routes.importGithub);
@@ -59,17 +63,15 @@ test('admin discovery is secret-free and bounded; Git refs resolve separately fr
   }
   let tools: unknown[] = [{ name: 'lookup', description: 'PRIVATE_DESCRIPTION', inputSchema: { secret: 'PRIVATE_SCHEMA' } }, { name: 'bad name' }, { name: 'lookup' }, { name: 123 }, { name: 'update-docs' }];
   let calls = 0; let beforeProbeReply = async () => {};
-  t.mock.method(https, 'request', (url: URL, options: any, callback: any) => {
+  t.mock.method(https, 'request', (url: URL, options: ProbeOptions, callback: (response: ProbeResponse) => void) => {
     assert.equal(url.href, 'https://8.8.8.8/mcp');
     assert.equal(options.headers.Host, '8.8.8.8');
     calls++; assert.equal(options.headers.Authorization, undefined); assert.equal(options.agent, false);
-    const request = new EventEmitter() as any;
-    request.end = async (payload: string) => {
+    const request = Object.assign(new EventEmitter(), { end: async (payload: string) => {
       assert.deepEqual(JSON.parse(payload), {jsonrpc:'2.0',id:1,method:'tools/list'}); await beforeProbeReply();
       const response = Object.assign(Readable.from([Buffer.from(JSON.stringify({jsonrpc:'2.0',id:1,result:{tools}}))]), {statusCode:200,headers:{'content-type':'application/json'}});
       callback(response); response.on('end', () => request.emit('close'));
-    };
-    request.destroy = () => request.emit('close'); return request;
+    }, destroy: () => request.emit('close') }); return request;
   });
   const discovered = await post('/tools', {url:'https://8.8.8.8/mcp'});
   assert.equal(discovered.status, 200); assert.deepEqual(await discovered.json(), {tools:['lookup','update-docs']});
@@ -107,20 +109,18 @@ test('MCP transport dials vetted addresses while retaining endpoint Host, TLS id
   let addresses = [{ address: '8.8.8.8', family: 4 }];
   let calls = 0;
   let expectedHost = 'tools.example.com';
-  t.mock.method(dns, 'lookup', async () => addresses as any);
-  t.mock.method(https, 'request', (url: URL, options: any, callback: any) => {
+  t.mock.method(dns, 'lookup', async () => addresses);
+  t.mock.method(https, 'request', (url: URL, options: ProbeOptions, callback: (response: ProbeResponse) => void) => {
     calls++;
     assert.equal(url.hostname, addresses[0].family === 6 ? `[${addresses[0].address}]` : addresses[0].address);
     assert.equal(url.pathname, '/mcp%2Ftools');
     assert.equal(options.headers.Host, expectedHost);
     assert.equal(options.servername, expectedHost);
     assert.equal(options.agent, false);
-    const request = new EventEmitter() as any;
-    request.end = () => {
+    const request = Object.assign(new EventEmitter(), { end: () => {
       const response = Object.assign(Readable.from([Buffer.from('{}')]), { statusCode: 200, headers: { 'content-type': 'application/json' } });
       callback(response); response.on('end', () => request.emit('close'));
-    };
-    request.destroy = () => request.emit('close');
+    }, destroy: () => request.emit('close') });
     return request;
   });
   const endpoint = 'https://tools.example.com/mcp%2Ftools';

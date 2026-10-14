@@ -11,6 +11,7 @@ export function skillPath(value: string): string {
   if (!value || value.length > 240 || /[\\\x00-\x1f:]/.test(value) || value.startsWith('/') || value.split('/').some(v => !v || v === '.' || v === '..') || posix.normalize(value) !== value) fail();
   return value;
 }
+// eslint-disable-next-line complexity -- archive and skill validation keep all rejection checks at the untrusted input boundary
 export function validateSkillFiles(files: SkillFile[]): { digest: string; name: string; requirements: string[]; bytes: number; files: SkillFile[] } {
   if (!files.length || files.length > EXTENSION_LIMITS.files) fail();
   const paths = new Set<string>(); const components = new Map<string, string>(); let bytes = 0;
@@ -46,6 +47,7 @@ export function validateSkillFiles(files: SkillFile[]): { digest: string; name: 
 }
 
 /** Strict ustar regular files/directories only. PAX/GNU extensions and all links are rejected. */
+// eslint-disable-next-line complexity -- archive and skill validation keep all rejection checks at the untrusted input boundary
 export function readSkillArchive(input: Buffer): SkillFile[] {
   if (input.length > EXTENSION_LIMITS.archiveBytes) fail();
   let archive = input;

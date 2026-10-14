@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- related lifecycle regression cases share the same fixtures and module mocks */
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import knex from 'knex';
@@ -359,7 +360,7 @@ test('submission routing rejects extension selections on unsupported runtimes be
     if (['claude', 'codex'].includes(type)) {
       assert.equal((await routing({ agentAlias: 'selected', extensionProfile }, registry, labels, async () => ({ agentAlias: 'selected', model: 'model' }))).agentAlias, 'selected');
     } else {
-      await assert.rejects(routing({ agentAlias: 'selected', extensionProfile }, registry, labels, async () => ({ agentAlias: 'selected', model: 'model' })), error => (error as any).status === 400 && /Claude or Codex/.test((error as Error).message));
+      await assert.rejects(routing({ agentAlias: 'selected', extensionProfile }, registry, labels, async () => ({ agentAlias: 'selected', model: 'model' })), error => (error as Error & { status?: number }).status === 400 && /Claude or Codex/.test((error as Error).message));
       assert.equal(labelCalls, 0);
     }
     assert.equal((await routing({ agentAlias: 'selected' }, registry, labels)).agentAlias, 'selected');
@@ -567,7 +568,7 @@ test('extension submission routing rejects label round trips that change the ali
   for (const resolved of [{ agentAlias: 'other', model: 'model' }, { agentAlias: 'selected', model: 'other' }]) {
     await assert.rejects(routing(body, registry, async () => 'llm-selection', async label => {
       assert.equal(label, 'selection'); return resolved;
-    }), error => (error as any).status === 400 && /routed exactly/.test((error as Error).message));
+    }), error => (error as Error & { status?: number }).status === 400 && /routed exactly/.test((error as Error).message));
   }
   assert.deepEqual(await routing(body, registry, async () => 'llm-selection', async () => ({ agentAlias: 'selected', model: 'model' })), { agentAlias: 'selected', model: 'model', routingLabel: 'llm-selection', runtime: 'codex' });
 });

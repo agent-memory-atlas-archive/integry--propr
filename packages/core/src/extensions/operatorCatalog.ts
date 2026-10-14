@@ -51,6 +51,7 @@ export class OperatorCatalog {
   async publicEntries(): Promise<ExtensionCatalogEntry[]> {
     return (await this.entries()).map(e => ({ id: e.id, digest: operatorCatalogDigest(e), tools: e.tools, capability: e.capability, secrets: { count: Object.keys(this.secrets(e)).length, configured: Object.values(this.secrets(e)).every(Boolean) } }));
   }
+  // eslint-disable-next-line max-params -- catalog identity, digest, tool selection, capability and launch validation are explicit inputs
   async resolve(id: string, digest: string, tools: string[], capability: 'read' | 'write', requireSecrets = true): Promise<OperatorCatalogEntry> {
     const entry = (await this.entries()).find(e => e.id === id);
     if (!entry || operatorCatalogDigest(entry) !== digest) throw new ExtensionError(409, 'Operator catalog entry unavailable or digest changed');

@@ -22,7 +22,7 @@ test('server mounts extension gateway before auth, management after auth, and ar
   const auth = await import('../auth.js');
   mock.module('../auth.js', { namedExports: { ...auth, setupAuth: () => ({ engineMiddleware: [], authenticate: () => undefined }) } });
   const endpoint = await import('../../core/src/extensions/endpointPolicy.js');
-  mock.module('../../core/src/extensions/endpointPolicy.js', { namedExports: { ...endpoint, requestExtensionMcp: async (_url: string, body: any) => body.method === 'tools/call' ? ({ jsonrpc: '2.0', id: body.id, error: { code: -32602, message: 'upstream-secret', data: { secret: 'upstream-secret' } } }) : ({ jsonrpc: '2.0', id: body.id, result: { tools: [{ name: 'lookup', inputSchema: { type: 'object' } }] } }) } });
+  mock.module('../../core/src/extensions/endpointPolicy.js', { namedExports: { ...endpoint, requestExtensionMcp: async (_url: string, body: { method?: string; id?: unknown }) => body.method === 'tools/call' ? ({ jsonrpc: '2.0', id: body.id, error: { code: -32602, message: 'upstream-secret', data: { secret: 'upstream-secret' } } }) : ({ jsonrpc: '2.0', id: body.id, result: { tools: [{ name: 'lookup', inputSchema: { type: 'object' } }] } }) } });
   process.env.PROPR_API_DISABLE_AUTOSTART = '1';
   const { app, setupRoutes, initRedis } = await import('../server.js');
   const core = await import('@propr/core');

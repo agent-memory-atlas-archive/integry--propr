@@ -52,6 +52,7 @@ export async function authorizeTaskSubmissionRepository(req: Request, repository
   return config;
 }
 
+// eslint-disable-next-line complexity -- extension routing validates the selected alias and model before routing side effects
 export async function routing(body: { agentAlias?: string; model?: string; extensionProfile?: import('@propr/shared').ExtensionSelection | null }, registry = AgentRegistry.getInstance(), labelLookup = getLlmLabel, labelResolution = resolveLlmLabel) {
   await registry.ensureInitialized();
   const defaults = !body.agentAlias ? await resolvePlanIssueDefaultSelection() : null;
@@ -327,6 +328,7 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
   const resolveRouting = services.routing ?? routing;
   const getOctokit = services.getOctokit ?? getAuthenticatedOctokit;
   const processingLabels = services.processingLabels ?? loadPrimaryProcessingLabels;
+  // eslint-disable-next-line max-params -- submission and routing inputs remain explicit at the queue publication boundary
   const checkExtensions = async (actor: string, profile: NonNullable<SubmissionPayload['extensionProfile']>, agentAlias: string, runtime: string | undefined, repository: string, allowWrite: boolean) => {
     try {
       await new ExtensionProfileStore(db).assertLaunch(actor, profile, { agentAlias, runtime: runtime ?? '', repositories: [repository], allowWrite }, false);

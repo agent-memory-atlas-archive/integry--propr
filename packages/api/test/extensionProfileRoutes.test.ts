@@ -11,9 +11,13 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
+import type { ExtensionProfileInput } from '@propr/shared';
 import { ExtensionProfileStore } from '../../core/src/extensions/extensionProfileStore.js';
 import { up } from '../../core/src/db/migrations/20261013210000_extension_profiles.js';
 import { createApiRequestRateLimiter } from '../requestRateLimits.js';
+
+type ProbeResponse = Readable & { statusCode: number; headers: Record<string, string> };
+type ProbeOptions = { headers: Record<string, string | undefined>; agent: boolean; servername?: string };
 
 test('extension HTTP boundary requires fresh durable administration, preflight JSON, and secret-free projections', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-api-'));
@@ -66,7 +70,7 @@ test('extension HTTP boundary requires fresh durable administration, preflight J
   assert.ok(!JSON.stringify(inventory).includes('SKILL_CONTENT_SENTINEL'));
   assert.ok(!JSON.stringify(inventory).includes('files_json'));
   const sentinel = 'UNMISTAKABLE_API_EXTENSION_SENTINEL';
-  const input = { version: 1, name: 'Synthetic tools', enabled: true, agentScope: [], repositoryScope: [], mcpServers: [{ kind: 'https', name: 'synthetic', url: 'https://8.8.8.8/mcp', enabled: true, tools: ['lookup'], capability: 'read', authentication: 'bearer' }], skillBundleIds: [] };
+  const input = { version: 1, name: 'Synthetic tools', enabled: true, agentScope: [], repositoryScope: [], mcpServers: [{ kind: 'https', name: 'synthetic', url: 'https://8.8.8.8/mcp', enabled: true, tools: ['lookup'], capability: 'read', authentication: 'bearer' }], skillBundleIds: [] } satisfies ExtensionProfileInput;
   // Every cookie-authenticated mutation must reject browser-simple requests
   // and JSON requests lacking the custom header that forces a CORS preflight.
   for (const route of ['/profiles', '/delete', '/validate', '/skills/archive', '/skills/github', '/skills/github-source', '/tools/discover']) {
@@ -100,25 +104,27 @@ test('extension HTTP boundary requires fresh durable administration, preflight J
   // Native restores deliberately remove ciphertext. Both public and authenticated
   // descriptors must produce connectivity results instead of an unseal error.
   let validationRequests = 0;
-  t.mock.method(https, 'request', (_url: unknown, options: any, callback: any) => {
+  t.mock.method(https, 'request', (_url: unknown, options: ProbeOptions, callback: (response: ProbeResponse) => void) => {
     validationRequests++;
     assert.equal(options.headers.Authorization, undefined);
-    const request = new EventEmitter() as any;
-    request.end = () => {
+    const request = Object.assign(new EventEmitter(), { end: () => {
       const response = Object.assign(Readable.from([Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }))]), { statusCode: 200, headers: { 'content-type': 'application/json' } });
       callback(response); response.on('end', () => request.emit('close'));
-    };
-    request.destroy = () => request.emit('close');
+    }, destroy: () => request.emit('close') });
     return request;
   });
-  for (const authentication of ['none', 'bearer']) {
-    const restored = await store.save('1', { ...input, mcpServers: [{ ...input.mcpServers[0], enabled: true, authentication }] } as any, authentication === 'bearer' ? { synthetic: sentinel } : {});
+  for (const authentication of ['none', 'bearer'] as const) {
+    const restored = await store.save('1', { ...input, mcpServers: [{ ...input.mcpServers[0], enabled: true, authentication }] }, authentication === 'bearer' ? { synthetic: sentinel } : {});
     await database('extension_profile_revisions').where({ profile_id: restored.profileId, revision: restored.revision }).update({ secrets_encrypted: '' });
     const validated = await fetch(base + '/validate', { method: 'POST', headers, body: JSON.stringify({ selection: { instanceId: restored.instanceId, profileId: restored.profileId, revision: restored.revision } }) });
     assert.equal(validated.status, 200);
     assert.deepEqual(await validated.json(), { results: [{ name: 'synthetic', reachable: true, status: 'reachable' }] });
   }
   assert.equal(validationRequests, 2);
+  for (const character of ['\x00', '\x1f', ' ', '\x7f']) {
+    const source = await fetch(base + '/skills/github-source', { method: 'POST', headers, body: JSON.stringify({ repository: 'fixture/repo', ref: `refs/heads/test${character}ref` }) });
+    assert.equal(source.status, 400, 'Git refs reject controls, spaces and DEL before repository access');
+  }
   for (const commit of ['main', 'v1.0', 'a'.repeat(39)]) assert.equal((await fetch(base + '/skills/github', { method: 'POST', headers, body: JSON.stringify({ repository: 'fixture/repo', commit, directory: 'skills/test' }) })).status, 400);
   const selection = { instanceId: profile.instanceId, profileId: profile.profileId, revision: profile.revision };
   assert.equal((await fetch(base + '/delete', { method: 'POST', headers, body: JSON.stringify({ selection: { ...selection, instanceId: randomUUID() } }) })).status, 404);

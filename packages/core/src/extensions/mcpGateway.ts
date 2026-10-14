@@ -4,6 +4,7 @@ import { requestExtensionMcp, extensionResponseWireBytes, resolveExtensionEndpoi
 import { redactExtensionOutput } from './extensionOutput.js';
 export { redactExtensionOutput } from './extensionOutput.js';
 
+// eslint-disable-next-line max-params, complexity -- protocol validation, policy enforcement and budget release share one gateway boundary
 export async function extensionGatewayCall(store: ExtensionProfileStore, token: string, serverName: string, body: unknown, send = requestExtensionMcp): Promise<unknown> {
   const { snapshot, secrets, network, allowWrite } = await store.grantSnapshot(token);
   // Failed/oversized requests consume the full reservation, so failures cannot

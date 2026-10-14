@@ -27,6 +27,7 @@ export function extensionGatewayBaseUrl(environment: NodeJS.ProcessEnv = process
   url.pathname = url.pathname.replace(/\/api\/mcp\/?$/, '/api/extensions/mcp');
   return url.toString();
 }
+// eslint-disable-next-line complexity -- extension authority, staging and physical launch fencing share one cleanup boundary
 export async function executeWithExtensions(config: AgentConfig, options: AgentTaskOptions, execute: (options: AgentTaskOptions) => Promise<AgentExecutionResult>, store = new ExtensionProfileStore(db)): Promise<AgentExecutionResult> {
   if (!options.extensionProfile) return execute(options);
   if (options.executionMode === 'goal' || !options.taskId || !options.extensionActorId) throw new ExtensionError(400, 'Extensions require an attributed isolated task run');

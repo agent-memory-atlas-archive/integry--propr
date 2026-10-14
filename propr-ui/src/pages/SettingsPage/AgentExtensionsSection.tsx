@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- profile editing and discovery share the same editor state and callbacks */
 import { useEffect, useId, useState, type Dispatch, type SetStateAction } from 'react';
 import type {
   InstanceCatalogResponse,
@@ -91,6 +92,7 @@ function ItemPicker({ label, options, selected, onChange, hint, allowManual = fa
   );
 }
 
+// eslint-disable-next-line complexity -- profile editing and discovery share the same editor state and callbacks
 function ServerEditor({
   server,
   catalog,

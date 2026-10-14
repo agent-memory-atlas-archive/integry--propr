@@ -65,6 +65,7 @@ export class ExtensionProfileStore {
       } else await resolveExtensionEndpoint(server.url);
     }
     if (operatorSecretValues.some(value => value && JSON.stringify(parsed).includes(value))) throw new ExtensionError(400, 'Secrets cannot appear in public profile fields');
+    // eslint-disable-next-line complexity -- revision fencing, credential rotation and snapshot persistence share one transaction
     return this.database.transaction(async trx => {
       await this.authorize(actor, trx); const instanceId = await this.instanceId(trx);
       const profileId = expected?.profileId ?? randomUUID(); const now = Date.now();
@@ -183,6 +184,7 @@ export class ExtensionProfileStore {
       logger.warn('Could not release extension gateway reservation; reserved budget retained');
     }
   }
+  // eslint-disable-next-line max-params -- actor, immutable snapshot, task identity, network policy and write authority are explicit grant inputs
   async createGrant(actor: string, snapshot: ExtensionProfileRevision, taskId: string, network: ExtensionGrantNetwork = { mode: 'open', allow: [], instanceAllow: [] }, allowWrite = false): Promise<string> {
     await this.read(actor, { instanceId: snapshot.instanceId, profileId: snapshot.profileId, revision: snapshot.revision });
     const token = randomBytes(32).toString('base64url');

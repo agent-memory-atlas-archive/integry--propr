@@ -251,6 +251,7 @@ function defaultAgentType(agents: AgentConfig[], configuredAlias: string | null)
  * - propr_mcp, requested by the capability or by the acting step of preview
  *   and auto runs, is only used with agent types that support it.
  */
+// eslint-disable-next-line complexity -- runtime validation coordinates agent, model, network and extension compatibility
 export async function validateAgentDefinitionRuntime(
   definition: StoredAgentDefinition,
   deps: AgentRunTriggerDependencies = {},
