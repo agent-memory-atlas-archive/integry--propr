@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { handleApiResponse, setDesktopConnectionScope } from '../api/apiClient';
 import { Zap } from 'lucide-react';
@@ -25,20 +25,26 @@ describe('Desktop GitHub grant recovery', () => {
     await act(async () => {
       render(<DesktopExperience adapters={adapters}><CreationDialog title="New task" icon={Zap} description="Describe your task" closeLabel="Close task" onClose={closeTask}><input aria-label="Original task" defaultValue="Work in progress" /></CreationDialog></DesktopExperience>);
     });
-    const task = screen.getByLabelText('Original task');
+    const dialog = screen.getByRole('dialog', { name: 'New task' });
+    const task = within(dialog).getByRole('textbox', { name: 'Original task' });
+    fireEvent.change(task, { target: { value: 'Updated work in progress' } });
     const invalidate = vi.fn();
     setDesktopConnectionScope({ bridge: { connection: { invalidate } } as never, profileId: remoteProfile.id, transportScope: 'current-scope' });
     await act(async () => {
       await expect(handleApiResponse(new Response(JSON.stringify({ code: 'GITHUB_REAUTH_REQUIRED' }), { status: 403 }))).rejects.toThrow('GitHub authorization');
     });
-    expect(screen.getByRole('heading', { name: 'Authorize GitHub repository access' })).toBeInTheDocument();
-    expect(screen.getByLabelText('Original task')).toBe(task);
-    expect(task).toHaveValue('Work in progress');
-    const notice = screen.getByRole('region');
-    expect(notice.closest('[role="dialog"]')).toBe(screen.getByRole('dialog'));
-    fireEvent.keyDown(screen.getByRole('button', { name: 'Return to my action' }), { key: 'Escape' });
+    expect(screen.getByRole('dialog', { name: 'New task' })).toBe(dialog);
+    const notice = within(dialog).getByRole('region', { name: 'Authorize GitHub repository access' });
+    expect(notice).toBeVisible();
+    expect(within(notice).getByRole('heading', { name: 'Authorize GitHub repository access' })).toBeVisible();
+    expect(within(notice).getByRole('button', { name: 'Sign in with GitHub in browser' })).toBeEnabled();
+    expect(within(dialog).getByRole('textbox', { name: 'Original task' })).toBe(task);
+    expect(task).toHaveValue('Updated work in progress');
+    fireEvent.keyDown(within(notice).getByRole('button', { name: 'Return to my action' }), { key: 'Escape' });
     expect(closeTask).not.toHaveBeenCalled();
-    expect(task).toHaveValue('Work in progress');
+    expect(within(dialog).queryByRole('region', { name: 'Authorize GitHub repository access' })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('textbox', { name: 'Original task' })).toBe(task);
+    expect(task).toHaveValue('Updated work in progress');
     expect(invalidate).not.toHaveBeenCalled();
     expect(adapters.authentication.authenticate).not.toHaveBeenCalled();
   });
