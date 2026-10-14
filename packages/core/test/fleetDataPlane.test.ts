@@ -596,6 +596,7 @@ for (const revoke of [false, true]) {
       if (revoke && validations === 6) { f.authority.placementGeneration = 'revoked'; await f.writeAuthority(); }
       await authorize();
     })));
+    const transferStarted = performance.now();
     const transfer = new Promise<void>((resolve, reject) => {
       const req = request({ socketPath: f.server.address() as string, path: '/v1/invoke', method: 'POST', headers: { 'Content-Type': 'application/json' } }, res => {
         assert.equal(res.statusCode, 200);
@@ -609,7 +610,10 @@ for (const revoke of [false, true]) {
     if (revoke) { await assert.rejects(transfer); assert.ok(received < size); }
     else { await transfer; assert.equal(received, size); }
     assert.ok(validations >= 6, `validations=${validations}`);
-    assert.ok(validations < size / (32 * 1024) + 100, `bounded validation count=${validations}`);
+    // Two checks per 64 KiB read plus the initial/final checks, and a fence
+    // every 250 ms even while backpressured. Slow CI adds legitimate fences.
+    const timedFences = Math.ceil((performance.now() - transferStarted) / 250);
+    assert.ok(validations <= 2 * Math.ceil(size / (64 * 1024)) + 2 + timedFences, `bounded validation count=${validations}`);
     assert.ok(maxBuffered <= 256 * 1024, `buffered=${maxBuffered}`);
     assert.ok(maxAhead <= 2 * 1024 ** 2, `producer lead=${maxAhead}`);
     await f.server.shutdown();

@@ -5,6 +5,7 @@ await mock.module('@propr/core', {
     namedExports: {
         logger: { info: () => undefined, warn: () => undefined },
         TaskStates: {},
+        getExecutionLogDirectory: () => "/tmp/unused-linked-issue-test-logs",
         db: () => undefined,
         filterCommentByAuthor: () => true,
     },

@@ -1,7 +1,6 @@
 import { Redis } from 'ioredis';
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 import logger from '../logger.js';
 import { getModelPricing } from '../../services/pricingService.js';
 import { getOpenRouterId, getModelName } from '../../config/modelAliases.js';
@@ -15,6 +14,11 @@ import { redactVisualPreviewPaths } from '../../services/visualPreviewPaths.js';
 import { redactSecrets } from '../secretRedaction.js';
 
 export { redactSecrets };
+
+/** The launcher mounts logs/ at the same path in the worker and API. */
+export function getExecutionLogDirectory(): string {
+    return path.resolve('logs', 'executions');
+}
 
 interface IssueRef {
     number: number;
@@ -128,7 +132,7 @@ async function calculateExecutionCost(
 
 export async function createLogFiles(claudeResultInput: unknown, issueRef: IssueRef): Promise<LogFiles> {
     const claudeResult = claudeResultInput as ClaudeResult;
-    const logDir = path.join(os.tmpdir(), 'claude-logs');
+    const logDir = getExecutionLogDirectory();
     await fs.promises.mkdir(logDir, { recursive: true });
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
