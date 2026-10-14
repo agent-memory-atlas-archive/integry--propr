@@ -28,8 +28,16 @@ async function stubRuns(page: Page, followups: string[]) {
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
   test(`${viewport.width}px the newest run offers its follow-up commands and an earlier run offers none`, async ({ page }) => {
     const followups: string[] = [];
+    const reviews: string[] = [];
     await page.setViewportSize(viewport);
     await stubRuns(page, followups);
+    await page.route(`**/api/tasks/${newest}/review`, route => {
+      reviews.push(newest);
+      return route.fulfill({ status: 202, json: {
+        success: true, state: 'queued', commandMode: 'review', sourceTaskId: newest,
+        posted: true, commentId: 42, jobId: 'review-42',
+      } });
+    });
     await page.goto(`/tasks/${earlier}`);
     await expect(page.getByTestId('run-timeline-run')).toHaveCount(4);
     await expect(page.getByRole('button', { name: /^Send \// })).toHaveCount(0);
@@ -54,10 +62,11 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await capture(page, `task-latest-run-commands-${viewport.width}`);
 
     await review.click();
-    await expect(page.getByText('Sent /review to PR #2663.')).toBeVisible();
+    await expect(page.getByText('Queued /review for PR #2663.')).toBeVisible();
     await expect(review).toBeDisabled();
     await review.click({ force: true });
-    expect(followups).toEqual([`${newest} /review`]);
+    expect(reviews).toEqual([newest]);
+    expect(followups).toEqual([]);
   });
 }
 
