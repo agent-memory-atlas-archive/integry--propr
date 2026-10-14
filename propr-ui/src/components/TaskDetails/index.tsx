@@ -24,9 +24,9 @@ import { useToast } from '../ui/useToast';
 import { postTaskFollowup } from '../../api/proprApi';
 import { useConsumedReviewCommentIds, useTokenUsage } from './useDerivedTaskData';
 import { useClickOutsideCollapse } from './useClickOutsideCollapse';
-import { isReviewRun, type TaskRunEntry } from '../TaskList/rowModel';
+import type { TaskRunEntry } from '../TaskList/rowModel';
 import DesktopTaskHeader from './DesktopTaskHeader';
-import { useTaskHeaderView } from './useTaskHeaderView';
+import { getLogCommandMode, useTaskHeaderView } from './useTaskHeaderView';
 import { useLiveRunStop } from './useLiveRunStop';
 import { useTaskAssignment } from './useTaskAssignment';
 import LatestRunCommands from './LatestRunCommands';
@@ -158,12 +158,6 @@ interface TaskDetailsProps {
   paneControls?: React.ReactNode;
 }
 
-/** The run's kind for its log's header; the run list knows a review by its type even when the task's own record doesn't say. */
-const getLogCommandMode = (commandMode: string | undefined, runs: TaskRunEntry[] | undefined, taskId: string | undefined) => {
-  if (commandMode === 'review' || isReviewRun(runs?.find(run => run.task.id === taskId)?.type)) return 'review';
-  return commandMode;
-};
-
 /** The timeline's and the trace's headers share a height, so their rules line up side by side. */
 const PANE_HEADER_HEIGHT = 'min-h-[2.75rem]';
 
@@ -216,7 +210,11 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
   const taskId = taskIdProp ?? params.taskId;
   const navigate = useNavigate();
   const { addToast } = useToast();
-  const taskData = useTaskData(taskId);
+  const rawTaskData = useTaskData(taskId);
+  const commandMode = getLogCommandMode(rawTaskData.taskInfo?.commandMode, runs, taskId);
+  const taskData = useMemo(() => commandMode === 'review' && rawTaskData.taskInfo
+    ? { ...rawTaskData, taskInfo: { ...rawTaskData.taskInfo, commandMode: 'review' as const } }
+    : rawTaskData, [rawTaskData, commandMode]);
   const promptData = usePromptData();
   const logFilesData = useLogFilesData();
   const thinkingLog = useThinkingLog(taskData.liveDetails, taskData.history);

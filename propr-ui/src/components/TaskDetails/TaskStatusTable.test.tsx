@@ -5,6 +5,40 @@ import type { HistoryItem, NetworkEgressSummary } from './types';
 
 const at = (second: number) => new Date(Date.UTC(2026, 9, 1, 0, 50, second)).toISOString();
 
+describe.each(['rail', 'branch'] as const)('%s post-processing labels', (variant) => {
+  it.each(['review', 'fix', 'default', 'ultrafix', undefined] as const)('labels post-processing for mode %s', (commandMode) => {
+    render(<TaskStatusTable variant={variant} commandMode={commandMode} history={[
+      { state: 'post_processing', timestamp: at(1) },
+    ]} />);
+    const isReview = commandMode === 'review';
+    expect(screen.getAllByText(isReview ? 'Finalizing Review' : 'Creating Pull Request').length).toBeGreaterThan(0);
+    expect(screen.queryByText(isReview ? 'Creating Pull Request' : 'Finalizing Review')).not.toBeInTheDocument();
+  });
+
+  it('keeps review labels after phase updates and preserves metadata event labels', () => {
+    const history = [{ state: 'POST_PROCESSING', timestamp: at(1) }];
+    const { rerender } = render(<TaskStatusTable variant={variant} commandMode="review" history={history} />);
+    rerender(<TaskStatusTable variant={variant} commandMode="review" history={[
+      ...history,
+      { state: 'POST_PROCESSING', timestamp: at(2) },
+      { state: 'POST_PROCESSING', timestamp: at(3), metadata: { event: 'replacement.skipped' } },
+      { state: 'COMPLETED', timestamp: at(4) },
+    ]} />);
+    if (variant === 'branch') {
+      const steps = within(screen.getByRole('list', { name: 'Run steps' })).getAllByRole('listitem');
+      expect(steps).toHaveLength(3);
+      for (const [index, label] of ['Finalizing Review', 'Replacement Skipped', 'Review Completed'].entries()) {
+        expect(steps[index]).toHaveTextContent(label);
+      }
+    } else {
+      expect(screen.getAllByText('Finalizing Review')).toHaveLength(1);
+      expect(screen.getByText('Replacement Skipped')).toBeInTheDocument();
+      expect(screen.getByText('Review Completed')).toBeInTheDocument();
+    }
+    expect(screen.queryByText('Creating Pull Request')).not.toBeInTheDocument();
+  });
+});
+
 describe('Task timeline lifecycle', () => {
   it('updates a running phase in place and measures it from its original start', () => {
     const first = { state: 'PROCESSING', timestamp: at(29) };

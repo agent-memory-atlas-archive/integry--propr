@@ -180,7 +180,7 @@ function runDelta(task: Task, rowTitle: string): { type: string | null; delta: s
   const delta = subtitle && subtitle !== rowTitle ? subtitle
     : isMeaningful(title) && title !== rowTitle ? title
       : null;
-  return { type: runAction(workflow, delta), delta };
+  return { type: task.commandMode === 'review' ? 'Review' : task.commandMode === 'fix' ? 'Fix' : runAction(workflow, delta), delta };
 }
 
 /** One line of a failure reason; stack traces and log dumps stay on the task page. */

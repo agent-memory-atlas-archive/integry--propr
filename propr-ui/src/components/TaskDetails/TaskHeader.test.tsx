@@ -1,9 +1,17 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import TaskHeader from './TaskHeader';
+import TaskHeader, { TaskStatusBadge } from './TaskHeader';
 import type { TaskInfo } from './types';
 
 describe('TaskHeader', () => {
+  it.each(['processing', 'claude_execution', 'claude_execution_started', 'post_processing'])(
+    'marks a review as Review during %s', currentStatus => {
+      render(<TaskStatusBadge taskInfo={{ commandMode: 'review' } as TaskInfo} currentStatus={currentStatus} />);
+      expect(screen.getByTestId('task-status-badge')).toHaveTextContent('Review');
+      expect(screen.queryByText(/Implementing|Fixing|Creating PR/)).not.toBeInTheDocument();
+    }
+  );
+
   it('titles the task the way the task list row does', () => {
     const taskInfo = {
       title: 'Ultrafix PR #2664: [2659 by GPT-6 Astra] Stop work when an issue or PR withdraws intent',

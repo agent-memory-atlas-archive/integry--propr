@@ -2,7 +2,22 @@ import { useEffect } from 'react';
 import { getHistoryDerivedData } from './useHistoryData';
 import { useCommitInfo, useTotalDuration } from './useDerivedTaskData';
 import { pickTokenUsage, rememberTaskHead, useTaskHeadSummary, type TaskHeadSummary } from './useTaskHeadSummary';
-import type { TaskRunEntry } from '../TaskList/rowModel';
+import { isReviewRun, type TaskRunEntry } from '../TaskList/rowModel';
+
+/** The run list knows a review by its type even when the task's own record doesn't say. */
+export function getLogCommandMode(commandMode: string | undefined, runs: TaskRunEntry[] | undefined, taskId: string | undefined) {
+  if (commandMode === 'review' || isReviewRun(runs?.find(run => run.task.id === taskId)?.type)) return 'review';
+  return commandMode;
+}
+
+/** Prefer the newest run's history and fill in its missing review mode from the list. */
+function getHeaderSource(headSummary: TaskHeadSummary | null, own: TaskHeadSummary, head: TaskRunEntry | undefined) {
+  const rawSource = headSummary && headSummary.history.length > 0 ? headSummary : own;
+  const source = rawSource === headSummary && head?.type?.toLowerCase() === 'review' && rawSource.taskInfo && !rawSource.taskInfo.commandMode
+    ? { ...rawSource, taskInfo: { ...rawSource.taskInfo, commandMode: 'review' as const } }
+    : rawSource;
+  return { rawSource, source };
+}
 
 interface TaskHeaderView {
   headerProps: { taskInfo: TaskHeadSummary['taskInfo']; currentStatus: string };
@@ -72,7 +87,7 @@ export function useTaskHeaderView(taskId: string | undefined, runs: TaskRunEntry
   // The list's account of the newest run: when it changes, e.g. a finished run is started again, the header reads it again.
   const headListState = head ? [head.task.status, head.task.processedAt, head.task.completedAt].join('|') : undefined;
   const headSummary = useTaskHeadSummary(run ? head?.task.id : undefined, headListState);
-  const source = headSummary && headSummary.history.length > 0 ? headSummary : own;
+  const { rawSource, source } = getHeaderSource(headSummary, own, head);
   const duration = useTotalDuration(source.history);
   const commitInfo = useCommitInfo(source.history, source.taskInfo);
   const runDuration = useTotalDuration(own.history);
@@ -86,7 +101,7 @@ export function useTaskHeaderView(taskId: string | undefined, runs: TaskRunEntry
   const derived = getHistoryDerivedData(source.history, source.taskInfo);
   const runDerived = source === own ? derived : getHistoryDerivedData(own.history, own.taskInfo);
   // Until the newest run's history is read, the list's account of it decides.
-  const headActive = source === headSummary
+  const headActive = rawSource === headSummary
     ? derived.isTaskActive
     : head?.outcome === 'active' || head?.outcome === 'waiting';
   return {

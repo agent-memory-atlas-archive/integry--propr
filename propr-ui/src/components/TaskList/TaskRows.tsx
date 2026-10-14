@@ -274,7 +274,7 @@ export const EarlierRunsList: React.FC<{
               {/* The slot stays when a run names no action, so every summary starts at the same edge. */}
               <span className="w-20 flex-none">{run.type && <WorkTypeBadge type={run.type} compact />}</span>
               <span className={`task-run-summary min-w-0 truncate ${run.summarized ? 'text-slate-700' : 'text-slate-500'}`} title={run.delta}>{run.delta}</span>
-              {!QUIET_RUN_STATUSES.has(status) && <span className="flex-none">{getStatusPill(status)}</span>}
+              {!QUIET_RUN_STATUSES.has(status) && <span className="flex-none">{getStatusPill(status, run.type)}</span>}
               <PreviewCountBadge count={run.previewCount} />
               {score != null && <span data-testid="run-score" className="ml-auto flex-none"><ScoreBadge score={score} bracketed className="!w-auto !min-w-0 !max-w-none !text-xs" label="Review score" /></span>}
             </span>
@@ -318,7 +318,7 @@ export const TaskQueueRow: React.FC<TaskQueueRowProps> = ({ row, prNumber, expan
           <RollupLine row={row} expanded={expanded} runsId={runsId} onToggle={onToggle} selectsInPlace={selectsInPlace} />
         </div>
         <div role="cell" className="min-w-0"><TaskRepository row={row} /></div>
-        <div role="cell" className="min-w-0">{getStatusPill(getDisplayStatus(task))}</div>
+        <div role="cell" className="min-w-0">{getStatusPill(getDisplayStatus(task), row.type)}</div>
         <div role="cell" className="min-w-0"><TaskAgent task={task} /></div>
         <div role="cell" className="min-w-0"><TaskAssignees row={row} /></div>
         <div role="cell" className="whitespace-nowrap text-right font-mono text-xs tabular-nums text-slate-700">{taskDuration(task)}</div>
