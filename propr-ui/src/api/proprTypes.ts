@@ -313,6 +313,7 @@ export interface TriggerReindexAllResponse {
 }
 
 export interface PostFollowupResponse {
+  commandMode?: 'review';
   success: boolean;
   message?: string;
   /** `unknown` when the comment was posted but its queue submission could not be confirmed. */

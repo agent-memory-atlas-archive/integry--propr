@@ -450,6 +450,19 @@ export interface TaskPage {
   totalRuns?: number;
 }
 
+/** Idempotent review receipt. Only queued or batched confirms acceptance; unknown requires inspection. */
+export interface TaskReviewResult {
+  success: boolean;
+  state: "queued" | "batched" | "handled" | "refused" | "failed" | "unknown";
+  posted?: boolean;
+  commentId?: number;
+  jobId?: string;
+  sourceTaskId: string;
+  /** Explains a refusal, failure, or uncertain submission. */
+  message?: string;
+  commandMode: "review";
+}
+
 /** The GitHub issue or pull request a task is assigned through. */
 export interface TaskSubject {
   owner: string;

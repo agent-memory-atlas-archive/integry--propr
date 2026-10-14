@@ -1,39 +1,16 @@
-import { prepareApiFollowup } from '../../core/src/webhook/commentEventHandler.js';
 import { deleteTaskRecords } from '../../core/src/storage/taskHistoryControl.js';
 import { Request, Response } from 'express';
-import { Knex } from 'knex';
 import { Queue } from 'bullmq';
-import type { Redis } from 'ioredis';
-import { issueQueue, getAuthenticatedOctokit, generateCorrelationId, logger, syncTaskAssignees, dispatchPostedFollowup } from '@propr/core';
+import { getAuthenticatedOctokit, logger, syncTaskAssignees } from '@propr/core';
 import { ACTIVE_TASK_LIFECYCLE_STATES, parseTaskAssignmentFilter } from '@propr/shared';
 import { getTasksFromDb, type TaskQuery } from './taskHelpers.js';
-import { isPullRequestTask } from './pullRequestTaskIdentity.js';
 import { validateTaskId, validateRepositoryFilter, validateStringLength, validatePositiveInteger } from './validation.js';
 import { validateRevertRequestBody, formatCommit, validateRevertPreviewParams, checkRevertAuthorization, checkRevertPreviewAuthorization, lookupPr, buildRevertJobData, verifyCommitBelongsToPr, resolveRepoAndCheckAccess } from './revertHelpers.js';
+import { createTaskFollowupRoutes, type TaskFollowupDeps } from './taskFollowupRoutes.js';
+export { resolveFollowupThread } from './taskFollowupRoutes.js';
 
-interface TaskRoutesDeps {
-  db: Knex;
+interface TaskRoutesDeps extends TaskFollowupDeps {
   taskQueue?: Queue;
-}
-
-interface TaskRecord {
-  task_id: string;
-  repository: string;
-  issue_number: number;
-  pr_number?: number | null;
-  task_type: string;
-}
-
-/**
- * Resolves the GitHub thread a follow-up comment is posted to. PR commands go
- * to the task's pull request; implementation tasks keep their source issue in
- * issue_number and the created PR in pr_number.
- */
-export function resolveFollowupThread(task: TaskRecord, targetsPullRequest: boolean): { number?: number; error: string } {
-  return targetsPullRequest
-    // PR comment tasks record their pull request as the issue number; other tasks must have a PR of their own.
-    ? { number: task.pr_number ?? (isPullRequestTask(task) ? task.issue_number : undefined), error: 'Task does not have a valid GitHub pull request' }
-    : { number: task.issue_number, error: 'Task does not have valid GitHub issue information' };
 }
 
 function taskGroupingError(groupBy: string, task: string): string | null {
@@ -63,33 +40,6 @@ function parseAssignmentQuery(req: Request, task: string): { ok: true; query: As
       actingUserId,
       ...(sync ? { syncAssignees: (taskId: string) => syncTaskAssignees(taskId) } : {}),
     },
-  };
-}
-
-async function followupBranch(
-  task: TaskRecord, targetsPullRequest: boolean, octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>>,
-  context: { owner: string; repo: string; issueNumber: number },
-): Promise<string | undefined> {
-  if (!targetsPullRequest && !isPullRequestTask(task)) return undefined;
-  try {
-    const { data } = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
-      owner: context.owner, repo: context.repo, pull_number: context.issueNumber,
-    });
-    return data.head.ref;
-  } catch (error) {
-    console.warn(`[followup] Could not fetch PR branch: ${(error as Error).message}`);
-    return undefined;
-  }
-}
-
-function failedFollowupOutcome(submissionAttempted: boolean, jobId?: string) {
-  return {
-    success: false,
-    state: submissionAttempted ? 'unknown' : 'failed',
-    jobId,
-    message: submissionAttempted
-      ? 'Comment posted, but submission could not be confirmed. Inspect the comment and any job receipt before retrying.'
-      : 'Comment posted, but the command failed before submission.',
   };
 }
 
@@ -359,112 +309,5 @@ export function createTaskRoutes(deps: TaskRoutesDeps) {
     }
   }
 
-  async function postFollowup(req: Request, res: Response): Promise<void> {
-    try {
-      const { taskId } = req.params;
-      const { body, target } = req.body;
-      const userId = req.user?.id;
-      if (!userId) {
-        res.status(401).json({ error: 'Unable to determine requesting user ID' });
-        return;
-      }
-
-      // Validate taskId parameter
-      const taskIdValidation = validateTaskId(taskId);
-      if (!taskIdValidation.valid) {
-        res.status(400).json({ error: taskIdValidation.error });
-        return;
-      }
-
-      // Validate comment body
-      const bodyValidation = validateStringLength(body, 'Comment body', { required: true, minLength: 1, maxLength: 65536 });
-      if (!bodyValidation.valid) {
-        res.status(400).json({ error: bodyValidation.error });
-        return;
-      }
-
-      if (typeof body !== 'string' || body.trim().length === 0) {
-        res.status(400).json({ error: 'Comment body is required' });
-        return;
-      }
-
-      if (target !== undefined && target !== 'pull_request') {
-        res.status(400).json({ error: 'Follow-up target must be "pull_request" when provided' });
-        return;
-      }
-      const targetsPullRequest = target === 'pull_request';
-
-      // Get task info from database
-      const task = await db('tasks').where({ task_id: taskId }).first() as TaskRecord | undefined;
-      if (!task) {
-        res.status(404).json({ error: 'Task not found' });
-        return;
-      }
-
-      const [repoOwner, repoName] = (task.repository as string).split('/');
-      const thread = resolveFollowupThread(task, targetsPullRequest);
-      const issueNumber = thread.number;
-
-      if (!repoOwner || !repoName || !issueNumber) {
-        res.status(400).json({ error: thread.error });
-        return;
-      }
-
-      // Reserve API ownership before GitHub can emit the comment webhook.
-      const redisClient = await issueQueue.client as unknown as Redis;
-      const postedBody = await prepareApiFollowup(redisClient, { owner: repoOwner, repo: repoName, prNumber: issueNumber }, body.trim());
-
-      // Post comment to GitHub
-      const octokit = await getAuthenticatedOctokit();
-      const commentResponse = await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
-        owner: repoOwner,
-        repo: repoName,
-        issue_number: issueNumber,
-        body: postedBody
-      });
-
-      const commentId = commentResponse.data.id;
-      const commentAuthor = commentResponse.data.user?.login || 'unknown';
-
-      console.log(`[followup] Posted follow-up comment (ID: ${commentId}) to ${repoOwner}/${repoName}#${issueNumber}`);
-
-      const branchName = await followupBranch(task, targetsPullRequest, octokit, { owner: repoOwner, repo: repoName, issueNumber });
-
-      const jobId = `pr-comments-batch-${repoOwner}-${repoName}-${issueNumber}-${Date.now()}-${commentId}`;
-      let outcome;
-      let submissionAttempted = false;
-      let attemptedJobId: string | undefined;
-      try {
-        outcome = await dispatchPostedFollowup({
-          owner: repoOwner, repo: repoName, prNumber: issueNumber, userId: String(userId), branchName,
-          comment: {
-            id: commentId, body: body.trim(),
-            created_at: commentResponse.data.created_at,
-            updated_at: commentResponse.data.updated_at,
-            user: { login: commentAuthor, type: commentResponse.data.user?.type },
-          },
-        }, generateCorrelationId(), {
-          // taskQueue constructs this client with ioredis; BullMQ exposes only IRedisClient.
-          redisClient,
-          PR_FOLLOWUP_TRIGGER_KEYWORDS: (process.env.PR_FOLLOWUP_TRIGGER_KEYWORDS ?? '').split(',').map(k => k.trim()).filter(Boolean),
-          MODEL_LABEL_PATTERN: process.env.MODEL_LABEL_PATTERN || '^llm-(.+)$',
-          jobId,
-          onSubmissionAttempt: id => { submissionAttempted = true; attemptedJobId = id; },
-        });
-      } catch (queueErr) {
-        // Redis may have accepted the job before the connection failed. A posted
-        // comment is not evidence of a successful submission; retain both handles.
-        console.warn(`[followup] Command dispatch failed: ${(queueErr as Error).message}`);
-        res.status(202).json({ ...failedFollowupOutcome(submissionAttempted, attemptedJobId),
-          posted: true, commentId, sourceTaskId: taskId });
-        return;
-      }
-      res.status(202).json({ success: ['queued', 'batched', 'handled'].includes(outcome.state), ...outcome, posted: true, commentId, sourceTaskId: taskId });
-    } catch (error) {
-      console.error('Error posting follow-up comment:', error);
-      res.status(500).json({ error: 'Failed to post follow-up comment' });
-    }
-  }
-
-  return { getTasks, revertChanges, getRevertPreview, deleteTask, postFollowup };
+  return { getTasks, revertChanges, getRevertPreview, deleteTask, ...createTaskFollowupRoutes(deps) };
 }

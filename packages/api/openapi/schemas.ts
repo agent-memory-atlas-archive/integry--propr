@@ -249,6 +249,12 @@ export const TaskFollowupResult = component('TaskFollowupResult', z.object({
   message: z.string().optional().describe('Explains a refusal, failure, or uncertain submission.'),
 }), 'Result of posting a follow-up comment. `state: unknown` means inspect the job before retrying.');
 
+export const TaskReviewResult = component('TaskReviewResult', TaskFollowupResult.extend({
+  commandMode: z.literal('review'),
+  posted: z.boolean().optional(),
+  commentId: z.number().int().optional(),
+}), 'Idempotent review receipt. Only queued or batched confirms acceptance; unknown requires inspection.');
+
 export const TaskSubject = component('TaskSubject', z.object({
   owner: z.string(),
   repo: z.string(),

@@ -206,3 +206,15 @@ export const postTaskFollowup = async (taskId: string, body: string, target?: 'p
   await handleApiResponse(response);
   return response.json();
 };
+
+/** A separate endpoint prevents old servers from interpreting /review as implementation work. */
+export const postTaskReview = async (taskId: string): Promise<PostFollowupResponse> => {
+  const response = await apiFetch(`${API_BASE_URL}/api/tasks/${encodeURIComponent(taskId)}/review`, {
+    method: 'POST', credentials: 'include',
+  });
+  if (response.status === 404 || response.status === 405) {
+    throw new Error('Review is unavailable for this task or server. Refresh the task and update the ProPR server if needed.');
+  }
+  await handleApiResponse(response);
+  return response.json();
+};

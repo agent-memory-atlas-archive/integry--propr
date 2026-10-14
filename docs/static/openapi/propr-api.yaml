@@ -29,8 +29,8 @@ info:
     name: Apache-2.0
     identifier: Apache-2.0
   x-route-coverage:
-    total: 298
-    documented: 63
+    total: 299
+    documented: 64
     undocumented: 235
 servers:
   - url: "{origin}"
@@ -7722,6 +7722,73 @@ paths:
           $ref: "#/components/responses/LegacyUnexpectedError"
       x-propr-auth: member
       x-legacy-error: true
+  /api/tasks/{taskId}/review:
+    post:
+      operationId: postTaskReview
+      summary: Request an AI review for a task pull request
+      description: |-
+        Checks the signed-in user’s repository access and PR assignment, dispatches /review through command handling, and returns the same receipt on repeated requests for the source run.
+
+        When the task, session or correlation id belongs to a goal, only the goal owner can use this route (others get `404`), and only for reads: other methods answer `409` and the goal controls must be used instead.
+      tags:
+        - Tasks
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          description: Task (run) identifier, as returned in `TaskSummary.id`.
+          schema:
+            type: string
+      responses:
+        "202":
+          description: Review submission receipt. Only queued or batched is accepted; unknown requires reconciliation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskReviewResult"
+        "400":
+          description: Invalid task or missing pull request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "401":
+          description: Authentication required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "403":
+          description: GitHub authorization or PR assignment required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "404":
+          description: Task or repository not accessible.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "409":
+          description: Pull request is closed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "503":
+          description: Authorization could not be verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-legacy-error: true
   /api/usage-tips:
     get:
       operationId: getApiUsageTips
@@ -9492,6 +9559,41 @@ components:
         - limit
       additionalProperties: false
       description: A page of task runs.
+    TaskReviewResult:
+      type: object
+      properties:
+        success:
+          type: boolean
+        state:
+          type: string
+          enum:
+            - queued
+            - batched
+            - handled
+            - refused
+            - failed
+            - unknown
+        posted:
+          type: boolean
+        commentId:
+          type: integer
+        jobId:
+          type: string
+        sourceTaskId:
+          type: string
+        message:
+          description: Explains a refusal, failure, or uncertain submission.
+          type: string
+        commandMode:
+          type: string
+          const: review
+      required:
+        - success
+        - state
+        - sourceTaskId
+        - commandMode
+      additionalProperties: false
+      description: Idempotent review receipt. Only queued or batched confirms acceptance; unknown requires inspection.
     TaskSubject:
       type: object
       properties:

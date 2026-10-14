@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { getTasks, postTaskFollowup } from '../../api/proprApi';
+import { getTasks, postTaskReview, postTaskFollowup } from '../../api/proprApi';
 import { resetFollowupSubmissions } from '../Inbox/followupSubmissions';
 import { ToastProvider } from '../ui/Toast';
 import type { TaskRunEntry } from '../TaskList/rowModel';
@@ -9,7 +9,7 @@ import LatestRunCommands from './LatestRunCommands';
 import { notificationSchema } from '@propr/shared';
 import { latestRunFollowup, notificationRunFollowup } from './runFollowup';
 
-vi.mock('../../api/proprApi', () => ({ postTaskFollowup: vi.fn(), getTasks: vi.fn() }));
+vi.mock('../../api/proprApi', () => ({ postTaskReview: vi.fn(), postTaskFollowup: vi.fn(), getTasks: vi.fn() }));
 
 function run(number: number, type: string | null, task: Partial<Task> = {}): TaskRunEntry {
   return {
@@ -126,6 +126,22 @@ describe('LatestRunCommands', () => {
 
     renderCommands('run-2');
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send /fix to PR #3065' })).toBeDisabled());
+  });
+
+  test('review uses the dedicated endpoint and only accepts an explicit review receipt', async () => {
+    taskReads({ id: 'run-1', title: 'Implement PR #3065' });
+    vi.mocked(postTaskReview).mockResolvedValueOnce({ success: true, message: 'Comment posted' });
+    render(<ToastProvider><LatestRunCommands runs={[implementation]} taskId="run-1" /></ToastProvider>);
+    const button = screen.getByRole('button', { name: 'Send /review to PR #3065' });
+    fireEvent.click(button);
+    expect(await screen.findByText('The server did not confirm an accepted review. Inspect the pull request and update the ProPR server before retrying.')).toBeInTheDocument();
+    expect(button).toBeEnabled();
+    expect(postTaskReview).toHaveBeenCalledWith('run-1');
+    expect(postTaskFollowup).not.toHaveBeenCalled();
+    vi.mocked(postTaskReview).mockResolvedValueOnce({ success: true, commandMode: 'review', state: 'queued' });
+    fireEvent.click(button);
+    expect(await screen.findByText('Queued /review for PR #3065.')).toBeInTheDocument();
+    expect(button).toBeDisabled();
   });
 
   test('an earlier run shows no commands', () => {
