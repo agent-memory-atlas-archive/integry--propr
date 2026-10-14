@@ -17,7 +17,7 @@ let database: Knex;
 
 before(async () => {
   database = await createDashboardTestDatabase();
-  // The overview also reads model names, run and per-event token counts and indexed repositories.
+  // The shared harness includes model names; add token counts and indexed repositories for the overview.
   await database.schema.alterTable('llm_executions', table => {
     table.integer('input_tokens');
     table.integer('output_tokens');
