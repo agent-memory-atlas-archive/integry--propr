@@ -8,6 +8,16 @@ import type { FleetExtensionPlane } from './extensions.js';
 import { digest } from './contract.js';
 import { configuredResetFence } from './resetFence.js';
 
+interface AuthorityConnection {
+  inTransaction: boolean;
+  prepare(sql: string): {
+    get(...args: unknown[]): Record<string, unknown> | undefined;
+    run(...args: unknown[]): unknown;
+  };
+  exec(sql: string): unknown;
+  pragma(sql: string, options?: { simple: boolean }): unknown;
+}
+
 export const extensionAuthorityPin = digest(JSON.parse(EXTENSION_AUTHORITY_SCHEMA));
 export class AuthorityProofRefusal extends Error { constructor() { super('extension_authority_unavailable'); } }
 const refuse = (): never => { throw new AuthorityProofRefusal(); };
@@ -34,7 +44,7 @@ export class ExtensionAuthorityProofPlane {
   /** Native/operator provisioning accessor only; never exposed on either listener. */
   verificationKey() { return createPublicKey(this.key()).export({ format: 'der', type: 'spki' }).toString('base64url'); }
   async invoke(raw: string, deliver?: (response: ExtensionAuthorityResponse) => void): Promise<ExtensionAuthorityResponse> {
-    let connection: any;
+    let acquired: AuthorityConnection | undefined;
     const { fleet, store } = this.extensions;
     try {
       if (this.stopped || Buffer.byteLength(raw) > EXTENSION_AUTHORITY_LIMITS.requestBytes) return refuse();
@@ -52,7 +62,8 @@ export class ExtensionAuthorityProofPlane {
       const secret = await fleet.extensionAuthority({ ...r.extension, expiresAt: r.expiresAt });
       clock(r);
       if (!timingSafeEqual(createHmac('sha256', secret).update(canonicalFleetJson(r)).digest(), Buffer.from(mac, 'hex'))) return refuse();
-      connection = await store.database.client.acquireConnection();
+      const connection: AuthorityConnection = await store.database.client.acquireConnection();
+      acquired = connection;
       // This contract is intentionally unavailable on other database drivers.
       if (typeof connection.prepare !== 'function' || connection.inTransaction) return refuse();
       const finish = (): ExtensionAuthorityResponse => {
@@ -64,7 +75,7 @@ export class ExtensionAuthorityProofPlane {
           const row = get(`SELECT e.epoch, m.role, m.source, i.instance_id FROM native_authority_epoch e
             CROSS JOIN instance_members m CROSS JOIN extension_instance_identity i WHERE e.id=1 AND i.id=1 AND m.github_user_id=?`, String(r.extension.githubActorId));
           if (!row || row.role !== 'admin' || row.source !== 'local' || !INSTANCE_PERMISSIONS.includes('instance.manage_settings')
-            || !Number.isSafeInteger(row.epoch) || row.epoch < 1 || String(row.epoch) !== String(initial.epoch)
+            || typeof row.epoch !== 'number' || !Number.isSafeInteger(row.epoch) || row.epoch < 1 || String(row.epoch) !== String(initial.epoch)
             || row.instance_id !== r.extensionInstanceId || (r.authorityEpoch !== null && r.authorityEpoch !== String(row.epoch))) return refuse();
           const native = fleet.extensionProofObservationSync();
           for (const field of ['hostedInstanceId', 'storageInstanceId', 'runtimeGeneration', 'storageGeneration', 'placementGeneration'] as const) {
@@ -79,7 +90,7 @@ export class ExtensionAuthorityProofPlane {
         connection.exec('BEGIN IMMEDIATE');
         try {
           observe();
-          if (get('SELECT count(*) AS n FROM extension_authority_challenges').n >= EXTENSION_AUTHORITY_LIMITS.challenges) return refuse();
+          if ((get('SELECT count(*) AS n FROM extension_authority_challenges')!.n as number) >= EXTENSION_AUTHORITY_LIMITS.challenges) return refuse();
           run('INSERT INTO extension_authority_challenges(challenge) VALUES (?)', r.challenge);
           connection.exec('COMMIT');
         } catch (error) { if (connection.inTransaction) connection.exec('ROLLBACK'); throw error; }
@@ -89,7 +100,7 @@ export class ExtensionAuthorityProofPlane {
           const id = r.extension.operationId;
           const prior = get('SELECT * FROM extension_authority_operations WHERE operation_id=?', id);
           if (r.phase === 'request') {
-            if (prior || r.authorityEpoch !== null || get('SELECT count(*) AS n FROM extension_authority_operations').n >= EXTENSION_AUTHORITY_LIMITS.operations) return refuse();
+            if (prior || r.authorityEpoch !== null || (get('SELECT count(*) AS n FROM extension_authority_operations')!.n as number) >= EXTENSION_AUTHORITY_LIMITS.operations) return refuse();
             run('INSERT INTO extension_authority_operations(operation_id, commitment, epoch) VALUES (?, ?, ?)', id, commitment(r), epoch);
           } else {
             if (!prior || prior.commitment !== commitment(r) || prior.epoch !== epoch || r.authorityEpoch !== epoch) return refuse();
@@ -136,7 +147,7 @@ export class ExtensionAuthorityProofPlane {
         } catch (error) { if (connection.inTransaction) connection.exec('ROLLBACK'); throw error; }
       };
       const synchronous = connection.pragma('synchronous', { simple: true });
-      if (![0, 1, 2, 3].includes(synchronous)) return refuse();
+      if (typeof synchronous !== 'number' || ![0, 1, 2, 3].includes(synchronous)) return refuse();
       // Flush replay/phase admission and the authority epoch even when the normal
       // application pool uses WAL synchronous=NORMAL. Restore its policy afterwards.
       connection.pragma('synchronous = FULL');
@@ -146,11 +157,14 @@ export class ExtensionAuthorityProofPlane {
       } finally { connection.pragma(`synchronous = ${synchronous}`); }
     } catch { throw new AuthorityProofRefusal(); }
     finally {
-      if (connection) {
-        try { await store.database.client.releaseConnection(connection); }
-        catch { throw new AuthorityProofRefusal(); }
+      if (acquired) {
+        await this.releaseConnection(acquired);
       }
     }
+  }
+  private async releaseConnection(connection: AuthorityConnection): Promise<void> {
+    try { await this.extensions.store.database.client.releaseConnection(connection); }
+    catch { throw new AuthorityProofRefusal(); }
   }
   private operation(id: string) {
     const raw = this.extensions.fleet.files.readSync(`extension-operation-${id}.json`);
