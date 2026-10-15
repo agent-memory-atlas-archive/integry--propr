@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import { canonicalFleetJson, FLEET_EXTENSION_CONTRACT, FLEET_EXTENSION_SCHEMA, FLEET_EXTENSION_LIMITS, fleetExtensionEnvelopeSchema, type FleetExtensionAssertion, type FleetExtensionRequest, fleetExtensionRecipientSchema, fleetExtensionSkillBundleSchema } from '@propr/shared';
 import { digest, FleetRefusal } from './contract.js';
 import type { FleetDataPlane } from './dataPlane.js';
-import { ExtensionProfileStore } from '../extensions/extensionProfileStore.js';
+import type { ExtensionProfileStore } from '../extensions/extensionProfileStore.js';
 import { importExactGitSkill } from '../extensions/remoteGitSkill.js';
 import { requestExtensionMcp } from '../extensions/endpointPolicy.js';
 import { unsealExtensionSecrets } from '../extensions/privateSecrets.js';
@@ -165,6 +165,9 @@ export class FleetExtensionPlane {
    * Reuse native dispatch and volatile recipients; never invoke the v1 journal path. */
   async dispatchAtomic(a: FleetExtensionAssertion, r: FleetExtensionRequest, rawIntent: unknown,
     database: Knex, guard: (assertion?: FleetExtensionAssertion) => void, secret: string): Promise<{ result: unknown; discard: () => void }> {
+    // Recovery shares this module but must not initialize the application logger
+    // (or its transport worker). Load the store only for a native v2 dispatch.
+    const { ExtensionProfileStore } = await import('../extensions/extensionProfileStore.js');
     const scoped = Object.create(this) as FleetExtensionPlane;
     Object.defineProperty(scoped, 'store', { value: new ExtensionProfileStore(database, this.store.environment) });
     scoped.authorize = async assertion => { guard(assertion); return secret; };

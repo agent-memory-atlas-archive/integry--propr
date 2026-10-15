@@ -591,7 +591,7 @@ test('recovery cold start never loads application services or opens customer SQL
     registerHooks({ load(url, context, next) {
       if (/\\/(?:bullmq|ioredis|redis|knex|express-session)\\//.test(url) ||
           /\\/(?:server|worker|daemon)\\.(?:ts|js)$/.test(url) ||
-          /\\/(?:db\\/connection|queue\\/taskQueue)\\.(?:ts|js)$/.test(url)) {
+          /\\/(?:db\\/connection|queue\\/taskQueue|utils\\/logger|extensions\\/extensionProfileStore)\\.(?:ts|js)$/.test(url)) {
         forbidden.push(url); throw new Error('application service imported: ' + url);
       }
       return next(url, context);
