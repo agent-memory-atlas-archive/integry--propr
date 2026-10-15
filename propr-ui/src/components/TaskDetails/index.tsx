@@ -8,7 +8,7 @@ import ExecutionEventLog from './ExecutionEventLog';
 import ResultOverview from './ResultOverview';
 import PromptModal from './PromptModal';
 import LogFilesModal from './LogFilesModal';
-import FollowupModal from './FollowupModal';
+import FollowupModal, { FollowupReceiptError } from './FollowupModal';
 import ContextStrip, { ConsumptionGroup, MobileGitContext, MobilePeopleRuntime } from './ContextStrip';
 import ActionBar from './ActionBar';
 import TaskHeader, { ReturnToRunButton } from './TaskHeader';
@@ -260,8 +260,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
       throw new Error('Task ID is required');
     }
     const result = await postTaskFollowup(taskId, body);
-    if (!result.success) throw new Error(
-      [result.message ?? 'Follow-up was not confirmed.', result.commentId && `Comment ${result.commentId}.`, result.jobId && `Job ${result.jobId}.`].filter(Boolean).join(' '));
+    if (!result.success) throw new FollowupReceiptError(result);
     addToast({
       type: 'success',
       message: result.state === 'batched' ? 'Follow-up added to the pending batch' : result.state === 'handled' ? 'Command handled successfully' : 'Follow-up queued successfully'
