@@ -919,7 +919,7 @@ test('migration retains actorless v1 journals as recovery evidence without autho
 
 test('retired Connect-managed extension transport is unreachable on the private listener and absent from the codebase', async t => {
   const f = await fixture(t);
-  const retired = ['/extensions/v1/invoke', '/extensions/authority/v1/prove', '/extensions/authority/v2/prove'];
+  const retired = ['/extensions/v1/invoke', '/extensions/authority/v1/prove', '/extensions/authority/v2/invoke', '/extensions/authority/v2/prove'];
   const envelope = f.sign({ action: 'repositories.list' });
   for (const route of retired) {
     const response = await new Promise<{ status: number; body: string }>((resolve, reject) => {
@@ -942,11 +942,17 @@ test('retired Connect-managed extension transport is unreachable on the private 
     await assert.rejects(fs.lstat(path.resolve(file)), { code: 'ENOENT' }, file);
   }
   const shared = await import('@propr/shared') as Record<string, unknown>;
-  for (const name of ['FLEET_EXTENSION_CONTRACT', 'fleetExtensionEnvelopeSchema', 'EXTENSION_AUTHORITY_PATH', 'EXTENSION_AUTHORITY_V2_PATH', 'EXTENSION_RESULT_DELIVERY_CONTRACT']) assert.equal(name in shared, false, name);
+  for (const name of ['FLEET_EXTENSION_CONTRACT', 'fleetExtensionEnvelopeSchema', 'EXTENSION_AUTHORITY_PATH', 'EXTENSION_AUTHORITY_V2_PATH', 'EXTENSION_RESULT_DELIVERY']) assert.equal(name in shared, false, name);
   const listener = await fs.readFile(path.resolve('packages/api/fleetDataListener.ts'), 'utf8');
   assert.doesNotMatch(listener, /extension/i);
   const store = await fs.readFile(path.resolve('packages/core/src/extensions/extensionProfileStore.ts'), 'utf8');
   assert.doesNotMatch(store, /saveWithOptions|guard|preflight/);
+  // Already-published migration names stay as inert tombstones; only the
+  // append-only cleanup migration may still touch the retired schema.
   const migrations = await fs.readdir(path.resolve('packages/core/src/db/migrations'));
-  assert.deepEqual(migrations.filter(name => /extension_authority/.test(name)), []);
+  assert.deepEqual(migrations.filter(name => /extension_authority/.test(name)),
+    ['20261015070000_extension_authority_epoch.js', '20261015130000_extension_authority_v2.js', '20261015220000_remove_extension_authority_schema.js']);
+  for (const tombstone of migrations.filter(name => /^2026101[05].*extension_authority_(epoch|v2)\.js$/.test(name))) {
+    assert.doesNotMatch(await fs.readFile(path.resolve('packages/core/src/db/migrations', tombstone), 'utf8'), /createTable|CREATE/);
+  }
 });

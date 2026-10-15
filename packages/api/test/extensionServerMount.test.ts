@@ -42,7 +42,7 @@ test('server mounts extension gateway before auth, management after auth, and ar
   // The retired Connect-managed extension transport has no public, tunnel or
   // session-authenticated route. Its former paths are ordinary unknown routes.
   for (const extra of [{}, { 'x-test-actor': '1', 'x-forwarded-host': 'synthetic.tunnel.invalid' }]) {
-    for (const retired of ['/extensions/v1/invoke', '/extensions/authority/v1/prove', '/extensions/authority/v2/prove']) {
+    for (const retired of ['/extensions/v1/invoke', '/extensions/authority/v1/prove', '/extensions/authority/v2/invoke', '/extensions/authority/v2/prove']) {
       const response = await fetch(base + retired, { method: 'POST', headers: { 'content-type': 'application/json', ...extra }, body: '{}' });
       assert.equal(response.status, 404);
       assert.doesNotMatch(await response.text(), /extension_authority_unavailable|fleet_extensions_unavailable/);
