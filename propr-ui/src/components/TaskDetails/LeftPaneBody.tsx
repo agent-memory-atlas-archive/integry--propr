@@ -6,7 +6,7 @@ import ExecutionRail from './ExecutionRail';
 import LiveFileChips from './LiveFileChips';
 import ReviewScoreHistory from './ReviewScoreHistory';
 import PullRequestOutcomeEntry from './PullRequestOutcomeEntry';
-import { pullRequestOutcome, taskPullRequest, usePullRequestScores } from './pullRequestScores';
+import { pullRequestOutcome, taskPullRequest } from './pullRequestScores';
 import type { PullRequestScoresResponse } from '../../api/taskStatsApi';
 import type { HistoryItem, HistoryItemMetadata, TaskInfo, LiveDetails } from './types';
 import { RefreshCw } from 'lucide-react';
@@ -18,6 +18,8 @@ interface LeftPaneBodyProps {
   liveDetails: LiveDetails;
   currentStatus: string;
   prInfo: { url?: string; number?: number } | undefined;
+  /** The PR's review scores and outcome, read once by the task screen; null while loading or with no PR. */
+  prHistory: PullRequestScoresResponse | null;
   consumedReviewCommentIds: number[] | undefined;
   taskId: string | undefined;
   isTaskActive: boolean;
@@ -132,6 +134,7 @@ const LeftPaneBody: React.FC<LeftPaneBodyProps> = ({
   liveDetails,
   currentStatus,
   prInfo,
+  prHistory,
   consumedReviewCommentIds,
   taskId,
   isTaskActive,
@@ -141,7 +144,6 @@ const LeftPaneBody: React.FC<LeftPaneBodyProps> = ({
   onSelectRun,
 }) => {
   const pr = taskPullRequest(taskInfo, prInfo);
-  const prHistory = usePullRequestScores(pr?.repository, pr?.prNumber);
   const timeline = runs && runs.length > 1 && taskId && onSelectRun;
   const outcome = pr ? pullRequestOutcome(pr.prNumber, prHistory, runs) : null;
   const reviewScores = pr && { prNumber: pr.prNumber, history: prHistory };
