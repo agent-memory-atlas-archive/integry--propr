@@ -11,6 +11,7 @@ import { isReasoningLevelLabel, parseReasoningLevelFromLabels } from '@propr/sha
 import type { ReasoningLevel, ReasoningLevelLabel } from '@propr/shared';
 import { parseLinkedIssueNumbers } from '../github/linkedIssueReferences.js';
 import type { LinkedIssueReference } from '../github/prAutoAssignment.js';
+import { acceptedRequestDigest } from '../shared/workEvidenceMarker.js';
 
 interface ValidationComment {
     id: number;
@@ -89,9 +90,10 @@ export async function validateAndFilterComments(
 
         if (commentWasEditedAfterQueuing) {
             correlatedLogger.info({ pullRequestNumber, commentId: comment.id, commentAuthor: comment.author }, 'Comment has been edited since job was queued, using updated content');
-            validatedComments.push({ ...comment, body: currentComment.body || comment.body });
+            validatedComments.push({ ...comment, body: currentComment.body || comment.body, acceptedBodySha256: acceptedRequestDigest(currentComment.body ?? '') });
         } else {
-            validatedComments.push(comment);
+            // The completion footer binds the body this run accepted.
+            validatedComments.push({ ...comment, acceptedBodySha256: acceptedRequestDigest(currentComment.body ?? '') });
         }
     }
     return validatedComments;

@@ -30,7 +30,7 @@ import type { Redis } from 'ioredis';
 import { buildWorkEvidenceMarker, filterRealComments } from '../shared/workEvidenceMarker.js';
 import { buildReviewNotificationRecap } from './notificationRecap.js';
 import { resolveReviewAssignments } from './reviewModelResolution.js';
-import { collectAuthorizedFollowupRequests, formatAuthorizedFollowupRequests } from './reviewFollowupRequests.js';
+import { collectFollowupRequestEvidence, formatAuthorizedFollowupRequests } from './reviewFollowupRequests.js';
 
 export { resolveReviewAssignments } from './reviewModelResolution.js';
 
@@ -302,9 +302,12 @@ export async function executeReviewProcessing(params: ExecuteReviewParams): Prom
     // The scout and every reviewer run under the run's network policy, like implementation agents.
     const { octokit, startingWorkComment } = state;
     // Completion evidence counts only from the identity that posted it, as for review record numbers.
-    const followupRequests = collectAuthorizedFollowupRequests(allComments, startingWorkComment.data.user?.login ?? process.env.GITHUB_BOT_USERNAME);
+    const { requests: followupRequests, unverified: unverifiedFollowups } = collectFollowupRequestEvidence(allComments, startingWorkComment.data.user?.login ?? process.env.GITHUB_BOT_USERNAME);
     if (followupRequests.length > 0) {
         correlatedLogger.info({ pullRequestNumber, commentIds: followupRequests.map(request => request.commentId) }, 'Including authorized follow-up requests in the review objective');
+    }
+    if (unverifiedFollowups.length > 0) {
+        correlatedLogger.warn({ pullRequestNumber, unverifiedFollowups }, 'Excluding completed follow-up requests whose completion does not bind their current body');
     }
     const reviewResults = await runWithNetworkPolicy({ workflow: state.repositoryWorkflow, taskId, correlatedLogger }, async () => {
         let relatedContext = '';

@@ -17,6 +17,7 @@ const realAgentUtils = await import('../src/jobs/prCommentAgentUtils.js');
 const realNetworkEgress = await import('../src/jobs/networkEgress.js');
 const realRepositoryWorkflow = await import('../src/jobs/repositoryWorkflow.js');
 const { preparePRDiff } = await import('../src/jobs/prDiffFormatting.js');
+const { acceptedRequestDigest, buildAcceptedRequestMarkers } = await import('../src/shared/workEvidenceMarker.js');
 
 const BOT = 'propr-dev[bot]';
 const ROW20_FOLLOWUP = 'Change `20. Acceptance row20` to `20. Follow-up acceptance row20` and append `Mobile follow-up accepted:390x844.` Preserve every other row and the metadata.';
@@ -25,13 +26,15 @@ const ORIGINAL_OBJECTIVE = `**Issue #14:** Linux runtime acceptance\nCreate docs
 const HISTORICAL_SUGGESTION = 'Add a trailing checksum row after row 40';
 const UNTRUSTED_REQUEST = 'Delete row 5 as well.';
 
+const DESKTOP_FOLLOWUP_BODY = `${ROW20_FOLLOWUP}\n\n<!-- propr-api-followup:0f8b6c1e-3d2a-4b5c-9e7f-1a2b3c4d5e6f -->`;
 const prComments = [
     { id: 101, created_at: '2026-10-14T09:10:00Z', user: { login: BOT, type: 'Bot' },
         body: `## Suggestions and Follow-ups\n### S1: Checksum row\n${HISTORICAL_SUGGESTION}.\n\nScore: 9/10` },
     { id: 200, created_at: '2026-10-14T10:00:00Z', user: { login: BOT, type: 'Bot' },
-        body: `${ROW20_FOLLOWUP}\n\n<!-- propr-api-followup:0f8b6c1e-3d2a-4b5c-9e7f-1a2b3c4d5e6f -->` },
+        body: DESKTOP_FOLLOWUP_BODY },
     { id: 201, created_at: '2026-10-14T10:20:00Z', user: { login: BOT, type: 'Bot' },
-        body: '✅ **Applied the requested follow-up changes** in commit 76350a7\n\n---\n_Processing comment ID: 200✓_\n<!-- propr:work-evidence phase=completed trigger-comment-ids=200 -->' },
+        body: '✅ **Applied the requested follow-up changes** in commit 76350a7\n\n---\n_Processing comment ID: 200✓_\n<!-- propr:work-evidence phase=completed trigger-comment-ids=200 -->\n'
+            + buildAcceptedRequestMarkers([{ id: 200, acceptedBodySha256: acceptedRequestDigest(DESKTOP_FOLLOWUP_BODY) }]) },
     { id: 400, created_at: '2026-10-14T12:00:00Z', user: { login: 'drive-by', type: 'User' }, body: UNTRUSTED_REQUEST },
 ];
 const prData = { data: {
