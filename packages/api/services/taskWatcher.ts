@@ -26,6 +26,8 @@ export interface TaskWatcherInfo {
   watcher: chokidar.FSWatcher | null;
   sessionId: string;
   taskId: string;
+  /** Resolved Claude conversation file; absent for Redis watchers. */
+  conversationPath?: string;
   lastSize: number;
   subscriberCount: number;
   /** Number of events last sent - used to track which events have been broadcast */
@@ -60,6 +62,8 @@ export class TaskWatcherManager {
   private io: SocketIOServer;
   private taskWatchers: Map<string, TaskWatcherInfo> = new Map();
   private deps: TaskWatcherDeps | null = null;
+  private closing = false;
+  private pendingStarts = new Set<Promise<void>>();
   /** Poll cadence while a file-creation watcher waits for late Redis output. */
   private redisFallbackPollMs = 2000;
 
@@ -78,6 +82,14 @@ export class TaskWatcherManager {
    * Start watching a task's log for changes (file-based for Claude, Redis-based for agents that stream to Redis)
    */
   async startTaskWatcher(taskId: string): Promise<void> {
+    if (this.closing) return;
+    const starting = this.createTaskWatcher(taskId);
+    this.pendingStarts.add(starting);
+    try { await starting; } finally { this.pendingStarts.delete(starting); }
+  }
+
+  private async createTaskWatcher(taskId: string): Promise<void> {
+    if (this.closing) return;
     // Check if already watching
     const existing = this.taskWatchers.get(taskId);
     if (existing) {
@@ -105,7 +117,16 @@ export class TaskWatcherManager {
     // Get agent config to find the correct log path
     const agentConfig = await findAgentConfigForTask(taskId, this.deps?.db);
     const agentType = agentConfig?.type || 'claude';
-    const agentRoot = agentConfig ? resolveConfigPath(agentConfig.configPath) : path.join(os.homedir(), '.claude');
+    let agentRoot: string;
+    try {
+      agentRoot = agentConfig ? resolveConfigPath(agentConfig.configPath) : path.join(os.homedir(), '.claude');
+    } catch (error) {
+      // An unmapped containerized default has no readable log root; never
+      // substitute the backend account's home directory.
+      console.log(`[TaskWatcher] Agent log root unavailable for task ${taskId} (${(error as Error).message}), using Redis watcher`);
+      await this.startRedisWatcher(taskId);
+      return;
+    }
 
     let conversationPath: string;
     if (agentType === 'codex' || agentType === 'antigravity' || agentType === 'vibe') {
@@ -147,6 +168,7 @@ export class TaskWatcherManager {
         return;
       }
 
+      if (this.closing) return;
       // Watch the directory for the file to be created
       // Use polling to avoid EMFILE errors when directory has many files
       const watcher = chokidar.watch(dirPath, {
@@ -186,6 +208,7 @@ export class TaskWatcherManager {
         watcher,
         sessionId,
         taskId,
+        conversationPath,
         lastSize: 0,
         subscriberCount: 1,
         lastSentEventCount: 0,
@@ -196,6 +219,11 @@ export class TaskWatcherManager {
       console.log(`[TaskWatcher] Started watching directory for Claude log creation for task ${taskId}`);
       return;
     }
+
+    // Read before acquiring a watcher, then recheck shutdown authority.
+    const stats = await fs.stat(conversationPath);
+    if (this.closing) return;
+    const initialSize = stats.size;
 
     // File exists - watch it directly for changes
     // Use polling to avoid EMFILE errors
@@ -210,10 +238,6 @@ export class TaskWatcherManager {
       }
     });
 
-    // Track initial file size
-    const stats = await fs.stat(conversationPath);
-    const initialSize = stats.size;
-
     watcher.on('change', async () => {
       // Debounce and send update
       await this.sendTaskLiveUpdate(taskId);
@@ -227,6 +251,7 @@ export class TaskWatcherManager {
       watcher,
       sessionId,
       taskId,
+      conversationPath,
       lastSize: initialSize,
       subscriberCount: 1,
       lastSentEventCount: 0,
@@ -252,6 +277,7 @@ export class TaskWatcherManager {
       clearInterval(existing.redisPollingInterval);
     }
 
+    if (this.closing) return;
     // Create a new watcher for the file itself
     // Use polling to avoid EMFILE errors
     const watcher = chokidar.watch(conversationPath, {
@@ -278,6 +304,7 @@ export class TaskWatcherManager {
       watcher,
       sessionId,
       taskId,
+      conversationPath,
       lastSize: 0,
       subscriberCount: existing.subscriberCount,
       lastSentEventCount: 0,
@@ -320,17 +347,11 @@ export class TaskWatcherManager {
    */
   async sendTaskLiveUpdate(taskId: string, isInitial = false): Promise<void> {
     const watcherInfo = this.taskWatchers.get(taskId);
-    if (!watcherInfo) return;
+    // Read the file the watcher resolved, never a path rebuilt from backend HOME.
+    const conversationPath = watcherInfo?.conversationPath;
+    if (!watcherInfo || !conversationPath) return;
 
     try {
-      const conversationPath = path.join(
-        os.homedir(),
-        '.claude',
-        'projects',
-        '-home-node-workspace',
-        `${watcherInfo.sessionId}.jsonl`
-      );
-
       const exists = await fs.pathExists(conversationPath);
       if (!exists) {
         return;
@@ -427,6 +448,7 @@ export class TaskWatcherManager {
    * Start Redis-based watcher for agents that stream output to Redis
    */
   private async startRedisWatcher(taskId: string, subscriberCount = 1): Promise<void> {
+    if (this.closing) return;
     console.log(`[TaskWatcher] Starting Redis watcher for task ${taskId}`);
 
     // Poll Redis every 2 seconds for output changes
@@ -615,15 +637,16 @@ export class TaskWatcherManager {
    * Close all task watchers
    */
   async closeAll(): Promise<void> {
+    this.closing = true;
+    await Promise.allSettled([...this.pendingStarts]);
+    const errors: unknown[] = [];
     for (const [taskId, watcher] of this.taskWatchers) {
-      if (watcher.watcher) {
-        await watcher.watcher.close();
-      }
-      if (watcher.redisPollingInterval) {
-        clearInterval(watcher.redisPollingInterval);
-      }
-      console.log(`[TaskWatcher] Closed watcher for task ${taskId}`);
+      if (watcher.redisPollingInterval) clearInterval(watcher.redisPollingInterval);
+      try {
+        await watcher.watcher?.close();
+        this.taskWatchers.delete(taskId);
+      } catch (error) { errors.push(error); }
     }
-    this.taskWatchers.clear();
+    if (errors.length) throw new AggregateError(errors, 'Task watcher shutdown failed');
   }
 }

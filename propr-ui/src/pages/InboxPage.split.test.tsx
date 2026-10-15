@@ -408,6 +408,10 @@ describe('Inbox triage console', () => {
     renderInbox(`/inbox?notification=${review.id}`);
     await screen.findByRole('article', { name: review.title });
     const inspect = within(pane()!).getByRole('link', { name: /Inspect in Tasks/ });
+    // The queue listener attaches in an effect that can land after the article renders; k on the
+    // first item is claimed without moving, so it shows the listener is live before ArrowDown is checked.
+    await waitFor(() => expect(fireEvent.keyDown(inspect, { key: 'k' })).toBe(false));
+    expect(search().get('notification')).toBe(review.id);
     expect(fireEvent.keyDown(inspect, { key: 'ArrowDown' })).toBe(true);
     expect(search().get('notification')).toBe(review.id);
     expect(fireEvent.keyDown(inspect, { key: 'j' })).toBe(false);

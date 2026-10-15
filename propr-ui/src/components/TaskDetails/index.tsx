@@ -30,6 +30,7 @@ import { getLogCommandMode, useTaskHeaderView } from './useTaskHeaderView';
 import { useLiveRunStop } from './useLiveRunStop';
 import { useTaskAssignment } from './useTaskAssignment';
 import LatestRunCommands from './LatestRunCommands';
+import { useTaskPullRequestScores } from './pullRequestScores';
 
 const CenteredStatus: React.FC<{ className: string; children: React.ReactNode }> = ({ className, children }) => (
   <div className="h-full bg-white flex items-center justify-center">
@@ -267,13 +268,14 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
     });
   }, [taskId, addToast]);
 
-  const handleOpenFollowup = useCallback(() => {
-    setFollowupModalOpen(true);
-  }, []);
+  const handleOpenFollowup = useCallback(() => setFollowupModalOpen(true), []);
 
   const mobileHeader = useMobileHeaderCollapsed();
 
   const executionLogRef = useClickOutsideCollapse(thinkingLog.eventsCollapsed, thinkingLog.collapseEvents);
+
+  const derivedData = getHistoryDerivedData(taskData.history, taskData.taskInfo);
+  const pullRequest = useTaskPullRequestScores(taskData.taskInfo, derivedData.prInfo, runs);
 
   const statusView = renderTaskDetailsStatus(taskData.loading, taskData.error, taskData.history, taskId);
 
@@ -288,7 +290,6 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
     );
   }
 
-  const derivedData = getHistoryDerivedData(taskData.history, taskData.taskInfo);
   // Opening an earlier run is local to the panels below: they name it, the timeline's header has the way back, and the header's run line follows it.
   const inspectionContext = inspection && onSelectRun ? {
     runNumber: inspection.run.number,
@@ -306,7 +307,6 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
     stepCount: thinkingLog.thinkingLogWithTimestamps.length,
   };
   const actionBarProps = {
-    followupCommands: <LatestRunCommands runs={runs} taskId={taskId} />,
     currentStatus: derivedData.currentStatus,
     historyItemWithPaths: derivedData.historyItemWithPaths,
     stoppingExecution: taskData.stoppingExecution,
@@ -316,7 +316,8 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
     onViewPrompt: promptData.fetchPrompt,
     onViewLogs: logFilesData.fetchLogFilesData,
     onDeleteTask: handleDeleteTask,
-    onFollowUp: handleOpenFollowup,
+    // A merged pull request takes no more follow-ups, so none are offered until the PR is known to be unmerged.
+    ...(pullRequest.merged !== false ? {} : { followupCommands: <LatestRunCommands runs={runs} taskId={taskId} />, onFollowUp: handleOpenFollowup }),
     liveRun,
   };
 
@@ -384,6 +385,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
               liveDetails={taskData.liveDetails}
               currentStatus={derivedData.currentStatus}
               prInfo={derivedData.prInfo}
+              prHistory={pullRequest.history}
               consumedReviewCommentIds={consumedReviewCommentIds}
               taskId={taskId}
               isTaskActive={derivedData.isTaskActive}

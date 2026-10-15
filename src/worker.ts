@@ -1,3 +1,4 @@
+import { watchResetGeneration } from '../packages/core/src/fleet/resetFence.js';
 import { preventWithdrawnJob } from '@propr/core';
 import { enforceInstanceNetworkPolicyOutsideRuns } from './jobs/networkEgressSafetyNet.js';
 import { startUsageTipsSelectionRunner } from './usageTipsSelectionRunner.js';
@@ -408,7 +409,7 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
     const egressProxySweeper = startEgressProxySweeper();
     enforceInstanceNetworkPolicyOutsideRuns();
 
-    const close = async (): Promise<void> => {
+    const close = watchResetGeneration(async (): Promise<void> => {
         clearInterval(heartbeatInterval);
         agentImageWatchdog.close();
         await usageTipsRunner.close();
@@ -425,8 +426,7 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
         await heartbeatRedis.hdel('system:status:worker-capacity', workerId);
         await subscriberRedis.quit();
         await heartbeatRedis.quit();
-    };
-
+    });
     for (const signal of ['SIGINT', 'SIGTERM'] as const) {
         process.on(signal, async () => {
             logger.info(`Worker received ${signal}, shutting down gracefully...`);
