@@ -469,6 +469,40 @@ describe('VibeAgent Docker args', () => {
         }
     });
 
+    test('containerized API-key-only execution runs without a mapped default config directory', () => {
+        // A usable backend-HOME ~/.vibe must never be mounted in place of the missing host mapping.
+        const backendHome = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-backend-home-'));
+        fs.mkdirSync(path.join(backendHome, '.vibe'));
+        fs.writeFileSync(path.join(backendHome, '.vibe', 'credentials.json'), '{}');
+        const keys = ['HOME', 'PROPR_CONTAINERIZED', 'HOST_VIBE_DIR', 'VIBE_CONFIG_PATH', 'MISTRAL_API_KEY'] as const;
+        const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+        try {
+            for (const key of keys) delete process.env[key];
+            process.env.HOME = backendHome;
+            process.env.PROPR_CONTAINERIZED = '1';
+            const agent = createAgent({ configPath: '~/.vibe' });
+            const args = buildArgs(agent, { mistralApiKey: 'mistral-key', envFilePath: '/tmp/propr-vibe-agent.env' });
+
+            assert.ok(!args.some(arg => arg.endsWith(':/home/node/.vibe:ro')), 'no config directory is mounted');
+            assert.ok(!args.some(arg => arg.startsWith(backendHome)), 'backend HOME is never mounted');
+            const diagnostics = (agent as unknown as {
+                diagnosticContext(nativeRoot: string, mistralApiKey?: string): { configPath?: string; authenticationRoot?: string; nativeCredentialContextComplete?: boolean };
+            }).diagnosticContext('/tmp/vibe-runtime-home', 'mistral-key');
+            assert.strictEqual(diagnostics.configPath, undefined);
+            assert.strictEqual(diagnostics.authenticationRoot, '/tmp/vibe-runtime-home');
+            assert.strictEqual(diagnostics.nativeCredentialContextComplete, true);
+
+            // Without an API key the directory is required, so the unmapped default is refused.
+            assert.throws(() => buildArgs(agent), /no host mapping.*HOST_VIBE_DIR/);
+        } finally {
+            for (const key of keys) {
+                if (previous[key] === undefined) delete process.env[key];
+                else process.env[key] = previous[key];
+            }
+            fs.rmSync(backendHome, { recursive: true, force: true });
+        }
+    });
+
     test('entrypoint forces Vibe runtime home after dropping privileges', () => {
         const script = fs.readFileSync(path.resolve('scripts/vibe-entrypoint.sh'), 'utf8');
         const readOnlyIndex = script.indexOf('VIBE_READ_ONLY_CONFIG" = "1"');

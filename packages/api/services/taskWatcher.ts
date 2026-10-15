@@ -26,6 +26,8 @@ export interface TaskWatcherInfo {
   watcher: chokidar.FSWatcher | null;
   sessionId: string;
   taskId: string;
+  /** Resolved Claude conversation file; absent for Redis watchers. */
+  conversationPath?: string;
   lastSize: number;
   subscriberCount: number;
   /** Number of events last sent - used to track which events have been broadcast */
@@ -206,6 +208,7 @@ export class TaskWatcherManager {
         watcher,
         sessionId,
         taskId,
+        conversationPath,
         lastSize: 0,
         subscriberCount: 1,
         lastSentEventCount: 0,
@@ -248,6 +251,7 @@ export class TaskWatcherManager {
       watcher,
       sessionId,
       taskId,
+      conversationPath,
       lastSize: initialSize,
       subscriberCount: 1,
       lastSentEventCount: 0,
@@ -300,6 +304,7 @@ export class TaskWatcherManager {
       watcher,
       sessionId,
       taskId,
+      conversationPath,
       lastSize: 0,
       subscriberCount: existing.subscriberCount,
       lastSentEventCount: 0,
@@ -342,17 +347,11 @@ export class TaskWatcherManager {
    */
   async sendTaskLiveUpdate(taskId: string, isInitial = false): Promise<void> {
     const watcherInfo = this.taskWatchers.get(taskId);
-    if (!watcherInfo) return;
+    // Read the file the watcher resolved, never a path rebuilt from backend HOME.
+    const conversationPath = watcherInfo?.conversationPath;
+    if (!watcherInfo || !conversationPath) return;
 
     try {
-      const conversationPath = path.join(
-        os.homedir(),
-        '.claude',
-        'projects',
-        '-home-node-workspace',
-        `${watcherInfo.sessionId}.jsonl`
-      );
-
       const exists = await fs.pathExists(conversationPath);
       if (!exists) {
         return;
