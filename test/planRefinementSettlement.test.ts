@@ -441,6 +441,37 @@ describe('BullMQ retries of a failed follow-up', () => {
         assert.equal((await planIssue()).status, PlanIssueStatus.UNDER_REVIEW);
     });
 
+    test('a resumed retry that succeeds settles the issue when its job completes', async () => {
+        await seedPlanIssue(PlanIssueStatus.IN_REFINEMENT);
+        await stateManager.createTaskStateIfAbsent('job-retry-ok', { number: PR, pullRequestNumber: PR, repoOwner: OWNER, repoName: REPO, type: 'pr-comment' }, null, 'job-retry-ok');
+        queueJobs.push(followUpJob('job-retry-ok', 'active', Date.now() - 60_000));
+        await stateManager.updateTaskState('job-retry-ok', TaskStates.PROCESSING);
+        await stateManager.markTaskFailed('job-retry-ok', new Error('agent crashed'));
+        queueJobs = [followUpJob('job-retry-ok', 'delayed')];
+        await syncPlanRefinementForJob(queueJobs[0].data);
+        queueJobs = [followUpJob('job-retry-ok', 'active', Date.now() + 1_000)];
+        await syncPlanRefinementForJob(queueJobs[0].data);
+        assert.equal((await planIssue()).status, PlanIssueStatus.IN_REFINEMENT, 'the resumed retry is running');
+
+        // The retry succeeds, but its task keeps the recorded failure: an automatic retry is not a
+        // requested continuation, so the terminal guard refuses the transition and no settlement runs.
+        const task = await stateManager.updateTaskState('job-retry-ok', TaskStates.COMPLETED, { reason: 'No changes were needed' });
+        assert.equal(task.state, TaskStates.FAILED);
+        assert.equal((await planIssue()).status, PlanIssueStatus.IN_REFINEMENT);
+
+        // BullMQ moves the job to completed, then emits completed, which synchronizes the plan.
+        activity.length = 0;
+        queueReads = 0;
+        queueJobs = [followUpJob('job-retry-ok', 'completed', Date.now() + 1_000)];
+        await syncPlanRefinementForJob(queueJobs[0].data);
+        assert.equal((await planIssue()).status, PlanIssueStatus.UNDER_REVIEW);
+        assert.deepEqual(activity.filter(event => event.domain === 'plan' && event.repository === REPOSITORY).map(event => event.change), ['blocked'],
+            'the connected list is told without reading the plan issues');
+        assert.ok(queueReads > 0, 'settled from the queue, not from a list read');
+        assert.deepEqual((await db('task_history').where({ task_id: 'job-retry-ok' }).orderBy('history_id')).map(row => row.state),
+            ['pending', 'processing', 'failed'], 'the task record is left as the guard keeps it');
+    });
+
     test('a retry never reopens a merged or closed issue', async () => {
         for (const terminal of [PlanIssueStatus.MERGED, PlanIssueStatus.CLOSED]) {
             await db('plan_issues').delete();

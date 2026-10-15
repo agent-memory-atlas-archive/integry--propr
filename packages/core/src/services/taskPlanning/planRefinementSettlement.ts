@@ -328,7 +328,7 @@ export async function settlePlanRefinementForPullRequest(
 
 /**
  * Brings the plan issue linked to a PR in line with its follow-up work after a
- * PR comment was handled or a queued job's attempt failed or resumed:
+ * PR comment was handled or a queued job's attempt failed, resumed or completed:
  * refining while work is queued or running, under review once nothing is
  * left. Comments that admitted no work never leave the plan refining.
  */

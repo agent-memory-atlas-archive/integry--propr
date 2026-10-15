@@ -126,6 +126,10 @@ test('a failed attempt and a resumed retry resynchronize plan refinement for the
     handler('active')({ id: 'j', data, attemptsMade: 1, attemptsStarted: 2 });
     await settle(2);
     assert.deepEqual(planRefinementSyncs, [data, data], 'the retry resumed processing');
+
+    handler('completed')({ id: 'j', name: 'processPullRequestComment', data, attemptsMade: 1, attemptsStarted: 2, timestamp: Date.now() }, { status: 'complete' });
+    await settle(3);
+    assert.deepEqual(planRefinementSyncs, [data, data, data], 'the retry completed and left active work');
 });
 
 test('shutdownQueue closes issue and indexing queues and Redis connection', async () => {

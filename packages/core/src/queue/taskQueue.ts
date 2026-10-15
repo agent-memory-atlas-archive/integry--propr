@@ -191,7 +191,9 @@ function createMetricsRedis(): Redis {
 /**
  * A plan issue refines while its PR has queued or running work. A failed
  * attempt settles it, so the retry BullMQ then delays, and later resumes,
- * must bring refinement back. Best effort, like the task-side settlement.
+ * must bring refinement back; and a retry that then succeeds cannot settle it
+ * through its task, which stays failed, so the job's completion does.
+ * Best effort, like the task-side settlement.
  */
 async function syncPlanRefinementForJobAttempt(job: Job | undefined): Promise<void> {
     if (!job) return;
@@ -228,6 +230,8 @@ export async function createWorker<T extends JobData = JobData, R extends JobRes
     }), workerOptions);
 
     worker.on('completed', async (job: Job<T>, result: R) => {
+        // BullMQ emits this after moving the job out of active work.
+        void syncPlanRefinementForJobAttempt(job as unknown as Job);
         const duration = Date.now() - job.timestamp;
         logger.info({ jobId: job.id, jobName: job.name, result, duration }, 'Job completed successfully');
         try {
