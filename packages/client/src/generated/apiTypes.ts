@@ -419,6 +419,16 @@ export interface TaskFollowupResult {
   commentId: number;
   jobId?: string;
   sourceTaskId: string;
+  /** Present when a failed implementation without a pull request was retried on its issue. */
+  intent?: "issue";
+  /** The issue a retry was queued on. */
+  issueNumber?: number;
+  /** Present when, instead of posting this follow-up, an earlier issue retry whose start was never confirmed was restarted for its own requester. */
+  restartedRequest?: {
+    state: "queued" | "failed" | "unknown";
+    /** The earlier request's comment, whose instructions the restarted run carries. */
+    commentId: number;
+  };
   /** Explains a refusal, failure, or uncertain submission. */
   message?: string;
 }
@@ -458,6 +468,16 @@ export interface TaskReviewResult {
   commentId?: number;
   jobId?: string;
   sourceTaskId: string;
+  /** Present when a failed implementation without a pull request was retried on its issue. */
+  intent?: "issue";
+  /** The issue a retry was queued on. */
+  issueNumber?: number;
+  /** Present when, instead of posting this follow-up, an earlier issue retry whose start was never confirmed was restarted for its own requester. */
+  restartedRequest?: {
+    state: "queued" | "failed" | "unknown";
+    /** The earlier request's comment, whose instructions the restarted run carries. */
+    commentId: number;
+  };
   /** Explains a refusal, failure, or uncertain submission. */
   message?: string;
   commandMode: "review";
