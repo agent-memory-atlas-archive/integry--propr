@@ -31,6 +31,7 @@ import { useLiveRunStop } from './useLiveRunStop';
 import { useTaskAssignment } from './useTaskAssignment';
 import LatestRunCommands from './LatestRunCommands';
 import { useTaskPullRequestScores } from './pullRequestScores';
+import { hasFollowupTarget, taskLabelMode } from './taskKind';
 
 const CenteredStatus: React.FC<{ className: string; children: React.ReactNode }> = ({ className, children }) => (
   <div className="h-full bg-white flex items-center justify-center">
@@ -294,7 +295,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
     runNumber: inspection.run.number,
     runCount: inspection.head.number,
     status: derivedData.currentStatus,
-    commandMode: taskData.taskInfo?.commandMode,
+    commandMode: taskLabelMode(taskData.taskInfo),
     headActive: inspection.headActive,
     onBack: () => onSelectRun(inspection.head.task.id),
   } : null;
@@ -316,7 +317,8 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
     onViewLogs: logFilesData.fetchLogFilesData,
     onDeleteTask: handleDeleteTask,
     // A merged pull request takes no more follow-ups, so none are offered until the PR is known to be unmerged.
-    ...(pullRequest.merged !== false ? {} : { followupCommands: <LatestRunCommands runs={runs} taskId={taskId} />, onFollowUp: handleOpenFollowup }),
+    // A task with no issue or pull request (an automation run's) has no thread to comment on.
+    ...(pullRequest.merged !== false || !hasFollowupTarget(taskData.taskInfo, derivedData.prInfo) ? {} : { followupCommands: <LatestRunCommands runs={runs} taskId={taskId} />, onFollowUp: handleOpenFollowup }),
     liveRun,
   };
 
