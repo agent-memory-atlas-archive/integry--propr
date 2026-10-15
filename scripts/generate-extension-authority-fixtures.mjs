@@ -34,7 +34,7 @@ writeFileSync(root + 'capabilities.json', JSON.stringify({ contract: EXTENSION_A
   readiness: 'local-contract-only-no-hosted-enablement' }, null, 2) + '\n');
 const source = ['packages/shared/src/extensionAuthorityProof.ts', 'packages/core/src/fleet/extensionAuthorityProof.ts',
   'packages/core/src/db/migrations/20261015070000_extension_authority_epoch.js', 'packages/core/src/fleet/files.ts',
-  'packages/core/src/fleet/dataPlane.ts', 'packages/core/src/fleet/resetFence.ts', 'packages/shared/src/instanceAuthorization.ts', 'packages/core/src/storage/service.ts', 'packages/api/fleetDataListener.ts',
+  'packages/core/src/fleet/dataPlane.ts', 'packages/core/src/fleet/resetFence.ts', 'packages/shared/src/instanceAuthorization.ts', 'packages/core/src/storage/service.ts', 'packages/core/src/storage/proofIdentity.ts', 'packages/core/src/storage/services.ts', 'packages/api/fleetDataListener.ts',
   'packages/core/src/fleet/extensions.ts', 'packages/shared/src/fleetExtensions.ts', 'scripts/generate-extension-authority-fixtures.mjs'];
 writeFileSync(root + 'source-pins.json', JSON.stringify(Object.fromEntries(source.map(file => [file, hash(readFileSync(file))])), null, 2) + '\n');
 const names = ['schema.json', 'fixtures.json', 'capabilities.json', 'source-pins.json', 'verifier.mjs', 'README.md'];

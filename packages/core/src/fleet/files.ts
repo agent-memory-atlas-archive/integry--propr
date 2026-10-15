@@ -28,11 +28,7 @@ export class FleetFiles {
   /** Bounded synchronous observation for the proof's final no-await signing section. */
   readSync(name: string): string {
     if (!/^[a-zA-Z0-9_.-]+$/.test(name) || !this.ancestry.length) throw new FleetRefusal();
-    for (const { name: directory, stat } of this.ancestry) {
-      const now = sync.lstatSync(directory);
-      if (!now.isDirectory() || now.isSymbolicLink() || now.dev !== stat.dev || now.ino !== stat.ino
-        || (directory === path.resolve(this.root) && ((now.mode & 0o077) || now.uid !== process.getuid?.()))) throw new FleetRefusal();
-    }
+    this.checkSync();
     const file = sync.openSync(path.join(this.root, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const stat = sync.fstatSync(file);
@@ -44,6 +40,13 @@ export class FleetFiles {
       if (length > 65536) throw new FleetRefusal();
       return buffer.subarray(0, length).toString('utf8');
     } finally { sync.closeSync(file); }
+  }
+  private checkSync(): void {
+    for (const { name: directory, stat } of this.ancestry) {
+      const now = sync.lstatSync(directory);
+      if (!now.isDirectory() || now.isSymbolicLink() || now.dev !== stat.dev || now.ino !== stat.ino
+        || (directory === path.resolve(this.root) && ((now.mode & 0o077) || now.uid !== process.getuid?.()))) throw new FleetRefusal();
+    }
   }
   async open(name: string, flags: number) {
     if (!/^[a-zA-Z0-9_.-]+$/.test(name)) throw new FleetRefusal();

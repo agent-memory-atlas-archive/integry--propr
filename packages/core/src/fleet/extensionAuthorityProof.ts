@@ -45,6 +45,8 @@ export class ExtensionAuthorityProofPlane {
   verificationKey() { return createPublicKey(this.key()).export({ format: 'der', type: 'spki' }).toString('base64url'); }
   async invoke(raw: string, deliver?: (response: ExtensionAuthorityResponse) => void): Promise<ExtensionAuthorityResponse> {
     let acquired: AuthorityConnection | undefined;
+    let response: ExtensionAuthorityResponse | undefined;
+    let failed = false;
     const { fleet, store } = this.extensions;
     try {
       if (this.stopped || Buffer.byteLength(raw) > EXTENSION_AUTHORITY_LIMITS.requestBytes) return refuse();
@@ -66,105 +68,128 @@ export class ExtensionAuthorityProofPlane {
       acquired = connection;
       // This contract is intentionally unavailable on other database drivers.
       if (typeof connection.prepare !== 'function' || connection.inTransaction) return refuse();
-      const finish = (): ExtensionAuthorityResponse => {
-        const get = (sql: string, ...args: unknown[]) => connection.prepare(sql).get(...args);
-        const run = (sql: string, ...args: unknown[]) => connection.prepare(sql).run(...args);
-        const observe = () => {
-          if (this.stopped) return refuse();
-          clock(r);
-          const row = get(`SELECT e.epoch, m.role, m.source, i.instance_id FROM native_authority_epoch e
-            CROSS JOIN instance_members m CROSS JOIN extension_instance_identity i WHERE e.id=1 AND i.id=1 AND m.github_user_id=?`, String(r.extension.githubActorId));
-          if (!row || row.role !== 'admin' || row.source !== 'local' || !INSTANCE_PERMISSIONS.includes('instance.manage_settings')
-            || typeof row.epoch !== 'number' || !Number.isSafeInteger(row.epoch) || row.epoch < 1 || String(row.epoch) !== String(initial.epoch)
-            || row.instance_id !== r.extensionInstanceId || (r.authorityEpoch !== null && r.authorityEpoch !== String(row.epoch))) return refuse();
-          const native = fleet.extensionProofObservationSync();
-          for (const field of ['hostedInstanceId', 'storageInstanceId', 'runtimeGeneration', 'storageGeneration', 'placementGeneration'] as const) {
-            if (native.binding[field] !== r.extension[field]) return refuse();
-          }
-          if (native.secret !== secret || this.verificationKey() !== keyPin) return refuse();
-          clock(r);
-          return String(row.epoch);
-        };
-        // Persist replay tombstone independently of the proof transaction. An ambiguous
-        // failure burns the challenge; neither this nor the operation ledger is recycled.
-        connection.exec('BEGIN IMMEDIATE');
-        try {
-          observe();
-          if ((get('SELECT count(*) AS n FROM extension_authority_challenges')!.n as number) >= EXTENSION_AUTHORITY_LIMITS.challenges) return refuse();
-          run('INSERT INTO extension_authority_challenges(challenge) VALUES (?)', r.challenge);
-          connection.exec('COMMIT');
-        } catch (error) { if (connection.inTransaction) connection.exec('ROLLBACK'); throw error; }
-        connection.exec('BEGIN IMMEDIATE');
-        try {
-          const epoch = observe();
-          const id = r.extension.operationId;
-          const prior = get('SELECT * FROM extension_authority_operations WHERE operation_id=?', id);
-          if (r.phase === 'request') {
-            if (prior || r.authorityEpoch !== null || (get('SELECT count(*) AS n FROM extension_authority_operations')!.n as number) >= EXTENSION_AUTHORITY_LIMITS.operations) return refuse();
-            run('INSERT INTO extension_authority_operations(operation_id, commitment, epoch) VALUES (?, ?, ?)', id, commitment(r), epoch);
-          } else {
-            if (!prior || prior.commitment !== commitment(r) || prior.epoch !== epoch || r.authorityEpoch !== epoch) return refuse();
-            if (r.phase === 'dispatch') {
-              if (prior.dispatched || prior.completed) return refuse();
-              // Any existing native tombstone, even torn/ambiguous, prohibits redispatch.
-              try { fleet.files.readSync(`extension-operation-${id}.json`); return refuse(); }
-              catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-              run('UPDATE extension_authority_operations SET dispatched=1 WHERE operation_id=?', id);
-            } else {
-              if (!prior.dispatched) return refuse();
-              const record = this.operation(id);
-              for (const field of Object.keys(r.extension) as Array<keyof typeof r.extension>) {
-                if (record.assertion[field] !== r.extension[field]) return refuse();
-              }
-              if (r.phase === 'completion') {
-                if (prior.completed || record.state !== 'completed') return refuse();
-                run('UPDATE extension_authority_operations SET completed=1 WHERE operation_id=?', id);
-              }
-            }
-          }
-          if (r.acquisitionOperationId !== null) {
-            if (r.acquisitionOperationId === id) return refuse();
-            const acquisition = this.operation(r.acquisitionOperationId);
-            if (acquisition.state !== 'completed' || acquisition.assertion.action !== 'recipient.issue') return refuse();
-            for (const field of ['githubActorId', 'hostedInstanceId', 'storageInstanceId', 'runtimeGeneration', 'storageGeneration', 'placementGeneration'] as const) {
-              if (acquisition.assertion[field] !== r.extension[field]) return refuse();
-            }
-          }
-          observe();
-          // Commit phase admission before a reply can escape. A lost reply is never retryable.
-          connection.exec('COMMIT');
-          connection.exec('BEGIN IMMEDIATE');
-          const authorityEpoch = observe();
-          const statement = { contract: EXTENSION_AUTHORITY_CONTRACT, contractPin: extensionAuthorityPin, request: r,
-            requestCommitment: digest(r), authorityEpoch, role: 'admin' as const, source: 'local' as const,
-            permission: 'instance.manage_settings' as const, observedAt: Math.floor(Date.now() / 1000), expiresAt: r.expiresAt, connectAuthorityVerified: false as const };
-          const response = extensionAuthorityResponseSchema.parse({ statement, signature: sign(null, Buffer.from(canonicalFleetJson(statement)), this.key()).toString('base64url') });
-          if (Buffer.byteLength(JSON.stringify(response)) > EXTENSION_AUTHORITY_LIMITS.responseBytes) return refuse();
-          observe();
-          deliver?.(response);
-          connection.exec('ROLLBACK'); // Read-only final decision; release the writer barrier.
-          return response;
-        } catch (error) { if (connection.inTransaction) connection.exec('ROLLBACK'); throw error; }
-      };
-      const synchronous = connection.pragma('synchronous', { simple: true });
-      if (typeof synchronous !== 'number' || ![0, 1, 2, 3].includes(synchronous)) return refuse();
-      // Flush replay/phase admission and the authority epoch even when the normal
-      // application pool uses WAL synchronous=NORMAL. Restore its policy afterwards.
-      connection.pragma('synchronous = FULL');
-      try {
-        const managed = configuredResetFence();
-        return managed ? managed.fence.write(managed.identity, finish) : finish();
-      } finally { connection.pragma(`synchronous = ${synchronous}`); }
-    } catch { throw new AuthorityProofRefusal(); }
-    finally {
-      if (acquired) {
-        await this.releaseConnection(acquired);
-      }
+      const finish = () => this.finish(connection, r, { initialEpoch: initial.epoch, secret, keyPin }, deliver);
+      response = this.withDurability(connection, finish);
+    } catch { failed = true; }
+    if (acquired) {
+      try { await this.releaseConnection(acquired); }
+      catch { failed = true; }
     }
+    if (failed || !response) return refuse();
+    return response;
+  }
+  private withDurability(connection: AuthorityConnection, finish: () => ExtensionAuthorityResponse): ExtensionAuthorityResponse {
+    const synchronous = connection.pragma('synchronous', { simple: true });
+    if (typeof synchronous !== 'number' || ![0, 1, 2, 3].includes(synchronous)) return refuse();
+    // Flush replay/phase admission and the authority epoch even when the normal
+    // application pool uses WAL synchronous=NORMAL. Restore its policy afterwards.
+    connection.pragma('synchronous = FULL');
+    let response: ExtensionAuthorityResponse | undefined;
+    let failed = false;
+    try {
+      const managed = configuredResetFence();
+      response = managed ? managed.fence.write(managed.identity, finish) : finish();
+    } catch { failed = true; }
+    connection.pragma(`synchronous = ${synchronous}`);
+    if (failed || !response) return refuse();
+    return response;
   }
   private async releaseConnection(connection: AuthorityConnection): Promise<void> {
     try { await this.extensions.store.database.client.releaseConnection(connection); }
     catch { throw new AuthorityProofRefusal(); }
+  }
+  private finish(connection: AuthorityConnection, r: ExtensionAuthorityRequest,
+    initial: { initialEpoch: unknown; secret: string; keyPin: string }, deliver?: (response: ExtensionAuthorityResponse) => void): ExtensionAuthorityResponse {
+    const { initialEpoch, secret, keyPin } = initial;
+    const { fleet } = this.extensions;
+    const get = (sql: string, ...args: unknown[]) => connection.prepare(sql).get(...args);
+    const run = (sql: string, ...args: unknown[]) => connection.prepare(sql).run(...args);
+    const observe = () => {
+      if (this.stopped) return refuse();
+      clock(r);
+      const row = get(`SELECT e.epoch, m.role, m.source, i.instance_id FROM native_authority_epoch e
+        CROSS JOIN instance_members m CROSS JOIN extension_instance_identity i WHERE e.id=1 AND i.id=1 AND m.github_user_id=?`, String(r.extension.githubActorId));
+      if (!row || row.role !== 'admin' || row.source !== 'local' || !INSTANCE_PERMISSIONS.includes('instance.manage_settings')
+        || typeof row.epoch !== 'number' || !Number.isSafeInteger(row.epoch) || row.epoch < 1 || String(row.epoch) !== String(initialEpoch)
+        || row.instance_id !== r.extensionInstanceId || (r.authorityEpoch !== null && r.authorityEpoch !== String(row.epoch))) return refuse();
+      const native = fleet.extensionProofObservationSync();
+      for (const field of ['hostedInstanceId', 'storageInstanceId', 'runtimeGeneration', 'storageGeneration', 'placementGeneration'] as const) {
+        if (native.binding[field] !== r.extension[field]) return refuse();
+      }
+      if (native.secret !== secret || this.verificationKey() !== keyPin) return refuse();
+      clock(r);
+      return String(row.epoch);
+    };
+    // Persist replay tombstone independently of the proof transaction. An ambiguous
+    // failure burns the challenge; neither this nor the operation ledger is recycled.
+    connection.exec('BEGIN IMMEDIATE');
+    try {
+      observe();
+      if ((get('SELECT count(*) AS n FROM extension_authority_challenges')!.n as number) >= EXTENSION_AUTHORITY_LIMITS.challenges) return refuse();
+      run('INSERT INTO extension_authority_challenges(challenge) VALUES (?)', r.challenge);
+      connection.exec('COMMIT');
+    } catch (error) { if (connection.inTransaction) connection.exec('ROLLBACK'); throw error; }
+    connection.exec('BEGIN IMMEDIATE');
+    try {
+      const epoch = observe();
+      this.admitPhase(connection, r, epoch);
+      this.checkAcquisition(r);
+      observe();
+      // Commit phase admission before a reply can escape. A lost reply is never retryable.
+      connection.exec('COMMIT');
+      connection.exec('BEGIN IMMEDIATE');
+      const authorityEpoch = observe();
+      const statement = { contract: EXTENSION_AUTHORITY_CONTRACT, contractPin: extensionAuthorityPin, request: r,
+        requestCommitment: digest(r), authorityEpoch, role: 'admin' as const, source: 'local' as const,
+        permission: 'instance.manage_settings' as const, observedAt: Math.floor(Date.now() / 1000), expiresAt: r.expiresAt, connectAuthorityVerified: false as const };
+      const response = extensionAuthorityResponseSchema.parse({ statement, signature: sign(null, Buffer.from(canonicalFleetJson(statement)), this.key()).toString('base64url') });
+      if (Buffer.byteLength(JSON.stringify(response)) > EXTENSION_AUTHORITY_LIMITS.responseBytes) return refuse();
+      observe();
+      deliver?.(response);
+      connection.exec('ROLLBACK'); // Read-only final decision; release the writer barrier.
+      return response;
+    } catch (error) { if (connection.inTransaction) connection.exec('ROLLBACK'); throw error; }
+  }
+  private admitPhase(connection: AuthorityConnection, r: ExtensionAuthorityRequest, epoch: string): void {
+    const { fleet } = this.extensions;
+    const get = (sql: string, ...args: unknown[]) => connection.prepare(sql).get(...args);
+    const run = (sql: string, ...args: unknown[]) => connection.prepare(sql).run(...args);
+    const id = r.extension.operationId;
+    const prior = get('SELECT * FROM extension_authority_operations WHERE operation_id=?', id);
+    if (r.phase === 'request') {
+      if (prior || r.authorityEpoch !== null || (get('SELECT count(*) AS n FROM extension_authority_operations')!.n as number) >= EXTENSION_AUTHORITY_LIMITS.operations) return refuse();
+      run('INSERT INTO extension_authority_operations(operation_id, commitment, epoch) VALUES (?, ?, ?)', id, commitment(r), epoch);
+    } else {
+      if (!prior || prior.commitment !== commitment(r) || prior.epoch !== epoch || r.authorityEpoch !== epoch) return refuse();
+      if (r.phase === 'dispatch') {
+        if (prior.dispatched || prior.completed) return refuse();
+        // Any existing native tombstone, even torn/ambiguous, prohibits redispatch.
+        try { fleet.files.readSync(`extension-operation-${id}.json`); return refuse(); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        run('UPDATE extension_authority_operations SET dispatched=1 WHERE operation_id=?', id);
+      } else {
+        if (!prior.dispatched) return refuse();
+        const record = this.operation(id);
+        for (const field of Object.keys(r.extension) as Array<keyof typeof r.extension>) {
+          if (record.assertion[field] !== r.extension[field]) return refuse();
+        }
+        if (r.phase === 'completion') {
+          if (prior.completed || record.state !== 'completed') return refuse();
+          run('UPDATE extension_authority_operations SET completed=1 WHERE operation_id=?', id);
+        }
+      }
+    }
+  }
+  private checkAcquisition(r: ExtensionAuthorityRequest): void {
+    const id = r.extension.operationId;
+    if (r.acquisitionOperationId !== null) {
+      if (r.acquisitionOperationId === id) return refuse();
+      const acquisition = this.operation(r.acquisitionOperationId);
+      if (acquisition.state !== 'completed' || acquisition.assertion.action !== 'recipient.issue') return refuse();
+      for (const field of ['githubActorId', 'hostedInstanceId', 'storageInstanceId', 'runtimeGeneration', 'storageGeneration', 'placementGeneration'] as const) {
+        if (acquisition.assertion[field] !== r.extension[field]) return refuse();
+      }
+    }
   }
   private operation(id: string) {
     const raw = this.extensions.fleet.files.readSync(`extension-operation-${id}.json`);

@@ -1,37 +1,21 @@
+import type { StorageServices } from './services.js';
 import { removeRegisteredCache } from './cacheRemoval.js';
 import { GeneratedPayloadStorage } from './generatedPayloads.js';
 import { StorageContractError, confirmationInvalid, instanceSelectionChanged, validatePreviewSelection, type CleanupPreviewArgs, type CleanupPreviewRequest, type CandidateExecution, type SavedPreview } from './cleanupRequest.js';
 import fs from 'node:fs/promises';
-import sync from 'node:fs';
+import { proofIdentitySync } from './proofIdentity.js';
 import { DatabaseExports, type StorageAuthority } from './databaseExport.js';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { DEFAULT_STORAGE_POLICY, STORAGE_INSTANCE_CHANGED_CODE, type RepositoryStorageInventory, type StoragePolicy, type StorageObservation, type StorageCleanupPreview, type StorageCleanupResult, type StorageCandidate, type StorageProtection } from '@propr/shared';
-import { StorageLifecycle, StorageBusyError, assertRealDirectory } from './lifecycle.js';
-import { observeStorage, type StorageRoot } from './observation.js';
+import { StorageBusyError, assertRealDirectory } from './lifecycle.js';
+import { observeStorage } from './observation.js';
 import { auditRepository } from './repositorySafety.js';
 import type { CacheRecord } from './registry.js';
 import { resolveRepositoryClonePath } from '../git/repositoryPaths.js';
 
 export { StorageContractError, instanceSelectionChanged } from './cleanupRequest.js';
-interface StorageServices {
-  databaseFile?: string;
-  lifecycle: StorageLifecycle;
-  clonesRoot: string;
-  storageRoot?: string;
-  roots: StorageRoot[];
-  /** Called under the lifecycle barrier. Any unavailable authority must return true or throw. */
-  hasPendingTasks: () => Promise<boolean>;
-  remoteToken?: () => Promise<string>;
-  repositoryInventory?: () => Promise<string[]>;
-  auditRepository?: typeof auditRepository;
-  taskHistory?: {
-    inspect(ids: string[]): Promise<Array<{ candidate: StorageCandidate; fingerprint: string | null }>>;
-    erase(id: string, expected: string): Promise<boolean>;
-  };
-}
-
 /** A single instance, with no caller-controlled roots, remote URLs or filesystem operations. */
 export class InstanceStorageService {
   private initialized?: Promise<string>;
@@ -63,23 +47,8 @@ export class InstanceStorageService {
   }
   /** Fresh native identity for the authority proof's final synchronous section. */
   proofIdentitySync() {
-    let directory = path.resolve(this.root);
-    for (;;) {
-      const stat = sync.lstatSync(directory);
-      if (!stat.isDirectory() || stat.isSymbolicLink()) throw instanceSelectionChanged();
-      if (directory === path.resolve(this.root) && (stat.dev !== this.identityRoot?.dev || stat.ino !== this.identityRoot?.ino)) throw instanceSelectionChanged();
-      const parent = path.dirname(directory); if (parent === directory) break; directory = parent;
-    }
-    const file = sync.openSync(path.join(this.root, 'instance.json'), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    try {
-      const stat = sync.fstatSync(file);
-      if (!stat.isFile() || stat.nlink !== 1 || stat.size > 128) throw instanceSelectionChanged();
-      const bytes = Buffer.alloc(129); const length = sync.readSync(file, bytes, 0, bytes.length, 0);
-      if (length > 128) throw instanceSelectionChanged();
-      const instanceId = JSON.parse(bytes.subarray(0, length).toString('utf8'));
-      if (typeof instanceId !== 'string') throw instanceSelectionChanged();
-      return { storageInstanceId: instanceId, runtimeGeneration: this.exports?.generation ?? this.generation, storageGeneration: this.generation };
-    } finally { sync.closeSync(file); }
+    return { storageInstanceId: proofIdentitySync(this.root, this.identityRoot),
+      runtimeGeneration: this.exports?.generation ?? this.generation, storageGeneration: this.generation };
   }
   async inventory(): Promise<RepositoryStorageInventory> {
     if (!this.inventoryScan || Date.now() - this.inventoryAt > 60_000) {
