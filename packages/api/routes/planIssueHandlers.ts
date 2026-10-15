@@ -4,7 +4,7 @@ import {
   db,
   getPlanIssuesByDraft,
   getPlanIssuesByDraftPaginated,
-  getPlanIssue,
+  getPlanIssue, reconcilePlanIssueRefinement,
   updatePlanIssue,
   loadPrimaryProcessingLabels,
   getAuthenticatedOctokit,
@@ -319,9 +319,10 @@ export function createGetIssuesHandler(deps: PlanIssueDeps) {
           if (validStatuses.includes(status as PlanIssueStatus)) options.status = status as PlanIssueStatus;
         }
         const result = await getPlanIssuesByDraftPaginated(req.params.id, options);
-        res.json({ ...result, issues: (await withRecordedPullRequestActivity(db, result.issues)).map((issue) => resolveIssueForResponse(issue)) });
+        // Issues left refining after their follow-up work ended are settled as they are read.
+        res.json({ ...result, issues: (await withRecordedPullRequestActivity(db, await reconcilePlanIssueRefinement(result.issues))).map((issue) => resolveIssueForResponse(issue)) });
       } else {
-        res.json((await withRecordedPullRequestActivity(db, await getPlanIssuesByDraft(req.params.id))).map((issue) => resolveIssueForResponse(issue)));
+        res.json((await withRecordedPullRequestActivity(db, await reconcilePlanIssueRefinement(await getPlanIssuesByDraft(req.params.id)))).map((issue) => resolveIssueForResponse(issue)));
       }
     } catch (error) {
       console.error('Get issues error:', error);
