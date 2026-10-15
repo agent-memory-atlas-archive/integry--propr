@@ -185,6 +185,27 @@ describe('completion comment provenance round trip', () => {
         assert.deepEqual(collectFollowupRequestEvidence([user(4242, 'Drop row 1.', '2026-10-14T18:00:00Z'), completion], BOT).requests, []);
     });
 
+    test('an edit made before validation binds neither the queued nor the edited body', async () => {
+        const queuedBody = '/fix S1; change row20 to Follow-up acceptance row20';
+        const edited = user(5100, '/fix S1; remove row20', '2026-10-14T19:00:00Z');
+        const queuedWithoutTimestamp: UnprocessedComment = { id: edited.id, body: queuedBody, author: edited.user.login, type: 'issue' };
+        const queuedWithTimestamp = { ...queuedWithoutTimestamp, updated_at: '2026-10-14T19:00:00Z' } as UnprocessedComment;
+        for (const queued of [queuedWithoutTimestamp, queuedWithTimestamp]) {
+            const [validated] = await validateAndFilterComments([queued], [{ id: edited.id, body: edited.body, updated_at: '2026-10-14T19:05:00Z' }], 15, logger);
+            assert.equal(validated.acceptedBodySha256, undefined);
+            const completion = bot(edited.id + 1, await buildCompletionComment({ commitHash: '76350a7aa' }, [validated], context, result), '2026-10-14T19:10:00Z');
+            assert.deepEqual(collectFollowupRequestEvidence([edited, completion], BOT), { requests: [], unverified: [{ commentId: 5100, reason: 'unbound' }] });
+            assert.deepEqual(collectFollowupRequestEvidence([{ ...edited, body: queuedBody }, completion], BOT).requests, []);
+        }
+    });
+
+    test('a changed GitHub timestamp with the same body still binds it', async () => {
+        const request = user(5200, 'Rename row20.', '2026-10-14T19:00:00Z');
+        const queued = { id: request.id, body: request.body, author: request.user.login, type: 'issue', updated_at: '2026-10-14T19:00:00Z' } as UnprocessedComment;
+        const [validated] = await validateAndFilterComments([queued], [{ id: request.id, body: request.body, updated_at: '2026-10-14T19:05:00Z' }], 15, logger);
+        assert.equal(validated.acceptedBodySha256, acceptedRequestDigest(request.body));
+    });
+
     test('a partial run keeps its completed marker but binds no request', async () => {
         const request = user(6000, 'Rename row20.', '2026-10-14T19:00:00Z');
         const completion = await completionFor(request, { ...result, success: false, terminationReason: 'max_turns' } as ClaudeCodeResponse);
