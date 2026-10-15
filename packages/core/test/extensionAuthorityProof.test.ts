@@ -170,7 +170,10 @@ test('real private Unix listener and explicit public/tunnel refusal', async t =>
   const f = await fixture(t); const listener = await listenFleetData(f.fleet, f.extensions); f.cleanup.push(() => listener.shutdown());
   const send = (raw: string, url: string = EXTENSION_AUTHORITY_PATH) => new Promise<any>((resolve, reject) => {
     const req = request({ socketPath: listener.address()!, path: url, method: 'POST', headers: { 'Content-Type': 'application/json' } }, res => {
-      let body = ''; res.on('data', chunk => { body += chunk; }); res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: JSON.parse(body) }));
+      let body = ''; res.on('data', chunk => { body += chunk; }); res.on('end', () => {
+        if (url === EXTENSION_AUTHORITY_PATH && res.statusCode === 200) assert.equal(body, canonicalFleetJson(JSON.parse(body)));
+        resolve({ status: res.statusCode, headers: res.headers, body: JSON.parse(body) });
+      });
     }); req.on('error', reject); req.end(raw);
   });
   const r = f.fresh(); const result = await send(f.raw(r)); assert.equal(result.status, 200); assert.equal(result.headers['cache-control'], 'no-store');
@@ -402,4 +405,75 @@ test('operation ledger admits its last slot, retains refusals across restart, an
   await f.restart();
   await assert.rejects(f.invoke(f.fresh({ extension: { ...r.extension, operationId: randomUUID() } })), /unavailable/);
   assert.equal(await count(), EXTENSION_AUTHORITY_LIMITS.operations);
+});
+
+test('commit and delivery faults preserve exactly the durable admissions across restart', async t => {
+  for (const phase of ['request', 'dispatch', 'status', 'completion']) {
+    for (const fault of ['challenge-before', 'challenge-after', 'phase-before', 'phase-after', 'delivery-throw', 'delivery-lost']) {
+      await t.test(`${phase}: ${fault}`, async t => {
+        const f = await fixture(t);
+        const epoch = await f.epoch();
+        if (phase !== 'request') await f.invoke(f.fresh());
+        if (phase === 'status' || phase === 'completion') {
+          await f.invoke(f.fresh({ phase: 'dispatch', authorityEpoch: epoch }));
+          await f.record(f.base);
+        }
+        const r = f.fresh({ phase, authorityEpoch: phase === 'request' ? null : epoch });
+        const prior = await f.db('extension_authority_operations').first();
+        const conn = await f.db.client.acquireConnection();
+        conn.pragma('synchronous = NORMAL');
+        await f.db.client.releaseConnection(conn);
+        const exec = conn.exec.bind(conn);
+        let commits = 0; let injected = false; let deliveries = 0;
+        const target = fault.startsWith('challenge-') ? 1 : fault.startsWith('phase-') ? 2 : 0;
+        const mock = t.mock.method(conn, 'exec', (sql: string) => {
+          if (sql === 'COMMIT' && ++commits === target) {
+            injected = true;
+            // Cover both a definite uncommitted failure and a commit whose
+            // durable success was not reported back to its caller.
+            if (fault.endsWith('-after')) exec(sql);
+            throw Error('injected commit failure');
+          }
+          return exec(sql);
+        });
+        try {
+          const result = f.plane.invoke(f.raw(r), () => {
+            deliveries++;
+            assert.equal(conn.inTransaction, true);
+            assert.equal(conn.pragma('synchronous', { simple: true }), 2);
+            if (fault === 'delivery-throw') throw Error('injected socket write failure');
+            // A successful socket write is not evidence that a peer received it.
+            // Deliberately discard the reply in the delivery-lost case.
+          });
+          if (fault === 'delivery-lost') await result;
+          else await assert.rejects(result, /^Error: extension_authority_unavailable$/);
+          assert.equal(injected, target !== 0);
+          assert.equal(deliveries, target === 0 ? 1 : 0);
+          assert.equal(conn.inTransaction, false);
+          assert.equal(conn.pragma('synchronous', { simple: true }), 1);
+        } finally { mock.mock.restore(); }
+        const challengeCommitted = fault !== 'challenge-before';
+        const phaseCommitted = fault === 'phase-after' || fault.startsWith('delivery-');
+        for (const restart of [false, true]) {
+          if (restart) await f.restart();
+          assert.equal(Boolean(await f.db('extension_authority_challenges').where({ challenge: r.challenge }).first()), challengeCommitted);
+          const operation = await f.db('extension_authority_operations').first();
+          if (!phaseCommitted) assert.deepEqual(operation, prior);
+          else {
+            assert.equal(operation.epoch, epoch);
+            assert.equal(operation.dispatched, phase === 'request' ? 0 : 1);
+            assert.equal(operation.completed, phase === 'completion' ? 1 : 0);
+          }
+        }
+        if (challengeCommitted) await assert.rejects(f.invoke(r), /unavailable/);
+        else await f.invoke(r); // A rolled-back challenge was never admitted.
+        const retry = f.fresh({ phase, authorityEpoch: r.authorityEpoch });
+        if ((phaseCommitted || !challengeCommitted) && phase !== 'status') {
+          await assert.rejects(f.invoke(retry), /unavailable/);
+        } else {
+          verifyProof(await f.invoke(retry), retry, f.plane.verificationKey(), Date.now(), new Set());
+        }
+      });
+    }
+  }
 });

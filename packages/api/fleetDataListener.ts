@@ -1,5 +1,5 @@
 import { ExtensionAuthorityProofPlane } from '../core/src/fleet/extensionAuthorityProof.js';
-import { EXTENSION_AUTHORITY_PATH } from '@propr/shared';
+import { canonicalFleetJson, EXTENSION_AUTHORITY_PATH } from '@propr/shared';
 import type { NativeResetRuntime } from '../core/src/fleet/nativeReset.js';
 import { FLEET_EXTENSION_LIMITS, FLEET_RESET_PATH, FLEET_RESET_LIMITS } from '@propr/shared';
 import { FleetResetProofPlane } from '../core/src/fleet/resetProof.js';
@@ -132,7 +132,7 @@ export async function listenFleetData(plane: FleetListenerPlane, extensions?: Fl
       const raw = Buffer.concat(parts).toString('utf8');
       if (req.url === EXTENSION_AUTHORITY_PATH) {
         await proof!.invoke(raw, response => {
-          res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(response));
+          res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(canonicalFleetJson(response));
         });
       } else if (req.url === FLEET_RESET_PATH) {
         const body = JSON.stringify(await reset!.invoke(raw));
