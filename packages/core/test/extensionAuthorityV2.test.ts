@@ -286,18 +286,28 @@ test('authority changes during native work roll back the mutation and leave a te
     const f = await fixture(t); const w = await f.newWork(); await f.invoke(f.request(w));
     const r = f.request(w, 'dispatch'); const realNow = Date.now;
     const original = f.extensions.dispatchAtomic.bind(f.extensions);
+    let authorityChanged = false;
     t.mock.method(f.extensions, 'dispatchAtomic', async (...args: Parameters<typeof original>) => {
       const outcome = await original(...args);
-      const database = args[3];
-      if (kind === 'actor') await database('instance_members').update({ source: 'managed' });
-      if (kind === 'extension') await database('extension_instance_identity').update({ instance_id: randomUUID() });
+      const { database } = args[3];
+      assert.equal((await database('extension_profiles')).length, 1, 'native mutation must precede the authority change');
+      if (kind === 'actor') assert.equal(await database('instance_members').update({ source: 'managed' }), 1);
+      if (kind === 'extension') assert.equal(await database('extension_instance_identity').update({ instance_id: randomUUID() }), 1);
       if (kind === 'key') await fs.writeFile(path.join(f.control, 'native-authority-key.pem'), generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }));
       if (kind === 'trust') await f.writeTrust({ ...f.trust, authorityEpoch: '2' });
       if (kind === 'runtime') (f.storage as any).generation = randomUUID();
       if (kind === 'expiry') Date.now = () => r.expiresAt * 1000;
+      authorityChanged = true;
       return outcome;
     });
-    try { await assert.rejects(f.plane.invoke(canonical(f.envelope(r, create))), /unavailable/); }
+    try {
+      await assert.rejects(f.plane.invoke(canonical(f.envelope(r, create))), error => {
+        // invoke normalizes all errors, including failed test injections.
+        assert.ok(authorityChanged, 'the intended authority change must complete before refusal');
+        assert.match((error as Error).message, /unavailable/);
+        return true;
+      });
+    }
     finally { Date.now = realNow; }
     assert.equal((await f.db('extension_profiles')).length, 0);
     assert.ok(await f.db('extension_authority_v2_intents').where({ challenge: r.challenge }).first());
