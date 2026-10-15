@@ -23,7 +23,8 @@ export function valid(s, v) {
   if (s.type === 'string') {
     if (typeof v !== 'string' || (s.pattern && !new RegExp(s.pattern).test(v)) || (s.minLength !== undefined && v.length < s.minLength)
       || (s.maxLength !== undefined && v.length > s.maxLength)) return false;
-    if (s.format === 'uuid' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)) return false;
+    // UUID vocabulary is fully specified by the pinned pattern, including nil/max.
+    // Do not narrow it with a second interpretation of the format annotation.
   }
   if ((s.type === 'integer' || s.type === 'number') && (typeof v !== 'number' || !Number.isSafeInteger(v)
     || (s.exclusiveMinimum !== undefined && v <= s.exclusiveMinimum) || (s.exclusiveMaximum !== undefined && v >= s.exclusiveMaximum)

@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { request } from 'node:http';
 import knex from 'knex';
-import { canonicalFleetJson, EXTENSION_AUTHORITY_CONTRACT, EXTENSION_AUTHORITY_PATH, EXTENSION_AUTHORITY_SCHEMA,
+import { canonicalFleetJson, EXTENSION_AUTHORITY_CONTRACT, EXTENSION_AUTHORITY_PATH, EXTENSION_AUTHORITY_SCHEMA, EXTENSION_AUTHORITY_LIMITS,
+  extensionAuthorityRequestSchema, extensionAuthorityResponseSchema,
   FLEET_EXTENSION_CONTRACT, FLEET_EXTENSION_SCOPE, QUALIFIED_EXTENSION_PIN } from '@propr/shared';
 import { up } from '../src/db/migrations/20261015070000_extension_authority_epoch.js';
 import { FleetExtensionPlane } from '../src/fleet/extensions.js';
@@ -16,7 +17,7 @@ import { ExtensionAuthorityProofPlane, extensionAuthorityPin } from '../src/flee
 import { InstanceStorageService } from '../src/storage/service.js';
 import { StorageLifecycle } from '../src/storage/lifecycle.js';
 import { listenFleetData, refusePublicFleetData } from '../../api/fleetDataListener.js';
-import { verifyProof } from '../../../docs/contracts/extension-authority-v1/verifier.mjs';
+import { verifyProof, valid } from '../../../docs/contracts/extension-authority-v1/verifier.mjs';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 const secret = 'SENTINEL-TRANSPORT-SECRET-NEVER-IN-PROOF';
 async function fixture(t: any) {
@@ -288,4 +289,117 @@ test('configured native reset generation fencing also refuses authority proof', 
     configuredResetFence()?.fence.close(); fence.close();
     if (old === undefined) delete process.env.PROPR_FLEET_RESET_RUNTIME_ROOT; else process.env.PROPR_FLEET_RESET_RUNTIME_ROOT = old;
   }
+});
+
+test('every published UUID field agrees with native schemas and signed proof verification', async () => {
+  const bundle = JSON.parse(EXTENSION_AUTHORITY_SCHEMA);
+  const fixture = JSON.parse(await fs.readFile('docs/contracts/extension-authority-v1/fixtures.json', 'utf8'));
+  const paths: string[][] = [];
+  const visit = (schema: any, path: string[] = []) => {
+    if (schema.format === 'uuid') { assert.equal(typeof schema.pattern, 'string'); paths.push(path); }
+    for (const [key, child] of Object.entries(schema.properties ?? {})) visit(child, [...path, key]);
+    for (const child of schema.anyOf ?? []) visit(child, path);
+  };
+  visit(bundle.envelope.properties.request);
+  assert.ok(paths.some(path => path.join('.') === 'extension.operationId'));
+  assert.ok(paths.some(path => path.join('.') === 'extensionInstanceId'));
+  assert.ok(paths.some(path => path.join('.') === 'acquisitionOperationId'));
+  const key = generateKeyPairSync('ed25519');
+  const pin = key.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url');
+  const cases: Array<[string, boolean]> = [
+    ['00000000-0000-0000-0000-000000000000', true],
+    ['ffffffff-ffff-ffff-ffff-ffffffffffff', true],
+    ['FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF', false],
+    ...Array.from({ length: 8 }, (_, i): [string, boolean] => [`12345678-abcd-${i + 1}123-8123-123456789abc`, true]),
+    ['12345678-ABCD-4123-B123-123456789ABC', true],
+    ['12345678-abcd-0123-8123-123456789abc', false],
+    ['12345678-abcd-9123-8123-123456789abc', false],
+    ['12345678-abcd-4123-7123-123456789abc', false],
+    ['00000000-0000-0000-0000-000000000001', false],
+    ['ffffffff-ffff-ffff-ffff-fffffffffffe', false],
+    ['12345678-abcd-4123-8123-123456789abg', false],
+    ['12345678abcd41238123123456789abc', false],
+    ['', false],
+  ];
+  for (const path of paths) for (const [value, accepted] of cases) {
+    const request = structuredClone(fixture.request);
+    let parent = request;
+    for (const key of path.slice(0, -1)) parent = parent[key];
+    parent[path.at(-1)!] = value;
+    const statement = { ...fixture.response.statement, request, requestCommitment: hash(canonicalFleetJson(request)) };
+    const response = { statement, signature: sign(null, Buffer.from(canonicalFleetJson(statement)), key.privateKey).toString('base64url') };
+    const label = `${path.join('.')}=${value}`;
+    assert.equal(extensionAuthorityRequestSchema.safeParse(request).success, accepted, label);
+    assert.equal(extensionAuthorityResponseSchema.safeParse(response).success, accepted, label);
+    assert.equal(valid(bundle.envelope.properties.request, request), accepted, label);
+    assert.equal(valid(bundle.response, response), accepted, label);
+    const consumed = new Set();
+    if (accepted) {
+      assert.deepEqual(verifyProof(response, request, pin, fixture.nowMs, consumed), statement, label);
+      assert.ok(consumed.has(request.challenge));
+    } else {
+      assert.throws(() => verifyProof(response, request, pin, fixture.nowMs, consumed), /unavailable/, label);
+      assert.equal(consumed.size, 0);
+    }
+  }
+});
+test('native sentinel operation IDs produce verifiable proofs', async t => {
+  const f = await fixture(t);
+  for (const operationId of ['00000000-0000-0000-0000-000000000000', 'ffffffff-ffff-ffff-ffff-ffffffffffff']) {
+    const r = f.fresh({ extension: { ...f.base.extension, operationId } });
+    verifyProof(await f.invoke(r), r, f.plane.verificationKey(), Date.now(), new Set());
+  }
+});
+test('challenge ledger admits its last slot and refuses further admissions at capacity after restart', async t => {
+  const f = await fixture(t);
+  // Seed historical tombstones in one transaction without changing the production cap.
+  await f.db.raw(`WITH RECURSIVE entries(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM entries WHERE n < ?)
+    INSERT INTO extension_authority_challenges(challenge) SELECT printf('%064x', n) FROM entries`, [EXTENSION_AUTHORITY_LIMITS.challenges - 1]);
+  const r = f.fresh(); const reply = await f.invoke(r);
+  verifyProof(reply, r, f.plane.verificationKey(), Date.now(), new Set());
+  const count = async (table: string) => Number((await f.db(table).count('* as n').first())!.n);
+  assert.equal(await count('extension_authority_challenges'), EXTENSION_AUTHORITY_LIMITS.challenges);
+  for (const restart of [false, true]) {
+    if (restart) await f.restart();
+    const next = f.fresh({ extension: { ...r.extension, operationId: randomUUID() } });
+    await assert.rejects(f.invoke(next), /unavailable/);
+    await assert.rejects(f.invoke(f.fresh({ phase: 'dispatch', authorityEpoch: reply.statement.authorityEpoch })), /unavailable/);
+    assert.equal(await count('extension_authority_challenges'), EXTENSION_AUTHORITY_LIMITS.challenges);
+    assert.equal(await count('extension_authority_operations'), 1);
+    assert.equal(await f.db('extension_authority_challenges').where({ challenge: next.challenge }).first(), undefined);
+    assert.equal((await f.db('extension_authority_operations').where({ operation_id: r.extension.operationId }).first()).dispatched, 0);
+    assert.ok(await f.db('extension_authority_challenges').where({ challenge: r.challenge }).first());
+  }
+});
+test('operation ledger admits its last slot, retains refusals across restart, and permits admitted phases', async t => {
+  const f = await fixture(t);
+  await f.db.raw(`WITH RECURSIVE entries(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM entries WHERE n < ?)
+    INSERT INTO extension_authority_operations(operation_id, commitment, epoch, dispatched, completed)
+    SELECT printf('00000000-0000-4000-8000-%012x', n), ?, ?, 1, 1 FROM entries`,
+  [EXTENSION_AUTHORITY_LIMITS.operations - 1, 'a'.repeat(64), await f.epoch()]);
+  const r = f.fresh(); const reply = await f.invoke(r); const epoch = reply.statement.authorityEpoch;
+  verifyProof(reply, r, f.plane.verificationKey(), Date.now(), new Set());
+  const count = async () => Number((await f.db('extension_authority_operations').count('* as n').first())!.n);
+  assert.equal(await count(), EXTENSION_AUTHORITY_LIMITS.operations);
+  const refused: string[] = [];
+  for (const restart of [false, true]) {
+    if (restart) await f.restart();
+    const next = f.fresh({ extension: { ...r.extension, operationId: randomUUID() } });
+    await assert.rejects(f.invoke(next), /unavailable/);
+    refused.push(next.challenge);
+    assert.equal(await count(), EXTENSION_AUTHORITY_LIMITS.operations);
+    assert.equal(await f.db('extension_authority_operations').where({ operation_id: next.extension.operationId }).first(), undefined);
+    // The independent challenge transaction remains durable even when operation admission fails.
+    for (const challenge of refused) assert.ok(await f.db('extension_authority_challenges').where({ challenge }).first());
+  }
+  for (const phase of ['dispatch', 'status', 'completion']) {
+    if (phase === 'status') await f.record(r);
+    const next = f.fresh({ phase, authorityEpoch: epoch });
+    verifyProof(await f.invoke(next), next, f.plane.verificationKey(), Date.now(), new Set());
+  }
+  assert.equal(await count(), EXTENSION_AUTHORITY_LIMITS.operations);
+  assert.equal((await f.db('extension_authority_operations').where({ operation_id: r.extension.operationId }).first()).completed, 1);
+  await f.restart();
+  await assert.rejects(f.invoke(f.fresh({ extension: { ...r.extension, operationId: randomUUID() } })), /unavailable/);
+  assert.equal(await count(), EXTENSION_AUTHORITY_LIMITS.operations);
 });
