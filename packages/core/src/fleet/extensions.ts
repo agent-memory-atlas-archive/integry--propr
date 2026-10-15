@@ -164,7 +164,8 @@ export class FleetExtensionPlane {
   /** Internal v2 adapter: all store reads/writes use the caller's SQLite transaction.
    * Reuse native dispatch and volatile recipients; never invoke the v1 journal path. */
   async dispatchAtomic(a: FleetExtensionAssertion, r: FleetExtensionRequest, rawIntent: unknown,
-    { database, guard, secret }: { database: Knex; guard: (assertion?: FleetExtensionAssertion) => void; secret: string }): Promise<{ result: unknown; discard: () => void }> {
+    options: { database: Knex; guard: (assertion?: FleetExtensionAssertion) => void; secret: string }): Promise<{ result: unknown; discard: () => void }> {
+    const { database, guard, secret } = options;
     // Recovery shares this module but must not initialize the application logger
     // (or its transport worker). Load the store only for a native v2 dispatch.
     const { ExtensionProfileStore } = await import('../extensions/extensionProfileStore.js');

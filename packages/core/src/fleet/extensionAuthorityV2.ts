@@ -23,6 +23,12 @@ interface Connection {
   exec(sql: string): unknown;
   pragma(sql: string, options?: { simple: boolean }): unknown;
 }
+interface ObservationContext {
+  envelope: ReturnType<typeof authorityV2EnvelopeSchema.parse>;
+  trust: ReturnType<typeof routingTrustSchema.parse>;
+  nativePin: string;
+  secret: string;
+}
 /** Bind every query and nested store transaction to the manually owned connection.
  * A nested transaction is a scope, not a commit: the outer owner rolls everything
  * back on any error. No pooled query or independent save can escape this boundary. */
@@ -86,40 +92,13 @@ export class ExtensionAuthorityV2Plane {
     try {
       const { envelope, trust, nativePin, secret } = await this.authenticate(raw);
       const { request: r, routing, native } = envelope;
-      const s = routing.statement;
       connection = await this.extensions.store.database.client.acquireConnection();
       const c = connection!;
       synchronous = this.synchronousPolicy(c);
       c.pragma('synchronous = FULL');
       const get = (sql: string, ...args: unknown[]) => c.prepare(sql).get(...args);
       const run = (sql: string, ...args: unknown[]) => c.prepare(sql).run(...args);
-      let latestObservation = 0;
-      const checkTime = (now: number, high: Record<string, unknown> | undefined) => {
-        if (!Number.isSafeInteger(now) || now < latestObservation || !high || now < Number(high.checked_ms) || r.issuedAt * 1000 > now || now >= r.expiresAt * 1000
-          || r.expiresAt <= r.issuedAt || r.expiresAt - r.issuedAt > limits.seconds
-          || s.checkedAt < r.issuedAt || s.checkedAt * 1000 > now || s.checkedAt >= s.expiresAt) return refuse();
-        const a = r.work.extension;
-        if (r.phase === 'dispatch' && (a.issuedAt * 1000 > now || now >= a.expiresAt * 1000
-          || a.expiresAt <= a.issuedAt || a.expiresAt - a.issuedAt > 60)) return refuse();
-      };
-      const observe = () => {
-        if (this.stopped) return refuse();
-        const now = Date.now();
-        const high = get('SELECT checked_ms FROM extension_authority_v2_clock WHERE id=1');
-        checkTime(now, high);
-        const a = r.work.extension;
-        const row = get(`SELECT e.epoch, m.role, m.source, i.instance_id FROM native_authority_epoch e
-          CROSS JOIN instance_members m CROSS JOIN extension_instance_identity i WHERE e.id=1 AND i.id=1 AND m.github_user_id=?`, String(a.githubActorId));
-        if (!INSTANCE_PERMISSIONS.includes('instance.manage_settings') || !row || row.role !== 'admin' || row.source !== 'local' || !Number.isSafeInteger(row.epoch) || String(row.epoch) !== r.work.coreAuthorityEpoch
-          || row.instance_id !== r.work.extensionInstanceId) return refuse();
-        const current = this.extensions.fleet.extensionProofObservationSync();
-        for (const field of ['hostedInstanceId', 'storageInstanceId', 'runtimeGeneration', 'storageGeneration', 'placementGeneration'] as const) {
-          if (current.binding[field] !== a[field]) return refuse();
-        }
-        if (current.secret !== secret || this.verificationKey() !== nativePin || digest(this.trust().trust) !== digest(trust)) return refuse();
-        latestObservation = now;
-        return now;
-      };
+      const observe = this.observer(c, { envelope, trust, nativePin, secret });
       const commit = () => {
         const finish = () => { const now = observe(); run('UPDATE extension_authority_v2_clock SET checked_ms=? WHERE id=1', now); c.exec('COMMIT'); };
         const managed = configuredResetFence();
@@ -127,44 +106,17 @@ export class ExtensionAuthorityV2Plane {
       };
       const id = r.work.extension.operationId;
       const envelopeDigest = digest(envelope);
-      const replay = (prior: Record<string, unknown>) => {
-        if (r.phase === 'status' || prior.envelope_digest !== envelopeDigest) return refuse();
-        const retained = get('SELECT * FROM extension_authority_v2_receipts WHERE challenge=?', r.challenge);
-        if (!retained) return refuse(); // Intent without receipt is terminally incomplete; never redispatch.
-        const response = authorityV2ResponseSchema.parse(JSON.parse(String(retained.response)));
-        if (digest(response) !== retained.response_digest || canonical(response) !== retained.response
-          || canonical(response.statement.request) !== canonical(r)
-          || !verify(null, Buffer.from(canonical(response.statement)), createPublicKey(this.key()), Buffer.from(response.signature, 'base64url'))) return refuse();
-        return response;
-      };
-      const admitOperation = (operation: Record<string, unknown> | undefined) => {
-        if (r.phase === 'request') {
-          if (operation || Number(get('SELECT count(*) AS n FROM extension_authority_v2_operations')!.n) >= limits.operations) return refuse();
-          // Reject a v1 operation, including an incomplete tombstone.
-          this.absentNative(id);
-          run('INSERT INTO extension_authority_v2_operations VALUES (?, ?, ?, ?, ?)', id, digest(r.work), r.work.extension.nonce, digest(trust), digest(nativePin));
-        } else if (!operation || operation.work_digest !== digest(r.work) || operation.trust_digest !== digest(trust)
-          || operation.core_key_digest !== digest(nativePin)) return refuse();
-      };
       c.exec('BEGIN IMMEDIATE');
       observe();
       const prior = get('SELECT * FROM extension_authority_v2_intents WHERE challenge=?', r.challenge);
       if (prior) {
-        const response = replay(prior);
+        const response = this.replay(c, r, envelopeDigest, prior);
         commit(); deliver?.(response); return response;
       }
       if (Number(get('SELECT count(*) AS n FROM extension_authority_v2_intents')!.n) >= limits.challenges) return refuse();
       const operation = get('SELECT * FROM extension_authority_v2_operations WHERE operation_id=?', id);
-      admitOperation(operation);
-      const receiptFor = (phase: string) => {
-        const row = get(`SELECT r.response, r.response_digest FROM extension_authority_v2_receipts r JOIN extension_authority_v2_intents i USING(challenge) WHERE i.operation_id=? AND i.phase=?`, id, phase);
-        if (!row) return undefined;
-        const value = authorityV2ResponseSchema.parse(JSON.parse(String(row.response)));
-        if (digest(value) !== row.response_digest || canonical(value) !== row.response
-          || value.statement.request.phase !== phase || digest(value.statement.request.work) !== digest(r.work)
-          || value.statement.trustDigest !== digest(trust) || !verify(null, Buffer.from(canonical(value.statement)), createPublicKey(this.key()), Buffer.from(value.signature, 'base64url'))) return refuse();
-        return value;
-      };
+      this.admitOperation(c, { envelope, trust, nativePin, secret }, operation);
+      const receiptFor = (phase: string) => this.receiptFor(c, { envelope, trust, nativePin, secret }, phase);
       if (r.phase !== 'request' && r.phase !== 'status' && !receiptFor('request')) return refuse();
       const dispatch = receiptFor('dispatch');
       if (r.phase === 'completion' && !dispatch) return refuse();
@@ -216,6 +168,78 @@ export class ExtensionAuthorityV2Plane {
     } catch { discard?.(); return refuse(); }
     finally { await this.releaseConnection(connection, synchronous); }
   }
+  private checkTime(context: ObservationContext, latestObservation: number, now: number, high: Record<string, unknown> | undefined) {
+    const { envelope: { request: r, routing: { statement: s } } } = context;
+    if (!Number.isSafeInteger(now) || now < latestObservation || !high || now < Number(high.checked_ms) || r.issuedAt * 1000 > now || now >= r.expiresAt * 1000
+      || r.expiresAt <= r.issuedAt || r.expiresAt - r.issuedAt > limits.seconds
+      || s.checkedAt < r.issuedAt || s.checkedAt * 1000 > now || s.checkedAt >= s.expiresAt) return refuse();
+    const a = r.work.extension;
+    if (r.phase === 'dispatch' && (a.issuedAt * 1000 > now || now >= a.expiresAt * 1000
+      || a.expiresAt <= a.issuedAt || a.expiresAt - a.issuedAt > 60)) return refuse();
+  }
+
+  private observer(c: Connection, context: ObservationContext) {
+    const { envelope: { request: r }, trust, nativePin, secret } = context;
+    const get = (sql: string, ...args: unknown[]) => c.prepare(sql).get(...args);
+    let latestObservation = 0;
+    return () => {
+      if (this.stopped) return refuse();
+      const now = Date.now();
+      const high = get('SELECT checked_ms FROM extension_authority_v2_clock WHERE id=1');
+      this.checkTime(context, latestObservation, now, high);
+      const a = r.work.extension;
+      const row = get(`SELECT e.epoch, m.role, m.source, i.instance_id FROM native_authority_epoch e
+        CROSS JOIN instance_members m CROSS JOIN extension_instance_identity i WHERE e.id=1 AND i.id=1 AND m.github_user_id=?`, String(a.githubActorId));
+      if (!INSTANCE_PERMISSIONS.includes('instance.manage_settings') || !row || row.role !== 'admin' || row.source !== 'local' || !Number.isSafeInteger(row.epoch) || String(row.epoch) !== r.work.coreAuthorityEpoch
+        || row.instance_id !== r.work.extensionInstanceId) return refuse();
+      const current = this.extensions.fleet.extensionProofObservationSync();
+      for (const field of ['hostedInstanceId', 'storageInstanceId', 'runtimeGeneration', 'storageGeneration', 'placementGeneration'] as const) {
+        if (current.binding[field] !== a[field]) return refuse();
+      }
+      if (current.secret !== secret || this.verificationKey() !== nativePin || digest(this.trust().trust) !== digest(trust)) return refuse();
+      latestObservation = now;
+      return now;
+    };
+  }
+  private replay(c: Connection, r: AuthorityV2Request, envelopeDigest: string, prior: Record<string, unknown>) {
+    const get = (sql: string, ...args: unknown[]) => c.prepare(sql).get(...args);
+    if (r.phase === 'status' || prior.envelope_digest !== envelopeDigest) return refuse();
+    const retained = get('SELECT * FROM extension_authority_v2_receipts WHERE challenge=?', r.challenge);
+    if (!retained) return refuse(); // Intent without receipt is terminally incomplete; never redispatch.
+    const response = authorityV2ResponseSchema.parse(JSON.parse(String(retained.response)));
+    if (digest(response) !== retained.response_digest || canonical(response) !== retained.response
+      || canonical(response.statement.request) !== canonical(r)
+      || !verify(null, Buffer.from(canonical(response.statement)), createPublicKey(this.key()), Buffer.from(response.signature, 'base64url'))) return refuse();
+    return response;
+  }
+
+  private admitOperation(c: Connection, context: ObservationContext, operation: Record<string, unknown> | undefined) {
+    const { envelope: { request: r }, trust, nativePin } = context;
+    const id = r.work.extension.operationId;
+    const get = (sql: string, ...args: unknown[]) => c.prepare(sql).get(...args);
+    const run = (sql: string, ...args: unknown[]) => c.prepare(sql).run(...args);
+    if (r.phase === 'request') {
+      if (operation || Number(get('SELECT count(*) AS n FROM extension_authority_v2_operations')!.n) >= limits.operations) return refuse();
+      // Reject a v1 operation, including an incomplete tombstone.
+      this.absentNative(id);
+      run('INSERT INTO extension_authority_v2_operations VALUES (?, ?, ?, ?, ?)', id, digest(r.work), r.work.extension.nonce, digest(trust), digest(nativePin));
+    } else if (!operation || operation.work_digest !== digest(r.work) || operation.trust_digest !== digest(trust)
+      || operation.core_key_digest !== digest(nativePin)) return refuse();
+  }
+
+  private receiptFor(c: Connection, context: ObservationContext, phase: string) {
+    const { envelope: { request: r }, trust } = context;
+    const id = r.work.extension.operationId;
+    const get = (sql: string, ...args: unknown[]) => c.prepare(sql).get(...args);
+    const row = get(`SELECT r.response, r.response_digest FROM extension_authority_v2_receipts r JOIN extension_authority_v2_intents i USING(challenge) WHERE i.operation_id=? AND i.phase=?`, id, phase);
+    if (!row) return undefined;
+    const value = authorityV2ResponseSchema.parse(JSON.parse(String(row.response)));
+    if (digest(value) !== row.response_digest || canonical(value) !== row.response
+      || value.statement.request.phase !== phase || digest(value.statement.request.work) !== digest(r.work)
+      || value.statement.trustDigest !== digest(trust) || !verify(null, Buffer.from(canonical(value.statement)), createPublicKey(this.key()), Buffer.from(value.signature, 'base64url'))) return refuse();
+    return value;
+  }
+
   private synchronousPolicy(c: Connection) {
     if (typeof c.prepare !== 'function' || c.inTransaction) return refuse();
     const priorPolicy = c.pragma('synchronous', { simple: true });
@@ -281,8 +305,11 @@ export class ExtensionAuthorityV2Plane {
     if (canonical(response) !== row.response || digest(response) !== row.response_digest
       || response.statement.request.phase !== 'dispatch' || a.extension.operationId !== id
       || !verify(null, Buffer.from(canonical(response.statement)), createPublicKey(this.key()), Buffer.from(response.signature, 'base64url'))
-      || response.statement.trustDigest !== digest(this.trust().trust) || a.extension.action !== 'recipient.issue' || response.statement.result.state !== 'completed'
-      || canonical(a.scope) !== canonical(r.work.scope) || a.coreAuthorityEpoch !== r.work.coreAuthorityEpoch
+      || response.statement.trustDigest !== digest(this.trust().trust) || a.extension.action !== 'recipient.issue' || response.statement.result.state !== 'completed') return refuse();
+    this.checkAcquisitionWork(a, r);
+  }
+  private checkAcquisitionWork(a: AuthorityV2Request['work'], r: AuthorityV2Request) {
+    if (canonical(a.scope) !== canonical(r.work.scope) || a.coreAuthorityEpoch !== r.work.coreAuthorityEpoch
       || a.extensionInstanceId !== r.work.extensionInstanceId) return refuse();
     for (const field of ['githubActorId', 'hostedInstanceId', 'storageInstanceId', 'runtimeGeneration', 'storageGeneration', 'placementGeneration'] as const) {
       if (a.extension[field] !== r.work.extension[field]) return refuse();

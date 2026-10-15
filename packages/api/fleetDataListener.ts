@@ -107,6 +107,21 @@ function refusalCode(url: string | undefined) {
       : url === '/extensions/v1/invoke' ? 'fleet_extensions_unavailable' : 'fleet_data_unavailable';
 }
 
+async function readRequestBytes(req: import('node:http').IncomingMessage): Promise<Buffer> {
+  const parts: Buffer[] = []; let length = 0;
+  for await (const part of req) {
+    const bytes = Buffer.from(part); length += bytes.length;
+    if (length > requestByteLimit(req.url)) throw new Error();
+    parts.push(bytes);
+  }
+  return Buffer.concat(parts);
+}
+
+function decodeRequestBytes(url: string | undefined, bytes: Buffer): string {
+  return url === EXTENSION_AUTHORITY_V2_PATH
+    ? new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) : bytes.toString('utf8');
+}
+
 /** Separate Unix listener only. Never mount this handler on Express or the tunnel. */
 interface FleetListenerPlane {
   files: FleetDataPlane['files'];
@@ -135,17 +150,10 @@ export async function listenFleetData(plane: FleetListenerPlane, extensions?: Fl
     let timer: NodeJS.Timeout | undefined;
     try {
       if (req.method !== 'POST' || !isSupportedPath(req.url) || req.headers['content-type'] !== 'application/json' || req.headers['content-encoding']) throw new Error();
-      const parts: Buffer[] = []; let length = 0;
       timer = setTimeout(() => req.destroy(), 5000);
-      for await (const part of req) {
-        const bytes = Buffer.from(part); length += bytes.length;
-        if (length > requestByteLimit(req.url)) throw new Error();
-        parts.push(bytes);
-      }
+      const bytes = await readRequestBytes(req);
       clearTimeout(timer);
-      const bytes = Buffer.concat(parts);
-      const raw = req.url === EXTENSION_AUTHORITY_V2_PATH
-        ? new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) : bytes.toString('utf8');
+      const raw = decodeRequestBytes(req.url, bytes);
       if (req.url === EXTENSION_AUTHORITY_V2_PATH) {
         await dualProof!.invoke(raw, response => {
           res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(canonicalFleetJson(response));
