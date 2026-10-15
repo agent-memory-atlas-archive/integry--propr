@@ -43,7 +43,7 @@ function FakeRedis() {
 }
 await mock.module('ioredis', { namedExports: { Redis: FakeRedis } });
 
-type FakeJob = { id: string; name: string; data: Record<string, unknown>; state: string };
+type FakeJob = { id: string; name: string; data: Record<string, unknown>; state: string; processedOn?: number };
 let queueJobs: FakeJob[] = [];
 let queueReads = 0;
 const fakeQueue = { getJobs: async (states: string[]) => { queueReads++; return queueJobs.filter(job => states.includes(job.state)); } };
@@ -67,9 +67,13 @@ await mock.module('../packages/core/src/utils/eventPublisher.js', {
 const { db, runMigrations, closeConnection } = await import('../packages/core/src/db/connection.js');
 const { WorkerStateManager, TaskStates } = await import('../packages/core/src/utils/workerStateManager.js');
 const { PlanIssueStatus } = await import('../packages/core/src/config/planIssueManager.js');
-const { reconcilePlanIssueRefinement } = await import('../packages/core/src/services/taskPlanning/planRefinementSettlement.js');
+const { reconcilePlanIssueRefinement, syncPlanRefinementForPullRequest, syncPlanRefinementForJob } = await import('../packages/core/src/services/taskPlanning/planRefinementSettlement.js');
 const { handlePlanPRCommentTracking, handlePlanPRCommentActivity, handlePlanPRUpdate } = await import('../packages/core/src/webhook/planIssueTracking.js');
 const { getPendingPrCommentsKey } = await import('../packages/core/src/utils/constants.js');
+
+// The plan issues endpoint, served from this database through the real core exports.
+await mock.module('@propr/core', { namedExports: { ...await import('../packages/core/src/index.ts') } });
+const { createGetIssuesHandler } = await import('../packages/api/routes/planIssueHandlers.ts');
 
 await runMigrations();
 const stateManager = new WorkerStateManager({ keyPrefix: 'test:plan-refinement:' });
@@ -313,5 +317,177 @@ describe('read-path recovery of stale refinement', () => {
         });
         assert.equal(read.status, PlanIssueStatus.IN_REFINEMENT);
         assert.equal((await planIssue()).status, PlanIssueStatus.IN_REFINEMENT);
+    });
+});
+
+const followUpJob = (id: string, state: string, processedOn?: number): FakeJob =>
+    ({ id, name: 'processPullRequestComment', data: { repoOwner: OWNER, repoName: REPO, pullRequestNumber: PR }, state, processedOn });
+
+describe('work admitted while refinement is being settled', () => {
+    /**
+     * The read path has found no task and no queued job, and is reading the
+     * pending comments. Meanwhile a PR comment admits a delayed follow-up and
+     * its webhook synchronizes: the issue is still in_refinement, so marking it
+     * changes nothing. The read then resumes with its idle result.
+     */
+    function admitDuringPendingCommentRead() {
+        let admitted = false;
+        return {
+            countPendingComments: async () => {
+                if (!admitted) {
+                    admitted = true;
+                    queueJobs.push(followUpJob('job-late-comment', 'delayed'));
+                    await handlePlanPRCommentActivity(comment(), 'issue_comment', 'late');
+                    assert.equal((await planIssue()).status, PlanIssueStatus.IN_REFINEMENT, 'the webhook mark found nothing to change');
+                }
+                return 0;
+            },
+        };
+    }
+
+    test('a read-path settlement that raced a newly queued follow-up restores refinement', async () => {
+        const id = await seedPlanIssue(PlanIssueStatus.IN_REFINEMENT);
+        const [read] = await reconcilePlanIssueRefinement(await db('plan_issues').where({ id }), admitDuringPendingCommentRead());
+        assert.equal((await planIssue()).status, PlanIssueStatus.IN_REFINEMENT, 'queued follow-up keeps the issue refining');
+        assert.equal(read.status, PlanIssueStatus.IN_REFINEMENT, 'the read reports the stored status');
+        assert.deepEqual(activity.filter(event => event.domain === 'plan').map(event => event.change), ['blocked', 'created'],
+            'the list is told about the settlement and the restore');
+
+        // When that follow-up ends, the issue settles for good.
+        queueJobs = [];
+        assert.equal((await reconcilePlanIssueRefinement([await planIssue()]))[0].status, PlanIssueStatus.UNDER_REVIEW);
+    });
+
+    test('a comment sync that raced a newly queued follow-up restores refinement', async () => {
+        await seedPlanIssue(PlanIssueStatus.IN_REFINEMENT);
+        await syncPlanRefinementForPullRequest(REPOSITORY, PR, admitDuringPendingCommentRead());
+        assert.equal((await planIssue()).status, PlanIssueStatus.IN_REFINEMENT);
+    });
+
+    test('work that ends before the comment sync marks the issue does not leave it refining', async () => {
+        await seedPlanIssue(PlanIssueStatus.UNDER_REVIEW, 0);
+        let reads = 0;
+        // The first scan still lists the admitted job; it finishes (and its own settlement finds
+        // the issue under review, so settles nothing) before the mark is written.
+        await syncPlanRefinementForPullRequest(REPOSITORY, PR, {
+            listQueuedJobs: async () => (reads++ === 0 ? [followUpJob('job-brief', 'waiting')] : []),
+        });
+        assert.equal((await planIssue()).status, PlanIssueStatus.UNDER_REVIEW);
+    });
+
+    test('a merge recorded while settling is never reopened by the recheck', async () => {
+        const id = await seedPlanIssue(PlanIssueStatus.IN_REFINEMENT);
+        let reads = 0;
+        await reconcilePlanIssueRefinement(await db('plan_issues').where({ id }), {
+            countPendingComments: async () => {
+                // The second read is the recheck after the settlement write.
+                if (reads++ === 1) {
+                    await db('plan_issues').where({ id }).update({ status: PlanIssueStatus.MERGED });
+                    queueJobs.push(followUpJob('job-after-merge', 'delayed'));
+                }
+                return 0;
+            },
+        });
+        assert.equal((await planIssue()).status, PlanIssueStatus.MERGED);
+    });
+
+    test('a recheck that cannot be read keeps refinement', async () => {
+        const id = await seedPlanIssue(PlanIssueStatus.IN_REFINEMENT);
+        let reads = 0;
+        await reconcilePlanIssueRefinement(await db('plan_issues').where({ id }), {
+            countPendingComments: async () => {
+                if (reads++ === 1) throw new Error('redis down');
+                return 0;
+            },
+        });
+        assert.equal((await planIssue()).status, PlanIssueStatus.IN_REFINEMENT);
+    });
+});
+
+describe('BullMQ retries of a failed follow-up', () => {
+    test('a delayed retry and its resumed attempt keep the issue refining until the last attempt fails', async () => {
+        await seedPlanIssue(PlanIssueStatus.IN_REFINEMENT);
+        const firstAttempt = Date.now() - 60_000;
+        await stateManager.createTaskStateIfAbsent('job-retry', { number: PR, pullRequestNumber: PR, repoOwner: OWNER, repoName: REPO, type: 'pr-comment' }, null, 'job-retry');
+        queueJobs.push(followUpJob('job-retry', 'active', firstAttempt));
+        await stateManager.updateTaskState('job-retry', TaskStates.PROCESSING);
+
+        // Attempt 1 records the failure while BullMQ still lists it as active: it is wrapping up.
+        await stateManager.markTaskFailed('job-retry', new Error('agent crashed'));
+        assert.equal((await planIssue()).status, PlanIssueStatus.UNDER_REVIEW);
+
+        // BullMQ moves the job to delayed for its retry, then emits failed.
+        queueJobs = [followUpJob('job-retry', 'delayed', firstAttempt)];
+        await syncPlanRefinementForJob(queueJobs[0].data);
+        assert.equal((await planIssue()).status, PlanIssueStatus.IN_REFINEMENT, 'a delayed retry is queued work');
+        assert.equal((await reconcilePlanIssueRefinement([await planIssue()]))[0].status, PlanIssueStatus.IN_REFINEMENT);
+
+        // The retry resumes. Its task stays failed (a failed task only resumes on request), but the
+        // attempt started after that failure, so it is running work, not the old attempt wrapping up.
+        queueJobs = [followUpJob('job-retry', 'active', Date.now() + 1_000)];
+        await syncPlanRefinementForJob(queueJobs[0].data);
+        assert.equal((await reconcilePlanIssueRefinement([await planIssue()]))[0].status, PlanIssueStatus.IN_REFINEMENT,
+            'a resumed retry is not shown as in review');
+        assert.equal((await planIssue()).status, PlanIssueStatus.IN_REFINEMENT);
+
+        // A resumed attempt also brings back refinement that a read settled while it was delayed.
+        await db('plan_issues').update({ status: PlanIssueStatus.UNDER_REVIEW });
+        await syncPlanRefinementForJob(queueJobs[0].data);
+        assert.equal((await planIssue()).status, PlanIssueStatus.IN_REFINEMENT);
+
+        // The last attempt fails for good: BullMQ moves the job to failed.
+        queueJobs = [followUpJob('job-retry', 'failed', Date.now() + 1_000)];
+        await syncPlanRefinementForJob(queueJobs[0].data);
+        assert.equal((await planIssue()).status, PlanIssueStatus.UNDER_REVIEW);
+    });
+
+    test('a retry never reopens a merged or closed issue', async () => {
+        for (const terminal of [PlanIssueStatus.MERGED, PlanIssueStatus.CLOSED]) {
+            await db('plan_issues').delete();
+            await seedPlanIssue(terminal);
+            queueJobs = [followUpJob('job-retry', 'delayed')];
+            await syncPlanRefinementForJob(queueJobs[0].data);
+            assert.equal((await planIssue()).status, terminal);
+        }
+    });
+});
+
+describe('plan issues endpoint', () => {
+    function createResponse() {
+        return {
+            statusCode: 200, body: undefined as unknown,
+            status(code: number) { this.statusCode = code; return this; },
+            json(payload: unknown) { this.body = payload; return this; },
+        };
+    }
+
+    async function getIssues(query: Record<string, string>) {
+        const handler = createGetIssuesHandler({ verifyOwnership: async () => ({ authorized: true }) } as never);
+        const res = createResponse();
+        await handler({ params: { id: DRAFT }, query, user: { id: 'user-1' } } as never, res as never);
+        assert.equal(res.statusCode, 200);
+        return res.body as { issues: Array<{ issue_number: number; status: string }>; total: number };
+    }
+
+    test('stale refinement is settled before the status filter and pages are applied', async () => {
+        // Four issues left refining with no follow-up work, and one PR still being refined.
+        for (const n of [1, 2, 3, 4, 5]) {
+            await db('plan_issues').insert({ draft_id: DRAFT, repository: REPOSITORY, issue_number: n, pr_number: 100 + n, status: PlanIssueStatus.IN_REFINEMENT });
+        }
+        queueJobs.push({ ...followUpJob('job-105', 'waiting'), data: { repoOwner: OWNER, repoName: REPO, pullRequestNumber: 105 } });
+
+        const refiningFirst = await getIssues({ page: '0', limit: '2', status: PlanIssueStatus.IN_REFINEMENT });
+        assert.deepEqual(refiningFirst.issues.map(issue => [issue.issue_number, issue.status]), [[5, PlanIssueStatus.IN_REFINEMENT]],
+            'the page holds only issues that still match the filter');
+        assert.equal(refiningFirst.total, 1);
+        assert.deepEqual((await getIssues({ page: '1', limit: '2', status: PlanIssueStatus.IN_REFINEMENT })).issues, []);
+
+        // Consecutive pages under the settled status return every settled issue exactly once.
+        const pages = [
+            await getIssues({ page: '0', limit: '2', status: PlanIssueStatus.UNDER_REVIEW }),
+            await getIssues({ page: '1', limit: '2', status: PlanIssueStatus.UNDER_REVIEW }),
+        ];
+        assert.deepEqual(pages.map(page => page.total), [4, 4]);
+        assert.deepEqual(pages.flatMap(page => page.issues.map(issue => issue.issue_number)).sort(), [1, 2, 3, 4]);
     });
 });

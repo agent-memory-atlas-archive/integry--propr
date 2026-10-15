@@ -26,7 +26,7 @@ await mock.module('@propr/core', {
     getPlanIssuesByDraft: mockGetPlanIssuesByDraft,
     getPlanIssuesByDraftPaginated: mock.fn(async () => ({ issues: [], total: 0 })),
     updatePlanIssue: mockUpdatePlanIssue,
-    reconcilePlanIssueRefinement: async <T>(issues: T[]) => issues,
+    reconcileDraftPlanIssueRefinement: async () => {},
     loadPrimaryProcessingLabels: mockLoadPrimaryProcessingLabels,
     getAuthenticatedOctokit: mockGetAuthenticatedOctokit,
     getEpicExecutionQueue: async () => null,

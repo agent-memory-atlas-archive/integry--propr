@@ -189,6 +189,21 @@ function createMetricsRedis(): Redis {
 }
 
 /**
+ * A plan issue refines while its PR has queued or running work. A failed
+ * attempt settles it, so the retry BullMQ then delays, and later resumes,
+ * must bring refinement back. Best effort, like the task-side settlement.
+ */
+async function syncPlanRefinementForJobAttempt(job: Job | undefined): Promise<void> {
+    if (!job) return;
+    try {
+        const { syncPlanRefinementForJob } = await import('../services/taskPlanning/planRefinementSettlement.js');
+        await syncPlanRefinementForJob(job.data);
+    } catch (error) {
+        logger.warn({ jobId: job.id, error: (error as Error).message }, 'Failed to sync plan refinement for job attempt');
+    }
+}
+
+/**
  * Create a worker for processing jobs. Initializes Redis connection if needed.
  */
 export async function createWorker<T extends JobData = JobData, R extends JobResult = JobResult>(
@@ -236,7 +251,14 @@ export async function createWorker<T extends JobData = JobData, R extends JobRes
         }
     });
 
+    worker.on('active', (job: Job<T>) => {
+        // Only an attempt resuming after a failure or stall; first attempts are admitted by their webhook.
+        if (job.attemptsMade > 0 || (job.attemptsStarted ?? 0) > 1) void syncPlanRefinementForJobAttempt(job as unknown as Job);
+    });
+
     worker.on('failed', async (job: Job<T> | undefined, err: Error) => {
+        // BullMQ emits this after moving the job to delayed for its retry, or to failed for good.
+        void syncPlanRefinementForJobAttempt(job as unknown as Job | undefined);
         const jobData = job?.data as unknown as IssueJobData | undefined;
         logger.error({
             jobId: job?.id,

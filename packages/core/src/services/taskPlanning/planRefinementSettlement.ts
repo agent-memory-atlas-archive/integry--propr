@@ -36,6 +36,8 @@ export interface QueuedJobSnapshot {
     data: unknown;
     /** BullMQ state the job was listed under. */
     state: string;
+    /** When the job's current attempt started running (BullMQ `processedOn`, epoch ms). */
+    processedOn?: number | null;
 }
 
 /** Sources of follow-up work outside the tasks table, injectable for tests. */
@@ -100,7 +102,7 @@ async function listIssueQueueJobs(): Promise<QueuedJobSnapshot[]> {
     const jobs: QueuedJobSnapshot[] = [];
     for (const state of QUEUE_JOB_STATES) {
         for (const job of await queue.getJobs([state])) {
-            if (job) jobs.push({ id: job.id ?? null, data: job.data, state });
+            if (job) jobs.push({ id: job.id ?? null, data: job.data, state, processedOn: job.processedOn ?? null });
         }
     }
     return jobs;
@@ -156,27 +158,41 @@ async function pullRequestsWithOpenTasks(repository: string, wanted: Set<number>
     return active;
 }
 
+/** Epoch ms of a stored history timestamp; SQLite's default timestamps carry no zone and are UTC. */
+function historyTime(value: unknown): number {
+    if (value instanceof Date) return value.getTime();
+    if (typeof value === 'number') return value;
+    if (typeof value !== 'string') return Number.NaN;
+    return Date.parse(/(Z|[+-]\d\d:?\d\d)$/.test(value) ? value : `${value.replace(' ', 'T')}Z`);
+}
+
 /**
  * PRs with a waiting, delayed or running job. A job still listed as active
- * whose task already finished is the attempt that is wrapping up, not newer work.
+ * whose task already finished is the attempt that is wrapping up, not newer
+ * work, unless that attempt started after the task finished: then it is a
+ * BullMQ retry that resumed processing after a recorded failure.
  */
 async function pullRequestsWithQueuedJobs(repository: string, wanted: Set<number>, listQueuedJobs: () => Promise<QueuedJobSnapshot[]>): Promise<Set<number>> {
     const active = new Set<number>();
-    const runningJobs = new Map<string, number>();
+    const runningJobs = new Map<string, { prNumber: number; processedOn: number | null }>();
     const target = repository.toLowerCase();
     for (const job of await listQueuedJobs()) {
         const pr = jobPullRequest(job.data);
         if (!pr || pr.repository.toLowerCase() !== target || !wanted.has(pr.prNumber)) continue;
-        if (job.state === 'active' && job.id) runningJobs.set(String(job.id), pr.prNumber);
+        if (job.state === 'active' && job.id) runningJobs.set(String(job.id), { prNumber: pr.prNumber, processedOn: job.processedOn ?? null });
         else active.add(pr.prNumber);
     }
     if (runningJobs.size === 0) return active;
-    const finished = new Set((await db('tasks')
-        .select('tasks.job_id')
+    const finishedAt = new Map((await db('tasks')
+        .select('tasks.job_id', 'task_history.timestamp')
         .join('task_history', latestTaskState)
         .whereIn('tasks.job_id', [...runningJobs.keys()])
-        .whereIn('task_history.state', TERMINAL_TASK_STATES) as Array<{ job_id: string }>).map(row => row.job_id));
-    for (const [jobId, prNumber] of runningJobs) if (!finished.has(jobId)) active.add(prNumber);
+        .whereIn('task_history.state', TERMINAL_TASK_STATES) as Array<{ job_id: string; timestamp: unknown }>)
+        .map(row => [row.job_id, historyTime(row.timestamp)]));
+    for (const [jobId, { prNumber, processedOn }] of runningJobs) {
+        const finished = finishedAt.get(jobId);
+        if (finished === undefined || (processedOn !== null && processedOn > finished)) active.add(prNumber);
+    }
     return active;
 }
 
@@ -230,18 +246,67 @@ export async function reconcilePlanIssueRefinement<T extends RefinementCandidate
     const byRepository = new Map<string, T[]>();
     for (const issue of candidates) byRepository.set(issue.repository, [...(byRepository.get(issue.repository) ?? []), issue]);
 
-    const settledIds = new Set<number>();
+    const idleIds: number[] = [];
     for (const [repository, repositoryIssues] of byRepository) {
         try {
             const active = await findPullRequestsWithFollowUpWork(repository, repositoryIssues.map(issue => issue.pr_number!), sources);
-            const idle = repositoryIssues.filter(issue => !active.has(issue.pr_number!)).map(issue => issue.id);
-            for (const issue of await settlePlanIssueRefinement(idle)) settledIds.add(issue.id);
+            const idle = repositoryIssues.filter(issue => !active.has(issue.pr_number!));
+            idleIds.push(...idle.map(issue => issue.id));
+            await settleIdlePlanIssues(repository, idle, sources);
         } catch (error) {
             logger.warn({ repository, error: (error as Error).message }, 'Could not verify plan refinement activity; keeping current status');
         }
     }
-    if (settledIds.size === 0) return issues;
-    return issues.map(issue => settledIds.has(issue.id) ? { ...issue, status: PlanIssueStatus.UNDER_REVIEW } : issue);
+    if (idleIds.length === 0) return issues;
+    // Settlement may have been undone for work admitted meanwhile, so report what is stored.
+    const stored = new Map((await db('plan_issues').whereIn('id', idleIds).select('id', 'status') as Array<Pick<PlanIssue, 'id' | 'status'>>)
+        .map(row => [row.id, row.status]));
+    return issues.map(issue => {
+        const status = stored.get(issue.id);
+        return status && status !== issue.status ? { ...issue, status } : issue;
+    });
+}
+
+/**
+ * Settles issues whose follow-up work was found finished, then looks once more.
+ *
+ * Work admitted while the idle result was being read cannot mark an issue that
+ * is still refining, so its admission leaves no trace for the settlement to
+ * see. Work admitted before the settlement write is visible to the recheck,
+ * which restores refinement through the same conditional marking; work
+ * admitted after the write finds the issue under review and marks it itself.
+ * A recheck that cannot be read restores refinement too, keeping the status
+ * that could not be disproved. Merged and closed issues are never touched.
+ */
+async function settleIdlePlanIssues(repository: string, issues: RefinementCandidate[], sources: RefinementActivitySources): Promise<void> {
+    const settled = await settlePlanIssueRefinement(issues.map(issue => issue.id));
+    if (settled.length === 0) return;
+    let active: Set<number> | null = null;
+    try {
+        active = await findPullRequestsWithFollowUpWork(repository, settled.map(issue => issue.pr_number!), sources);
+    } catch (error) {
+        logger.warn({ repository, error: (error as Error).message }, 'Could not recheck plan refinement activity; restoring refinement');
+    }
+    for (const issue of settled) {
+        if (active && !active.has(issue.pr_number!)) continue;
+        logger.info({ draftId: issue.draft_id, issueNumber: issue.issue_number, prNumber: issue.pr_number },
+            'Follow-up work was admitted while settling plan refinement; restoring refinement');
+        await markPlanIssueRefining(repository, issue.pr_number!);
+    }
+}
+
+/**
+ * Reconciles every refining issue of a draft before the caller filters,
+ * counts or pages them, so a read never returns issues under a status they
+ * were just moved out of.
+ */
+export async function reconcileDraftPlanIssueRefinement(draftId: string, sources: RefinementActivitySources = {}): Promise<void> {
+    const refining = await db('plan_issues')
+        .where({ draft_id: draftId })
+        .whereIn('status', REFINEMENT_PLAN_ISSUE_STATUSES)
+        .whereNotNull('pr_number')
+        .select('id', 'repository', 'pr_number', 'status') as RefinementCandidate[];
+    await reconcilePlanIssueRefinement(refining, sources);
 }
 
 /**
@@ -263,11 +328,11 @@ export async function settlePlanRefinementForPullRequest(
 
 /**
  * Brings the plan issue linked to a PR in line with its follow-up work after a
- * PR comment was handled: refining while the comment (or earlier work) left
- * work queued or running, under review once nothing is left. Comments that
- * admitted no work never leave the plan refining.
+ * PR comment was handled or a queued job's attempt failed or resumed:
+ * refining while work is queued or running, under review once nothing is
+ * left. Comments that admitted no work never leave the plan refining.
  */
-export async function syncPlanRefinementAfterComment(
+export async function syncPlanRefinementForPullRequest(
     repository: string,
     prNumber: number,
     sources: RefinementActivitySources = {},
@@ -281,6 +346,18 @@ export async function syncPlanRefinementAfterComment(
         logger.warn({ repository, prNumber, error: (error as Error).message }, 'Could not verify plan refinement activity; keeping current status');
         return;
     }
-    if (active.has(prNumber)) await markPlanIssueRefining(repository, prNumber);
-    else if (isRefining(issue)) await settlePlanIssueRefinement([issue.id]);
+    if (!active.has(prNumber)) {
+        if (isRefining(issue)) await settleIdlePlanIssues(repository, [issue], sources);
+        return;
+    }
+    if (!await markPlanIssueRefining(repository, prNumber)) return;
+    // The work seen may have finished before the mark, and its own settlement
+    // then found nothing refining to settle.
+    await settlePlanRefinementForPullRequest(repository, prNumber, sources);
+}
+
+/** {@link syncPlanRefinementForPullRequest} for the PR a queued job works on, if any. */
+export async function syncPlanRefinementForJob(data: unknown, sources: RefinementActivitySources = {}): Promise<void> {
+    const pr = jobPullRequest(data);
+    if (pr) await syncPlanRefinementForPullRequest(pr.repository, pr.prNumber, sources);
 }

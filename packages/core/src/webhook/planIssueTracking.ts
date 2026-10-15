@@ -470,8 +470,8 @@ export async function handlePlanPRCommentActivity(
     try {
         const prNumber = repository ? followUpCommentPullRequest(comment, eventType) : null;
         if (!repository || !prNumber) return;
-        const { syncPlanRefinementAfterComment } = await import('../services/taskPlanning/planRefinementSettlement.js');
-        await syncPlanRefinementAfterComment(repository, prNumber);
+        const { syncPlanRefinementForPullRequest } = await import('../services/taskPlanning/planRefinementSettlement.js');
+        await syncPlanRefinementForPullRequest(repository, prNumber);
     } catch (error) {
         logger.withCorrelation(correlationId).error({ error, repository }, 'Failed to update plan refinement after PR comment');
     }

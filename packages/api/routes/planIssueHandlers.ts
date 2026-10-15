@@ -2,9 +2,8 @@ import type { Response } from 'express';
 import type { FlatRequest } from '../requestTypes.js';
 import {
   db,
-  getPlanIssuesByDraft,
-  getPlanIssuesByDraftPaginated,
-  getPlanIssue, reconcilePlanIssueRefinement,
+  getPlanIssuesByDraft, getPlanIssuesByDraftPaginated,
+  getPlanIssue, reconcileDraftPlanIssueRefinement,
   updatePlanIssue,
   loadPrimaryProcessingLabels,
   getAuthenticatedOctokit,
@@ -309,6 +308,8 @@ export function createGetIssuesHandler(deps: PlanIssueDeps) {
       const ownership = await deps.verifyOwnership(req.params.id, req.user!.id, ['user_id']);
       if (!ownership.authorized) { res.status(ownership.status!).json({ error: ownership.error }); return; }
       const { page, limit, status } = req.query;
+      // Settle refinement whose follow-up work ended before filtering, counting or paging.
+      await reconcileDraftPlanIssueRefinement(req.params.id);
       const hasPagination = page !== undefined || limit !== undefined;
       if (hasPagination) {
         const pageNum = page ? parseInt(page as string, 10) : 0;
@@ -319,10 +320,9 @@ export function createGetIssuesHandler(deps: PlanIssueDeps) {
           if (validStatuses.includes(status as PlanIssueStatus)) options.status = status as PlanIssueStatus;
         }
         const result = await getPlanIssuesByDraftPaginated(req.params.id, options);
-        // Issues left refining after their follow-up work ended are settled as they are read.
-        res.json({ ...result, issues: (await withRecordedPullRequestActivity(db, await reconcilePlanIssueRefinement(result.issues))).map((issue) => resolveIssueForResponse(issue)) });
+        res.json({ ...result, issues: (await withRecordedPullRequestActivity(db, result.issues)).map((issue) => resolveIssueForResponse(issue)) });
       } else {
-        res.json((await withRecordedPullRequestActivity(db, await reconcilePlanIssueRefinement(await getPlanIssuesByDraft(req.params.id)))).map((issue) => resolveIssueForResponse(issue)));
+        res.json((await withRecordedPullRequestActivity(db, await getPlanIssuesByDraft(req.params.id))).map((issue) => resolveIssueForResponse(issue)));
       }
     } catch (error) {
       console.error('Get issues error:', error);

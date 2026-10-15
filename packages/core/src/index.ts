@@ -71,8 +71,10 @@ export {
     markPlanIssueRefining,
     findPullRequestsWithFollowUpWork,
     reconcilePlanIssueRefinement,
+    reconcileDraftPlanIssueRefinement,
     settlePlanRefinementForPullRequest,
-    syncPlanRefinementAfterComment
+    syncPlanRefinementForPullRequest,
+    syncPlanRefinementForJob
 } from './services/taskPlanning/planRefinementSettlement.js';
 export type { RefinementActivitySources, QueuedJobSnapshot } from './services/taskPlanning/planRefinementSettlement.js';
 export type {
