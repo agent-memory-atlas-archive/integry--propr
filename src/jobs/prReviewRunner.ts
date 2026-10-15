@@ -49,6 +49,8 @@ export interface RunReviewsContext {
     combinedCommentBody: string;
     commentHistory: string;
     originalTaskSpec: string;
+    /** Formatted follow-up requests ProPR accepted and completed on this PR. */
+    authorizedFollowups?: string;
     commandInstructions?: string;
     /** Untrimmed diff; each reviewer selects the files that fit its own budget. */
     preparedDiff: PreparedPRDiff;
@@ -97,7 +99,7 @@ export async function runSingleReview(
         }, ctx.reviewBudgetSettings);
         const promptResult = buildReviewPromptWithinBudget({
             pullRequestNumber, combinedCommentBody: ctx.combinedCommentBody, commentHistory: ctx.commentHistory,
-            originalTaskSpec: ctx.originalTaskSpec, repoOwner, repoName, instructions: ctx.commandInstructions,
+            originalTaskSpec: ctx.originalTaskSpec, authorizedFollowups: ctx.authorizedFollowups, repoOwner, repoName, instructions: ctx.commandInstructions,
             fileContents: ctx.fileContents, relatedContext: ctx.relatedContext,
             checkSummary: ctx.checkSummary, reviewPromptOverride: ctx.reviewPromptOverride,
         }, ceiling.ceiling, REVIEW_ANALYSIS_SAFETY_SUFFIX, {
