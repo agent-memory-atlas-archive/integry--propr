@@ -273,8 +273,9 @@ export async function reconcilePlanIssueRefinement<T extends RefinementCandidate
  * Work admitted while the idle result was being read cannot mark an issue that
  * is still refining, so its admission leaves no trace for the settlement to
  * see. Work admitted before the settlement write is visible to the recheck,
- * which restores refinement through the same conditional marking; work
- * admitted after the write finds the issue under review and marks it itself.
+ * which restores refinement through the same conditional marking and settles
+ * again if that work finished before the restore was written; work admitted
+ * after the write finds the issue under review and marks it itself.
  * A recheck that cannot be read restores refinement too, keeping the status
  * that could not be disproved. Merged and closed issues are never touched.
  */
@@ -291,8 +292,19 @@ async function settleIdlePlanIssues(repository: string, issues: RefinementCandid
         if (active && !active.has(issue.pr_number!)) continue;
         logger.info({ draftId: issue.draft_id, issueNumber: issue.issue_number, prNumber: issue.pr_number },
             'Follow-up work was admitted while settling plan refinement; restoring refinement');
-        await markPlanIssueRefining(repository, issue.pr_number!);
+        if (active) await restorePlanIssueRefinement(repository, issue.pr_number!, sources);
+        else await markPlanIssueRefining(repository, issue.pr_number!);
     }
+}
+
+/**
+ * Marks the issue refining for work that was seen, then settles it again if
+ * that work has finished meanwhile: its own completion sync ran while the
+ * issue was still under review, so it found nothing refining to settle.
+ */
+async function restorePlanIssueRefinement(repository: string, prNumber: number, sources: RefinementActivitySources): Promise<void> {
+    if (!await markPlanIssueRefining(repository, prNumber)) return;
+    await settlePlanRefinementForPullRequest(repository, prNumber, sources);
 }
 
 /**
@@ -350,10 +362,7 @@ export async function syncPlanRefinementForPullRequest(
         if (isRefining(issue)) await settleIdlePlanIssues(repository, [issue], sources);
         return;
     }
-    if (!await markPlanIssueRefining(repository, prNumber)) return;
-    // The work seen may have finished before the mark, and its own settlement
-    // then found nothing refining to settle.
-    await settlePlanRefinementForPullRequest(repository, prNumber, sources);
+    await restorePlanIssueRefinement(repository, prNumber, sources);
 }
 
 /** {@link syncPlanRefinementForPullRequest} for the PR a queued job works on, if any. */

@@ -375,6 +375,38 @@ describe('work admitted while refinement is being settled', () => {
         assert.equal((await planIssue()).status, PlanIssueStatus.UNDER_REVIEW);
     });
 
+    test('a retry that completes while refinement is being restored still settles the issue', async () => {
+        await seedPlanIssue(PlanIssueStatus.IN_REFINEMENT);
+        const firstAttempt = Date.now() - 60_000;
+        await stateManager.createTaskStateIfAbsent('job-race', { number: PR, pullRequestNumber: PR, repoOwner: OWNER, repoName: REPO, type: 'pr-comment' }, null, 'job-race');
+        await stateManager.updateTaskState('job-race', TaskStates.PROCESSING);
+        await stateManager.markTaskFailed('job-race', new Error('agent crashed'));
+        await db('plan_issues').update({ status: PlanIssueStatus.IN_REFINEMENT });
+        queueJobs = [followUpJob('job-race', 'active', firstAttempt)];
+
+        let reads = 0;
+        await syncPlanRefinementForJob(queueJobs[0].data, {
+            listQueuedJobs: async () => {
+                const read = reads++;
+                // The settlement write lands, then BullMQ resumes the retry before the recheck.
+                if (read === 1) queueJobs = [followUpJob('job-race', 'active', Date.now() + 1_000)];
+                const snapshot = queueJobs.filter(job => job.state !== 'completed').map(job => ({ ...job }));
+                if (read === 1) {
+                    // The recheck has seen the resumed retry; it completes before the restoration is
+                    // written, and its completion sync finds the issue under review with nothing left.
+                    queueJobs = [followUpJob('job-race', 'completed', Date.now() + 1_000)];
+                    await syncPlanRefinementForJob(queueJobs[0].data);
+                    assert.equal((await planIssue()).status, PlanIssueStatus.UNDER_REVIEW, 'the completion sync had nothing to settle');
+                }
+                return snapshot;
+            },
+        });
+
+        assert.ok(reads > 2, 'the restoration looked at the work again');
+        assert.equal((await planIssue()).status, PlanIssueStatus.UNDER_REVIEW, 'settled without a list read');
+        assert.equal(activity.filter(event => event.domain === 'plan').at(-1)?.change, 'blocked', 'the list is told the issue is in review');
+    });
+
     test('a merge recorded while settling is never reopened by the recheck', async () => {
         const id = await seedPlanIssue(PlanIssueStatus.IN_REFINEMENT);
         let reads = 0;
