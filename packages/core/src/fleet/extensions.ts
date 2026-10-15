@@ -161,6 +161,20 @@ export class FleetExtensionPlane {
       return { results };
     } finally { for (const key of Object.keys(secrets)) delete secrets[key]; }
   }
+  /** Internal v2 adapter: all store reads/writes use the caller's SQLite transaction.
+   * Reuse native dispatch and volatile recipients; never invoke the v1 journal path. */
+  async dispatchAtomic(a: FleetExtensionAssertion, r: FleetExtensionRequest, rawIntent: unknown,
+    database: Knex, guard: (assertion?: FleetExtensionAssertion) => void, secret: string): Promise<{ result: unknown; discard: () => void }> {
+    const scoped = Object.create(this) as FleetExtensionPlane;
+    Object.defineProperty(scoped, 'store', { value: new ExtensionProfileStore(database, this.store.environment) });
+    scoped.authorize = async assertion => { guard(assertion); return secret; };
+    guard();
+    const result = await scoped.dispatch(a, r, rawIntent);
+    const recipientId = r.action === 'recipient.issue' ? (result as { recipientId: string }).recipientId : undefined;
+    const discard = () => { if (recipientId) this.destroyRecipient(recipientId); };
+    try { guard(); return { result: this.response(a, result), discard }; }
+    catch (error) { discard(); throw error; }
+  }
   private response(a: FleetExtensionAssertion, result: unknown): RecordResult {
     const response: RecordResult = { contract: FLEET_EXTENSION_CONTRACT, operationId: a.operationId, state: 'completed', result };
     if (Buffer.byteLength(JSON.stringify(response)) > FLEET_EXTENSION_LIMITS.responseBytes) throw new FleetRefusal();
