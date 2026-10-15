@@ -647,5 +647,3 @@ export { GeneratedPayloadStorage, generatedPayloadStorage, GENERATED_PAYLOADS } 
 export { generateManagedDependencies } from './storage/managedDependencies.js';
 
 export * from './extensions/extensionProfileStore.js';
-
-export * from './providerAuthority/index.js';
