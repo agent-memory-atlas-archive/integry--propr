@@ -10,6 +10,15 @@ import { getForwardedVibeEnvVars, isSuccessfulVibeResult, splitVibeCliArgs } fro
 import type { AgentConfig } from '../packages/core/src/agents/types.js';
 import { closeConnection } from '../packages/core/src/db/connection.js';
 
+// Native-host fixtures: provider `~/...` defaults expand against HOME rather
+// than requiring a launcher host mapping, even when the suite runs in a container.
+const previousContainerized = process.env.PROPR_CONTAINERIZED;
+process.env.PROPR_CONTAINERIZED = '0';
+after(() => {
+    if (previousContainerized === undefined) delete process.env.PROPR_CONTAINERIZED;
+    else process.env.PROPR_CONTAINERIZED = previousContainerized;
+});
+
 after(async () => {
     await closeConnection();
 });

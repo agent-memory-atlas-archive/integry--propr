@@ -115,7 +115,16 @@ export class TaskWatcherManager {
     // Get agent config to find the correct log path
     const agentConfig = await findAgentConfigForTask(taskId, this.deps?.db);
     const agentType = agentConfig?.type || 'claude';
-    const agentRoot = agentConfig ? resolveConfigPath(agentConfig.configPath) : path.join(os.homedir(), '.claude');
+    let agentRoot: string;
+    try {
+      agentRoot = agentConfig ? resolveConfigPath(agentConfig.configPath) : path.join(os.homedir(), '.claude');
+    } catch (error) {
+      // An unmapped containerized default has no readable log root; never
+      // substitute the backend account's home directory.
+      console.log(`[TaskWatcher] Agent log root unavailable for task ${taskId} (${(error as Error).message}), using Redis watcher`);
+      await this.startRedisWatcher(taskId);
+      return;
+    }
 
     let conversationPath: string;
     if (agentType === 'codex' || agentType === 'antigravity' || agentType === 'vibe') {
