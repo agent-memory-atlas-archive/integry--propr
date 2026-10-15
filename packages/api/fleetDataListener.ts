@@ -96,6 +96,17 @@ export const refusePublicFleetData: RequestHandler = (req, res, next) => {
   res.set('Cache-Control', 'no-store').status(404).json({ error: (req.path === EXTENSION_AUTHORITY_PATH || req.path === EXTENSION_AUTHORITY_V2_PATH) ? 'extension_authority_unavailable' : req.path === FLEET_RESET_PATH ? 'fleet_reset_unavailable' : req.path === '/extensions/v1/invoke' ? 'fleet_extensions_unavailable' : 'fleet_data_unavailable' });
 };
 
+function requestByteLimit(url: string | undefined) {
+  return url === EXTENSION_AUTHORITY_V2_PATH ? EXTENSION_AUTHORITY_V2_LIMITS.requestBytes
+    : url === '/extensions/v1/invoke' ? FLEET_EXTENSION_LIMITS.requestBytes : 8192;
+}
+
+function refusalCode(url: string | undefined) {
+  return (url === EXTENSION_AUTHORITY_PATH || url === EXTENSION_AUTHORITY_V2_PATH) ? 'extension_authority_unavailable'
+    : url === FLEET_RESET_PATH ? 'fleet_reset_unavailable'
+      : url === '/extensions/v1/invoke' ? 'fleet_extensions_unavailable' : 'fleet_data_unavailable';
+}
+
 /** Separate Unix listener only. Never mount this handler on Express or the tunnel. */
 interface FleetListenerPlane {
   files: FleetDataPlane['files'];
@@ -128,7 +139,7 @@ export async function listenFleetData(plane: FleetListenerPlane, extensions?: Fl
       timer = setTimeout(() => req.destroy(), 5000);
       for await (const part of req) {
         const bytes = Buffer.from(part); length += bytes.length;
-        if (length > (req.url === EXTENSION_AUTHORITY_V2_PATH ? EXTENSION_AUTHORITY_V2_LIMITS.requestBytes : req.url === '/extensions/v1/invoke' ? FLEET_EXTENSION_LIMITS.requestBytes : 8192)) throw new Error();
+        if (length > requestByteLimit(req.url)) throw new Error();
         parts.push(bytes);
       }
       clearTimeout(timer);
@@ -202,7 +213,7 @@ export async function listenFleetData(plane: FleetListenerPlane, extensions?: Fl
       }
     } catch {
       if (res.headersSent) res.destroy();
-      else { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: (req.url === EXTENSION_AUTHORITY_PATH || req.url === EXTENSION_AUTHORITY_V2_PATH) ? 'extension_authority_unavailable' : req.url === FLEET_RESET_PATH ? 'fleet_reset_unavailable' : req.url === '/extensions/v1/invoke' ? 'fleet_extensions_unavailable' : 'fleet_data_unavailable' })); }
+      else { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: refusalCode(req.url) })); }
     } finally { clearTimeout(timer); }
   };
   server.requestTimeout = 10_000;
