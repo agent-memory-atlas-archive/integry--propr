@@ -2,6 +2,7 @@ import { removeRegisteredCache } from './cacheRemoval.js';
 import { GeneratedPayloadStorage } from './generatedPayloads.js';
 import { StorageContractError, confirmationInvalid, instanceSelectionChanged, validatePreviewSelection, type CleanupPreviewArgs, type CleanupPreviewRequest, type CandidateExecution, type SavedPreview } from './cleanupRequest.js';
 import fs from 'node:fs/promises';
+import sync from 'node:fs';
 import { DatabaseExports, type StorageAuthority } from './databaseExport.js';
 import { constants } from 'node:fs';
 import path from 'node:path';
@@ -59,6 +60,26 @@ export class InstanceStorageService {
     await this.initialize();
     const root = await fs.lstat(this.root);
     if (!root.isDirectory() || root.isSymbolicLink() || root.dev !== this.identityRoot?.dev || root.ino !== this.identityRoot?.ino || await this.read<string>('instance.json') !== expected) throw instanceSelectionChanged();
+  }
+  /** Fresh native identity for the authority proof's final synchronous section. */
+  proofIdentitySync() {
+    let directory = path.resolve(this.root);
+    for (;;) {
+      const stat = sync.lstatSync(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw instanceSelectionChanged();
+      if (directory === path.resolve(this.root) && (stat.dev !== this.identityRoot?.dev || stat.ino !== this.identityRoot?.ino)) throw instanceSelectionChanged();
+      const parent = path.dirname(directory); if (parent === directory) break; directory = parent;
+    }
+    const file = sync.openSync(path.join(this.root, 'instance.json'), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const stat = sync.fstatSync(file);
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size > 128) throw instanceSelectionChanged();
+      const bytes = Buffer.alloc(129); const length = sync.readSync(file, bytes, 0, bytes.length, 0);
+      if (length > 128) throw instanceSelectionChanged();
+      const instanceId = JSON.parse(bytes.subarray(0, length).toString('utf8'));
+      if (typeof instanceId !== 'string') throw instanceSelectionChanged();
+      return { storageInstanceId: instanceId, runtimeGeneration: this.exports?.generation ?? this.generation, storageGeneration: this.generation };
+    } finally { sync.closeSync(file); }
   }
   async inventory(): Promise<RepositoryStorageInventory> {
     if (!this.inventoryScan || Date.now() - this.inventoryAt > 60_000) {
