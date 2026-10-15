@@ -152,9 +152,14 @@ describe('TaskWatcherManager', () => {
   });
 });
 
+type ManagerInternals = {
+  taskWatchers: Map<string, unknown>;
+  findSessionIdForTask: (taskId: string) => Promise<unknown>;
+};
+
 test('shutdown attempts every watcher and retains failed closure evidence', async () => {
   const manager = new TaskWatcherManager(createIo());
-  const internals = manager as any;
+  const internals = manager as unknown as ManagerInternals;
   const closed: string[] = [];
   const failure = new Error('watcher failure');
   internals.taskWatchers.set('failed', { watcher: { close: async () => { closed.push('failed'); throw failure; } } });
@@ -168,13 +173,14 @@ test('shutdown attempts every watcher and retains failed closure evidence', asyn
 
 test('shutdown revokes watcher creation across a pending session lookup', async () => {
   const manager = new TaskWatcherManager(createIo());
+  const internals = manager as unknown as ManagerInternals;
   let resume!: (value: undefined) => void;
-  (manager as any).findSessionIdForTask = () => new Promise(resolve => { resume = resolve; });
+  internals.findSessionIdForTask = () => new Promise(resolve => { resume = resolve; });
   const starting = manager.startTaskWatcher('pending');
   const closing = manager.closeAll();
   resume(undefined);
   await starting; await closing;
-  assert.equal((manager as any).taskWatchers.size, 0);
+  assert.equal(internals.taskWatchers.size, 0);
   await manager.startTaskWatcher('late');
-  assert.equal((manager as any).taskWatchers.size, 0);
+  assert.equal(internals.taskWatchers.size, 0);
 });
