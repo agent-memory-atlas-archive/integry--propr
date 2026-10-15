@@ -4,9 +4,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync, randomUUID } from 'node:crypto';
 import knex from 'knex';
-import { canonicalFleetJson as canonical, EXTENSION_AUTHORITY_V2_PATH as route, EXTENSION_AUTHORITY_V2_SCHEMA } from '@propr/shared';
+import { encryptFleetExtensionSecret, canonicalFleetJson as canonical, EXTENSION_AUTHORITY_V2_PATH as route, EXTENSION_AUTHORITY_V2_SCHEMA } from '@propr/shared';
+import { unsealExtensionSecrets } from '../src/extensions/privateSecrets.js';
 import { refusePublicFleetData } from '../../api/fleetDataListener.js';
 import { verifyProof } from '../../../docs/contracts/extension-authority-v2/verifier.mjs';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -230,23 +231,70 @@ test('bounded append-only ledgers fail closed at capacity and retain admitted op
   assert.equal((await f.send(canonical(f.envelope(f.request(w, 'status'))))).status, 403);
 });
 
-test('recipient acquisition is committed to the exact mutation operation and intent without exposing material', async t => {
-  const f = await fixture(t);
-  const native = { ...create, input: { ...input, mcpServers: [{ kind: 'https', name: 'docs', url: 'https://8.8.8.8/mcp', enabled: true, tools: ['lookup'], capability: 'read', authentication: 'bearer' }] } };
-  const mutation = await f.newWork(native);
-  const intent = { action: native.action, input: native.input };
-  const issue = { action: 'recipient.issue', intent, mutationOperationId: mutation.extension.operationId, server: 'docs', field: 'bearerToken' };
-  const acquisition = await f.newWork(issue);
-  await f.invoke(f.request(acquisition));
-  const receipt = await f.invoke(f.request(acquisition, 'dispatch'), issue);
-  assert.deepEqual(receipt.statement.result.recipientCommitment, { operationId: mutation.extension.operationId, intentDigest: hash(canonical(intent)) });
-  assert.ok(!canonical(receipt).includes('privateKey'));
-  const other: any = await f.newWork(native); other.acquisitionOperationId = acquisition.extension.operationId;
-  assert.equal((await f.send(canonical(f.envelope(f.request(other))))).status, 403);
-  (mutation as any).acquisitionOperationId = acquisition.extension.operationId;
-  await f.invoke(f.request(mutation));
-  await f.invoke(f.request(mutation, 'dispatch'), native);
-  assert.equal((await f.db('extension_profiles')).length, 1);
+test('sealed create and update consume only their committed v2 acquisition', async t => {
+  for (const action of ['profile.create', 'profile.update']) for (const origin of ['committed', 'other-acquisition', 'v1']) await t.test(`${action}/${origin}`, async t => {
+    const f = await fixture(t);
+    const profileInput = { ...input, mcpServers: [{ kind: 'https', name: 'docs', url: 'https://8.8.8.8/mcp', enabled: true, tools: ['lookup'], capability: 'read', authentication: 'bearer' }] };
+    const original = action === 'profile.update' ? await f.extensions.store.save('100', profileInput as any, { docs: 'ORIGINAL-SYNTHETIC-TOKEN' }) : undefined;
+    const selection = original && { instanceId: original.instanceId, profileId: original.profileId, revision: original.revision };
+    const intent = { action, input: profileInput, ...(selection ? { selection } : {}) };
+    const mutation = await f.newWork({ ...intent, sealed: [] });
+    const issue = { action: 'recipient.issue', intent, mutationOperationId: mutation.extension.operationId, server: 'docs', field: 'bearerToken' };
+    // v2 deliberately returns only a native-result digest. Capture the real native
+    // result without replacing issuance, encryption, decryption or authorization.
+    let recipient: any;
+    const dispatch = f.extensions.dispatchAtomic.bind(f.extensions);
+    t.mock.method(f.extensions, 'dispatchAtomic', async (...args: Parameters<typeof dispatch>) => {
+      const outcome = await dispatch(...args);
+      if (args[1].action === 'recipient.issue') recipient = (outcome.result as any).result;
+      return outcome;
+    });
+    const acquisition = await f.newWork(issue);
+    await f.invoke(f.request(acquisition));
+    const receipt = await f.invoke(f.request(acquisition, 'dispatch'), issue);
+    assert.deepEqual(receipt.statement.result.recipientCommitment, { operationId: mutation.extension.operationId, intentDigest: hash(canonical(intent)) });
+    assert.equal(receipt.statement.result.nativeResultDigest, hash(canonical({ contract: acquisition.extension.contract, operationId: acquisition.extension.operationId, state: 'completed', result: recipient })));
+    const otherMutation: any = await f.newWork({ ...intent, sealed: [] });
+    otherMutation.acquisitionOperationId = acquisition.extension.operationId;
+    assert.equal((await f.send(canonical(f.envelope(f.request(otherMutation))))).status, 403);
+    if (origin === 'other-acquisition') {
+      // Same target operation and intent: only the acquisition identity differs.
+      const other = await f.newWork(issue);
+      await f.invoke(f.request(other)); await f.invoke(f.request(other, 'dispatch'), issue);
+    } else if (origin === 'v1') {
+      const assertion = (await f.newWork(issue)).extension;
+      const mac = createHmac('sha256', secret).update(canonical(assertion)).digest('hex');
+      recipient = (await f.extensions.invoke(canonical({ assertion, request: issue, mac }))).result;
+    }
+    const token = 'SEALED-V2-SYNTHETIC-CREDENTIAL';
+    const sealed = await encryptFleetExtensionSecret(recipient, token, { verificationKey: await f.extensions.recipientVerificationKey(), expectedBinding: recipient.binding });
+    const native = { ...intent, sealed: [sealed] };
+    mutation.extension.requestDigest = hash(canonical(native));
+    (mutation as any).acquisitionOperationId = acquisition.extension.operationId;
+    await f.invoke(f.request(mutation));
+    const request = f.request(mutation, 'dispatch'), raw = canonical(f.envelope(request, native));
+    if (origin === 'committed') {
+      const response = await f.invoke(request, native);
+      assert.deepEqual(await f.invoke(request, native), response);
+      const row = await f.db('extension_profile_revisions').orderBy('revision', 'desc').first();
+      const snapshot = JSON.parse(row.snapshot);
+      assert.equal(snapshot.revision, original ? 2 : 1);
+      assert.equal(snapshot.secrets.docs.configured, true);
+      assert.deepEqual(unsealExtensionSecrets(row.secrets_encrypted, `${snapshot.instanceId}/${snapshot.profileId}/${snapshot.revision}`, f.extensions.store.environment), { docs: token });
+      assert.ok(!row.secrets_encrypted.includes(token));
+      await f.restart();
+      assert.deepEqual((await f.send(raw)).body, response);
+    } else {
+      assert.equal((await f.send(raw)).status, 403);
+      assert.ok(await f.db('extension_authority_v2_intents').where({ challenge: request.challenge }).first());
+      assert.equal(await f.db('extension_authority_v2_receipts').where({ challenge: request.challenge }).first(), undefined);
+      assert.equal((await f.send(raw)).status, 403);
+      assert.equal((await f.db('extension_profile_revisions')).length, original ? 1 : 0);
+      if (original) assert.deepEqual(await f.extensions.store.read('100', selection!), original);
+    }
+    const retained = canonical(await f.db('extension_authority_v2_receipts'));
+    for (const material of [token, sealed.ciphertext, recipient.publicKey, 'privateKey']) assert.ok(!retained.includes(material));
+  });
 });
 
 test('a valid signed receipt for another operation cannot replace a retained native result', async t => {
