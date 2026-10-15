@@ -119,14 +119,17 @@ export const TASK_ROUTE_DOCS: Record<string, RouteDoc> = {
   'POST /api/tasks/:taskId/followup': {
     operationId: 'postTaskFollowup',
     summary: 'Post a follow-up instruction on a task',
-    description: 'Posts the comment on the task\'s pull request (or issue) and queues a follow-up run for it.',
+    description: 'Posts the comment on the task\'s pull request and queues a follow-up run for it. A failed implementation that has no pull request is retried on its issue instead: the comment is posted there and a new issue run is queued.',
     tags: ['Tasks'],
     pathParams: { taskId: TASK_ID },
     requestBody: { schema: TaskFollowupRequest },
     responses: {
-      202: { description: 'The comment was posted; the outcome distinguishes queued, batched, handled, refused, failed and unknown submissions.', schema: TaskFollowupResult },
-      400: { description: 'The comment body or target is invalid.' },
+      202: { description: 'The comment was posted; the outcome distinguishes queued, batched, handled, refused, failed and unknown submissions. An issue retry refuses the comment, without posting it, while it restarts an earlier retry whose start was never confirmed; `restartedRequest` reports that restart.', schema: TaskFollowupResult },
+      400: { description: 'The comment body or target is invalid, or a pull request command was sent for a task without a pull request.' },
       404: { description: 'Task not found.' },
+      409: { description: 'The issue cannot be retried: the run has not failed, the issue is closed or done, a run is already queued, or an earlier retry may still start.' },
+      502: { description: 'The issue\'s label history could not be read from GitHub, so the retry could not be tied to its trigger and nothing was posted.' },
+      503: { description: 'The issue retry could not be recorded, so nothing was posted.' },
     },
   },
   'POST /api/task/:taskId/stop': {

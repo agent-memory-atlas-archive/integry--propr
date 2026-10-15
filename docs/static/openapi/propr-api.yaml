@@ -7670,7 +7670,7 @@ paths:
       operationId: postTaskFollowup
       summary: Post a follow-up instruction on a task
       description: |-
-        Posts the comment on the task's pull request (or issue) and queues a follow-up run for it.
+        Posts the comment on the task's pull request and queues a follow-up run for it. A failed implementation that has no pull request is retried on its issue instead: the comment is posted there and a new issue run is queued.
 
         When the task, session or correlation id belongs to a goal, only the goal owner can use this route (others get `404`), and only for reads: other methods answer `409` and the goal controls must be used instead.
       tags:
@@ -7693,13 +7693,13 @@ paths:
               $ref: "#/components/schemas/TaskFollowupRequest"
       responses:
         "202":
-          description: The comment was posted; the outcome distinguishes queued, batched, handled, refused, failed and unknown submissions.
+          description: The comment was posted; the outcome distinguishes queued, batched, handled, refused, failed and unknown submissions. An issue retry refuses the comment, without posting it, while it restarts an earlier retry whose start was never confirmed; `restartedRequest` reports that restart.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/TaskFollowupResult"
         "400":
-          description: The comment body or target is invalid.
+          description: The comment body or target is invalid, or a pull request command was sent for a task without a pull request.
           content:
             application/json:
               schema:
@@ -7713,7 +7713,19 @@ paths:
               schema:
                 $ref: "#/components/schemas/LegacyError"
         "409":
-          description: The task belongs to a goal; use the goal controls.
+          description: "The issue cannot be retried: the run has not failed, the issue is closed or done, a run is already queued, or an earlier retry may still start."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "502":
+          description: The issue's label history could not be read from GitHub, so the retry could not be tied to its trigger and nothing was posted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "503":
+          description: The issue retry could not be recorded, so nothing was posted.
           content:
             application/json:
               schema:
@@ -9496,6 +9508,30 @@ components:
           type: string
         sourceTaskId:
           type: string
+        intent:
+          description: Present when a failed implementation without a pull request was retried on its issue.
+          type: string
+          const: issue
+        issueNumber:
+          description: The issue a retry was queued on.
+          type: integer
+        restartedRequest:
+          description: Present when, instead of posting this follow-up, an earlier issue retry whose start was never confirmed was restarted for its own requester.
+          type: object
+          properties:
+            state:
+              type: string
+              enum:
+                - queued
+                - failed
+                - unknown
+            commentId:
+              type: integer
+              description: The earlier request's comment, whose instructions the restarted run carries.
+          required:
+            - state
+            - commentId
+          additionalProperties: false
         message:
           description: Explains a refusal, failure, or uncertain submission.
           type: string
@@ -9581,6 +9617,30 @@ components:
           type: string
         sourceTaskId:
           type: string
+        intent:
+          description: Present when a failed implementation without a pull request was retried on its issue.
+          type: string
+          const: issue
+        issueNumber:
+          description: The issue a retry was queued on.
+          type: integer
+        restartedRequest:
+          description: Present when, instead of posting this follow-up, an earlier issue retry whose start was never confirmed was restarted for its own requester.
+          type: object
+          properties:
+            state:
+              type: string
+              enum:
+                - queued
+                - failed
+                - unknown
+            commentId:
+              type: integer
+              description: The earlier request's comment, whose instructions the restarted run carries.
+          required:
+            - state
+            - commentId
+          additionalProperties: false
         message:
           description: Explains a refusal, failure, or uncertain submission.
           type: string
