@@ -248,9 +248,27 @@ describe('follow-up actions', () => {
     expectNoFollowups();
   });
 
-  it('offers a follow-up on a task with no pull request', () => {
+  it('offers a follow-up on an issue task with no pull request', () => {
+    loadedTaskInfo.current = { type: 'issue', number: 42, repoOwner: 'integry', repoName: 'propr' };
     render(<MemoryRouter><TaskDetails taskId="plain-task" embedded /></MemoryRouter>);
     expect(screen.getAllByRole('button', { name: 'Follow Up' }).length).toBeGreaterThan(0);
+  });
+
+  it('keeps the follow-up retry path on a failed issue task', () => {
+    loadedTaskInfo.current = { type: 'issue', number: 42, repoOwner: 'integry', repoName: 'propr', subtitle: 'Agent failed' };
+    render(<MemoryRouter><TaskDetails taskId="failed-issue-task" embedded /></MemoryRouter>);
+    expect(screen.getAllByRole('button', { name: 'Follow Up' }).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['a repository report', { repoOwner: 'acme', repoName: 'web', taskKind: 'automation-report' }],
+    ['a report without repositories', { repoOwner: '', repoName: '', taskKind: 'automation-report' }],
+    ['an action on a report', { repoOwner: 'acme', repoName: 'web', taskKind: 'automation-action' }],
+  ])('offers no GitHub follow-up on %s, which has no issue or pull request', async (_name, info) => {
+    loadedTaskInfo.current = { type: 'agent-run', number: 0, title: 'Agent: Desktop acceptance', subtitle: 'Report run', issueNumber: undefined, ...info };
+    render(<MemoryRouter><TaskDetails taskId="agent-run-run-1-report" embedded /></MemoryRouter>);
+    await act(async () => {});
+    expectNoFollowups();
   });
 
   it('offers a follow-up while the pull request is open', async () => {

@@ -7,6 +7,7 @@ import LiveFileChips from './LiveFileChips';
 import ReviewScoreHistory from './ReviewScoreHistory';
 import PullRequestOutcomeEntry from './PullRequestOutcomeEntry';
 import { pullRequestOutcome, taskPullRequest } from './pullRequestScores';
+import { isAutomationReportTask, taskLabelMode } from './taskKind';
 import type { PullRequestScoresResponse } from '../../api/taskStatsApi';
 import type { HistoryItem, HistoryItemMetadata, TaskInfo, LiveDetails } from './types';
 import { RefreshCw } from 'lucide-react';
@@ -116,6 +117,11 @@ const RunNotes: React.FC<RunNotesProps> = ({ history, taskInfo, currentStatus, p
           This was a review-only run — no file changes or PR expected.
         </div>
       )}
+      {isAutomationReportTask(taskInfo) && currentStatus === 'COMPLETED' && (
+        <div className="bg-slate-50 border border-slate-200 rounded-md px-3 py-2 text-xs text-slate-700">
+          This automation run wrote a report — no file changes, issue or PR expected.
+        </div>
+      )}
       {consumedReviewCommentIds && consumedReviewCommentIds.length > 0 && (
         <div className="bg-amber-50 border border-amber-100 rounded-md px-3 py-2 text-xs text-amber-700">
           Addressed {consumedReviewCommentIds.length} review comment{consumedReviewCommentIds.length > 1 ? 's' : ''}{' '}
@@ -167,12 +173,12 @@ const LeftPaneBody: React.FC<LeftPaneBodyProps> = ({
     <div className="p-3 lg:p-4 space-y-2">
       {timeline ? (
         <RunTimeline revealHistory={revealHistory} runs={runs} selectedTaskId={taskId} onSelectRun={onSelectRun} reviewScores={reviewScores} outcome={outcome}>
-          <TaskStatusTable history={history} commandMode={taskInfo?.commandMode} variant="branch" />
+          <TaskStatusTable history={history} commandMode={taskLabelMode(taskInfo)} variant="branch" />
           <div className="space-y-2 pl-6 pr-1 pt-1 empty:hidden">{runNotes}</div>
         </RunTimeline>
       ) : (
         <>
-          <TaskStatusTable history={history} compact={true} commandMode={taskInfo?.commandMode} />
+          <TaskStatusTable history={history} compact={true} commandMode={taskLabelMode(taskInfo)} />
           {runNotes}
           {/* The task's last entry, after its run: where the pull request ended. */}
           {outcome && <PullRequestOutcomeEntry outcome={outcome} variant="standalone" />}
