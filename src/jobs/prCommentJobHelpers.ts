@@ -94,10 +94,9 @@ export async function validateAndFilterComments(
         const acceptedBodySha256 = currentComment.body === comment.body ? acceptedRequestDigest(comment.body) : undefined;
         if (commentWasEditedAfterQueuing) {
             correlatedLogger.info({ pullRequestNumber, commentId: comment.id, commentAuthor: comment.author }, 'Comment has been edited since job was queued, using updated content');
-            validatedComments.push({ ...comment, body: currentComment.body || comment.body, acceptedBodySha256 });
-        } else {
-            validatedComments.push({ ...comment, acceptedBodySha256 });
         }
+        const body = commentWasEditedAfterQueuing ? currentComment.body || comment.body : comment.body;
+        validatedComments.push({ ...comment, body, acceptedBodySha256 });
     }
     return validatedComments;
 }
