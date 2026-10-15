@@ -17,7 +17,7 @@
   "packages/core/src/extensions/remoteGitSkill.ts": "f368a285fa8e38823e28687543fcd6a229b1e4734d3810ad2d47a35c71d85b77",
   "packages/core/src/storage/service.ts": "c7aaafe01b48466a838268e84015bfb25f03771a164cb6aa7bd069b42aea364e",
   "packages/core/src/storage/proofIdentity.ts": "ef54cac930b926a7cb1dd182b2273863cc79e91506a85ab5c39d0ea13168fb85",
-  "packages/core/test/extensionAuthorityV2.test.ts": "81c5f9524f3b901bde79c70ab84b9ab3ae88740aea33524f1b98133184aeb114",
+  "packages/core/test/extensionAuthorityV2.test.ts": "cc83dba43ac3ec54d6b614cf7e06b877a7b1b72a6bcad7b3ce2bdd0d5e223286",
   "packages/core/test/extensionAuthorityV2Crash.test.ts": "a9ee1aaf628071cda1cdce199ebbdcacc04acf2495e049360612752399ffb3e5",
   "packages/core/test/helpers/extensionAuthorityV2Fixture.ts": "27cba46c455171a0a16cde60b2c4ab411f560e1201eb5fa9e1781f0b781599f7",
   "packages/core/test/helpers/extensionAuthorityV2Crash.ts": "8b17b10b2f2508633dd319e4b840eecba0f4d1af7596dddcfd6ef31bd936c829",

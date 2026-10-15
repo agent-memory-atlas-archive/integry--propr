@@ -6,6 +6,10 @@ import path from 'node:path';
 import os from 'node:os';
 import { createHash, createHmac, generateKeyPairSync, randomUUID } from 'node:crypto';
 import knex from 'knex';
+import { FleetDataPlane } from '../src/fleet/dataPlane.js';
+import { FleetExtensionPlane } from '../src/fleet/extensions.js';
+import { ExtensionAuthorityV2Plane } from '../src/fleet/extensionAuthorityV2.js';
+import { ExtensionProfileStore } from '../src/extensions/extensionProfileStore.js';
 import { encryptFleetExtensionSecret, canonicalFleetJson as canonical, EXTENSION_AUTHORITY_V2_PATH as route, EXTENSION_AUTHORITY_V2_SCHEMA } from '@propr/shared';
 import { unsealExtensionSecrets } from '../src/extensions/privateSecrets.js';
 import { refusePublicFleetData } from '../../api/fleetDataListener.js';
@@ -97,6 +101,110 @@ test('concurrent contenders return one receipt and mutate once; distinct challen
   const responses = await Promise.all([f.send(raw), f.send(raw), f.send(canonical(f.envelope(f.request(w, 'dispatch'), create)))]);
   assert.equal(responses[0].status, 200); assert.deepEqual(responses[1].body, responses[0].body); assert.equal(responses[2].status, 403);
   assert.equal((await f.db('extension_profiles')).length, 1);
+});
+
+test('independent SQLite pools serialize dispatch, retain one phase and share exclusive fences', { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const db = knex({ client: 'better-sqlite3', connection: { filename: path.join(f.root, 'db.sqlite') }, useNullAsDefault: true });
+  const fleet = new FleetDataPlane(f.storage, f.control, () => secret, async (id, database = db) => {
+    const row = await database('instance_members').where({ github_user_id: String(id) }).first();
+    return { role: row?.role, source: row?.source, permissions: row?.role === 'admin' ? ['instance.manage_settings'] : [] };
+  });
+  const extensions = new FleetExtensionPlane(fleet, new ExtensionProfileStore(db, f.extensions.store.environment));
+  const plane = new ExtensionAuthorityV2Plane(extensions);
+  // Keep this cleanup local so the fixture cannot remove the database first.
+  try {
+    await fleet.initialize();
+    const firstConnection = await f.db.client.acquireConnection();
+    await f.db.client.releaseConnection(firstConnection);
+    const secondConnection = await db.client.acquireConnection();
+    await db.client.releaseConnection(secondConnection);
+    assert.notEqual(db.client.pool, f.db.client.pool);
+    assert.notEqual(secondConnection, firstConnection);
+    // A synchronous SQLite busy wait would block the transaction owner on this
+    // event loop. Fail immediately under the deliberately held writer lock.
+    secondConnection.pragma('busy_timeout = 0');
+    const exec = secondConnection.exec.bind(secondConnection);
+    let busy = 0;
+    t.mock.method(secondConnection, 'exec', (sql: string) => {
+      try { return exec(sql); }
+      catch (error) {
+        if (sql === 'BEGIN IMMEDIATE' && (error as any).code === 'SQLITE_BUSY') busy++;
+        throw error;
+      }
+    });
+    const w = await f.newWork(); await f.invoke(f.request(w));
+    const r = f.request(w, 'dispatch'), envelope = f.envelope(r, create), raw = canonical(envelope);
+    const distinct = f.request(w, 'dispatch'), other = canonical(f.envelope(distinct, create));
+    const gate = () => {
+      let resolve!: () => void;
+      const promise = new Promise<void>(done => { resolve = done; });
+      return { promise, resolve };
+    };
+    const intentReady = gate(), resumeFences = gate(), mutationReady = gate(), resumeCommit = gate();
+    const createFile = f.fleet.files.create.bind(f.fleet.files);
+    t.mock.method(f.fleet.files, 'create', async (name, value) => {
+      await createFile(name, value);
+      if (name === `extension-nonce-${w.extension.nonce}`) {
+        intentReady.resolve(); await resumeFences.promise;
+      }
+    });
+    const dispatch = f.extensions.dispatchAtomic.bind(f.extensions);
+    let mutations = 0;
+    t.mock.method(f.extensions, 'dispatchAtomic', async (...args: Parameters<typeof dispatch>) => {
+      const result = await dispatch(...args); mutations++;
+      mutationReady.resolve(); await resumeCommit.promise;
+      return result;
+    });
+    const winner = f.plane.invoke(raw);
+    try {
+      // Admission is durable, but no receipt exists: neither an exact retry nor
+      // another challenge may steal the phase while filesystem work is awaited.
+      await Promise.race([intentReady.promise, winner.then(() => assert.fail('missing intent barrier'))]);
+      await assert.rejects(plane.invoke(raw), /unavailable/);
+      await assert.rejects(plane.invoke(other), /unavailable/);
+      assert.equal(busy, 0);
+      assert.equal((await db('extension_authority_v2_intents').where({ operation_id: w.extension.operationId, phase: 'dispatch' })).length, 1);
+      assert.equal(await db('extension_authority_v2_receipts').where({ challenge: r.challenge }).first(), undefined);
+      resumeFences.resolve();
+      await Promise.race([mutationReady.promise, winner.then(() => assert.fail('missing mutation barrier'))]);
+      assert.equal(firstConnection.inTransaction, true);
+      // An independent reader cannot see the uncommitted native mutation.
+      assert.equal((await db('extension_profiles')).length, 0);
+      await assert.rejects(plane.invoke(raw), /unavailable/);
+      assert.equal(busy, 1, 'the contender must reach SQLite writer-lock admission');
+    } finally {
+      resumeFences.resolve(); resumeCommit.resolve();
+      await winner;
+    }
+    const receipt = await winner;
+    verifyProof(canonical(receipt), r, envelope.routing, f.trust, f.spki(f.core), Date.now(), new Set());
+    assert.deepEqual(await plane.invoke(raw), receipt);
+    assert.deepEqual(await f.plane.invoke(raw), receipt);
+    await assert.rejects(plane.invoke(other), /unavailable/);
+    assert.equal(mutations, 1);
+    assert.equal((await db('extension_profiles')).length, 1);
+    assert.equal((await db('extension_profile_revisions')).length, 1);
+    assert.equal((await db('extension_authority_v2_receipts').where({ challenge: r.challenge })).length, 1);
+    assert.equal(await db('extension_authority_v2_intents').where({ challenge: distinct.challenge }).first(), undefined);
+
+    // Separate file-store instances must also arbitrate the shared v1/v2 fence
+    // namespace, without a shared in-memory reservation or database pool.
+    for (const name of [`extension-nonce-${'d'.repeat(64)}`, `extension-operation-${randomUUID()}.json`]) {
+      const values = [{ operationId: randomUUID() }, { operationId: randomUUID() }];
+      const results = await Promise.allSettled([f.fleet.files.create(name, values[0]), fleet.files.create(name, values[1])]);
+      assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+      const loser = results.find(result => result.status === 'rejected') as PromiseRejectedResult;
+      assert.equal(loser.reason.code, 'EEXIST');
+      const retained = JSON.parse(await fleet.files.read(name));
+      assert.deepEqual(retained, values[results.findIndex(result => result.status === 'fulfilled')]);
+      await assert.rejects(fleet.files.create(name, { operationId: randomUUID() }), { code: 'EEXIST' });
+      assert.deepEqual(JSON.parse(await f.fleet.files.read(name)), retained);
+    }
+    assert.deepEqual(await db.raw('PRAGMA integrity_check'), [{ integrity_check: 'ok' }]);
+  } finally {
+    plane.shutdown(); extensions.shutdown(); await db.destroy();
+  }
 });
 
 test('fault transcript: create-only intent, native mutation, result commit and reply boundaries retain exact outcomes', async t => {
