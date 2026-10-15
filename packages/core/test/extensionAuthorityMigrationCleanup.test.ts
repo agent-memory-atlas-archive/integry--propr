@@ -94,7 +94,8 @@ test('cleanup migration retires the published extension authority schema without
   t.after(() => old.destroy());
   await applyDatabaseMigrations(old);
   const recorded = await ledger(old);
-  assert.deepEqual(recorded.slice(-2), [EPOCH, V2]);
+  assert.deepEqual(recorded.filter(name => /extension_authority/.test(name)), [EPOCH, V2]);
+  assert.equal(recorded.at(-1), V2);
   assert.equal(recorded.includes(CLEANUP), false);
   const before = await schema(old);
   assert.deepEqual(obsolete(before).filter(name => name.startsWith('table:')).sort(),
