@@ -4,6 +4,7 @@ import { ListPlus, Check, ChevronDown, ChevronRight, ExternalLink } from 'lucide
 import { createTodo, getCategories, RepoTodoCategory } from '../api/repoTodosApi';
 import RepositorySelector, { RepoOption } from './RepositorySelector';
 import { getPlannerSettings, savePlannerSettings } from '../hooks/usePlannerSettings';
+import { todoCreationAction } from './creationActions';
 
 interface QuickAddTodoProps {
   externalOpen?: boolean;
@@ -11,6 +12,13 @@ interface QuickAddTodoProps {
   disabled?: boolean;
   layout?: 'popover' | 'inline';
 }
+
+// In the Create sheet the row is a creation action, so its name matches the
+// other New rows; the toolbar keeps its quick-add name.
+const TRIGGER_LABELS = { inline: todoCreationAction.label, popover: 'Quick add to-do' } as const;
+// The form's actions are 44px touch targets in the sheet, compact in the toolbar popover.
+const VIEW_TODOS_SIZES = { inline: '-ml-2 min-h-11 min-w-11 gap-1.5 px-2 text-sm', popover: 'gap-1 text-xs' } as const;
+const SUBMIT_SIZES = { inline: 'min-h-11 min-w-11 px-4 text-sm', popover: 'px-3 py-1 text-xs' } as const;
 
 const QuickAddTodo: React.FC<QuickAddTodoProps> = ({ externalOpen, onExternalOpenHandled, disabled = false, layout = 'popover' }) => {
   const location = useLocation();
@@ -26,6 +34,7 @@ const QuickAddTodo: React.FC<QuickAddTodoProps> = ({ externalOpen, onExternalOpe
   const [categoryDropdownOpen, setCategoryDropdownOpen] = useState(false);
   const [lastUsedCategory, setLastUsedCategory] = useState<Record<string, string>>({});
 
+  const triggerLabel = TRIGGER_LABELS[layout];
   const containerRef = useRef<HTMLDivElement>(null);
   const categoryDropdownRef = useRef<HTMLDivElement>(null);
 
@@ -169,11 +178,11 @@ const QuickAddTodo: React.FC<QuickAddTodoProps> = ({ externalOpen, onExternalOpe
           if (isOpen) resetForm();
         }}
         disabled={disabled}
-        title={disabled ? 'Demo mode is read-only' : 'Quick add to-do'}
+        title={disabled ? 'Demo mode is read-only' : triggerLabel}
         className={layout === 'inline'
           ? 'flex min-h-12 w-full items-center gap-3 px-4 py-3 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 disabled:opacity-50 disabled:cursor-not-allowed'
           : 'flex items-center gap-1.5 whitespace-nowrap px-3 py-1.5 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed'}
-        aria-label="Quick add to-do"
+        aria-label={triggerLabel}
         aria-expanded={layout === 'inline' ? isOpen : undefined}
       >
         {layout === 'inline' ? (
@@ -182,7 +191,7 @@ const QuickAddTodo: React.FC<QuickAddTodoProps> = ({ externalOpen, onExternalOpe
             <span className="flex h-8 w-8 flex-none items-center justify-center rounded-lg bg-primary-50 text-primary-700">
               <ListPlus className="h-4 w-4" aria-hidden="true" />
             </span>
-            <span className="min-w-0 flex-1 truncate font-medium">Quick To-Do</span>
+            <span className="min-w-0 flex-1 truncate font-medium">{triggerLabel}</span>
             <ChevronRight className={`h-4 w-4 flex-none text-slate-400 transition-transform ${isOpen ? 'rotate-90' : ''}`} aria-hidden="true" />
           </>
         ) : (
@@ -304,7 +313,7 @@ const QuickAddTodo: React.FC<QuickAddTodoProps> = ({ externalOpen, onExternalOpe
                     }
                   }}
                   disabled={!selectedRepo}
-                  className="flex items-center gap-1 text-xs text-slate-500 hover:text-teal-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  className={`flex items-center text-slate-500 hover:text-teal-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${VIEW_TODOS_SIZES[layout]}`}
                 >
                   <ExternalLink className="w-3 h-3" />
                   <span>View Todos</span>
@@ -312,7 +321,7 @@ const QuickAddTodo: React.FC<QuickAddTodoProps> = ({ externalOpen, onExternalOpe
                 <button
                   onClick={handleSubmit}
                   disabled={!content.trim() || !selectedRepo || isSubmitting || disabled}
-                  className="px-3 py-1 bg-teal-600 text-white text-xs font-medium hover:bg-teal-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  className={`bg-teal-600 text-white font-medium hover:bg-teal-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${SUBMIT_SIZES[layout]}`}
                 >
                   Add To-Do
                 </button>
