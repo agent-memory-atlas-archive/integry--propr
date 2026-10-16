@@ -902,6 +902,20 @@ jobs:
                 echo "✅ Docs Build passed" >> ../build_log.txt
               fi
             fi
+
+            # Serve the fresh build with docs/Dockerfile's static-server command and probe
+            # article routes, sitemap, assets and 404s (guards against SPA homepage fallback).
+            if [ $DOCS_FAILED -eq 0 ]; then
+              SERVING_OUTPUT=$(node ../scripts/check-docs-static-serving.mjs build 2>&1) || {
+                echo "❌ Docs Static Serving Check FAILED" >> ../build_log.txt
+                echo "$SERVING_OUTPUT" | tail -50 >> ../build_log.txt
+                DOCS_FAILED=1
+                EXIT_CODE=1
+              }
+              if [ $DOCS_FAILED -eq 0 ]; then
+                echo "✅ Docs Static Serving Check passed" >> ../build_log.txt
+              fi
+            fi
             cd ..
           fi
 
