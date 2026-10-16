@@ -163,13 +163,20 @@ Installation-level **Settings** belong to the connected server. Connection manag
 
 | Menu | Actions and shortcuts |
 | --- | --- |
-| ProPR | About ProPR, Settings… (`Cmd+,`), Services and Hide (macOS only), Quit ProPR (`Cmd+Q`) |
-| File | New Task (`Cmd+Shift+T`), New Plan (`Cmd+N`), New Goal (`Cmd+Shift+G`), New Automation (`Cmd+Shift+A`), New To-do (`Cmd+Shift+D`), Connect Instance…, Switch Account / Instance… (`Cmd+Shift+I`), Close Window |
-| Edit | Native editing |
-| View | Toggle Sidebar, zoom, full screen |
-| Navigate | Back (`Cmd+[`), Forward (`Cmd+]`), Search / Go To… (`Cmd+K`), Dashboard, Inbox, Plans, Goals, Tasks, Repositories |
-| Window | Minimize; on macOS also zoom window and bring all to front |
-| Help | ProPR Website, Documentation, Connection Help, Connection Diagnostics…, Report a Problem… |
+| ProPR | About ProPR (`Cmd+Shift+P`), Settings… (`Cmd+,`), Quit ProPR (`Cmd+Q`); on macOS also Services, Hide ProPR (`Cmd+H`), Hide Others (`Cmd+Option+H`), Show All (`Cmd+Option+Shift+H`) |
+| File | New Task (`Cmd+Shift+T`), New Plan (`Cmd+N`), New Goal (`Cmd+Shift+G`), New Automation (`Cmd+Shift+A`), New To-do (`Cmd+Shift+D`), Connect Instance… (`Cmd+Shift+N`), Switch Account / Instance… (`Cmd+Shift+I`), Close Window (`Cmd+W`) |
+| Edit | Undo (`Cmd+Z`), Redo (`Cmd+Shift+Z`), Cut, Copy, Paste, Select All (`Cmd+X/C/V/A`); on macOS also Paste and Match Style (`Cmd+Option+Shift+V`) |
+| View | Toggle Sidebar (`Ctrl+Cmd+S` on macOS, `Ctrl+B` on Linux), Actual Size (`Cmd+0`), Zoom In (`Cmd+Plus`), Zoom Out (`Cmd+-`), Toggle Full Screen (`Ctrl+Cmd+F` on macOS, `F11` on Linux) |
+| Navigate | Back (`Cmd+[`), Forward (`Cmd+]`), Search / Go To… (`Cmd+K`), Dashboard (`Cmd+D`), Inbox (`Cmd+I`), Plans (`Cmd+P`), Goals (`Cmd+G`), Tasks (`Cmd+T`), Repositories (`Cmd+R`) |
+| Window | Minimize (`Cmd+M`); on macOS also Zoom (`Cmd+Shift+M`) and Bring All to Front (`Cmd+Option+Shift+M`) |
+| Help | ProPR Website (`Cmd+Shift+O`), Documentation (`Cmd+/`), Connection Help (`Cmd+Shift+H`), Connection Diagnostics… (`Cmd+Shift+L`), Report a Problem… (`Cmd+Shift+B`) |
+
+A plain `Cmd`+letter shortcut opens a page and `Cmd+Shift`+letter runs an action. For example, `Cmd+T` opens Tasks
+and `Cmd+Shift+T` starts a new task. A shortcut runs the same action as its menu entry. When that entry is unavailable,
+for example while signed out, the shortcut does nothing. Shortcuts work only while a ProPR window is focused. Your
+desktop, input method or keyboard tools can claim a shortcut before ProPR receives it. For example, IBus uses
+`Ctrl+Shift+U` and `Ctrl+Shift+E`, and GNOME uses `Ctrl+Alt+T`. ProPR avoids those chords, but desktops can be
+reconfigured. If a shortcut does nothing while its menu entry works, check your desktop and input-method shortcuts.
 
 On Linux, use `Ctrl` in place of `Cmd`. The Linux window has no native menu bar, so open these menus with the
 **Application menu** button (⋮) beside the minimize, maximize and close buttons, or press `F10` or `Alt+F`. The

@@ -57,6 +57,10 @@ const bridge = createDesktopBridge({
   },
 });
 dispatcher.rendererReady();
+/** Every leaf the template shows, with the accelerator beside it (Electron fills role defaults). */
+const shortcutRows = (template: MenuItemConstructorOptions[]) => template.flatMap(menu => (menu.submenu as MenuItemConstructorOptions[])
+  .filter(item => item.type !== 'separator')
+  .map(item => ({ menu: menu.label, label: item.label ?? null, role: item.role ?? null, accelerator: item.accelerator ?? null, enabled: item.enabled !== false })));
 Object.assign(window, { nativeMenu: {
   click(label: string, platform: NodeJS.Platform) {
     const item = createApplicationMenuTemplate(platform, dispatcher).flatMap(item => Array.isArray(item.submenu) ? item.submenu : []).find(item => item.label === label);
@@ -69,7 +73,9 @@ Object.assign(window, { nativeMenu: {
     x: popup.options.x, y: popup.options.y, sourceType: popup.options.sourceType,
     file: (popup.template.find(item => item.label === 'File')?.submenu as MenuItemConstructorOptions[])
       .flatMap(item => item.label ? [{ label: item.label, accelerator: item.accelerator ?? null }] : []),
+    shortcuts: shortcutRows(popup.template),
   },
+  shortcuts: (platform: NodeJS.Platform) => shortcutRows(createApplicationMenuTemplate(platform, dispatcher)),
   choose(label: string) {
     const item = popup?.template.flatMap(item => Array.isArray(item.submenu) ? item.submenu : []).find(item => item.label === label);
     if (!item || item.enabled === false) throw new Error(`Unavailable popup item: ${label}`);

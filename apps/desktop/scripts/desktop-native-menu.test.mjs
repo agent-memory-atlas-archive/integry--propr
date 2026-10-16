@@ -216,9 +216,20 @@ it('Linux/macOS menu dispatch reaches actual search, sidebar, every creation for
           { label: 'New Goal', accelerator: 'CmdOrCtrl+Shift+G' }, { label: 'New Automation', accelerator: 'CmdOrCtrl+Shift+A' },
           { label: 'New To-do', accelerator: 'CmdOrCtrl+Shift+D' },
         ]);
+        // Every app-owned entry in the popup shows its shortcut, disabled or not;
+        // native roles keep Electron's own defaults.
+        const rows = (await popup()).shortcuts;
+        expect(rows.filter(row => !row.role && !row.accelerator)).toEqual([]);
+        expect(rows.filter(row => !row.enabled).length).toBeGreaterThan(0);
+        expect(rows).toEqual(await page.evaluate(() => window.nativeMenu.shortcuts('linux')));
         await page.evaluate(() => window.nativeMenu.dismiss());
       } else {
         await expect(menuButton).toHaveCount(0);
+        const rows = await page.evaluate(() => window.nativeMenu.shortcuts('darwin'));
+        expect(rows.filter(row => !row.role && !row.accelerator)).toEqual([]);
+        expect(rows.filter(row => ['unhide', 'zoom', 'front'].includes(row.role)).map(row => [row.role, row.accelerator])).toEqual([
+          ['unhide', 'Command+Alt+Shift+H'], ['zoom', 'Command+Shift+M'], ['front', 'Command+Alt+Shift+M'],
+        ]);
       }
       await click('Connect Instance…');
       await expect(page.getByRole('heading', { name: 'Connect to an instance' })).toBeVisible();
