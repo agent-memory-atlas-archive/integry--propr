@@ -286,7 +286,7 @@ const ActionBar: React.FC<ActionBarProps> = ({
   }
 
   return (
-    <div className="flex w-full min-w-0 flex-wrap items-center justify-end gap-1.5 sm:w-auto sm:flex-shrink-0">
+    <div className="flex w-full min-w-0 flex-wrap items-center justify-end gap-1.5 sm:w-auto sm:max-w-full sm:flex-shrink-0">
       <CancelledBadge isCancelled={isCancelled} />
 
       {followupCommands}

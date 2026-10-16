@@ -263,15 +263,18 @@ test('1920px opens a task beside the list and steps through rows from the keyboa
   await expect(header.getByTestId('task-status-badge')).toHaveText('Implementing');
   // Tier 1 separates the Git cluster from Implementing with spacing, no bullets and no empty icon.
   // The cluster ends with the pull request's assignment, which GitHub answered, so no read error stands in for it.
+  // The repository leads in a block of its own, owner above name; the Git cluster follows it.
+  const repository = header.getByTestId('task-header-identity').getByRole('link', { name: 'integry/propr', exact: true });
+  await expect(repository).toHaveAttribute('href', 'https://github.com/integry/propr');
+  await expect(repository).toHaveText('integry/propr');
   const gitContext = header.getByTestId('task-header-identity').getByRole('group', { name: 'Git context' });
   expect(await gitContext.getByRole('link').evaluateAll(links => links.map(link => [link.textContent!.trim(), link.getAttribute('href')]))).toEqual([
-    ['integry/propr', 'https://github.com/integry/propr'],
     ['#2664', 'https://github.com/integry/propr/issues/2664'],
   ]);
   const assignment = gitContext.getByTestId('task-assignment');
   await expect(assignment.getByRole('listitem', { name: `Assigned to @${prAssignee.login}` })).toBeVisible();
   await expect(gitContext.getByTestId('task-assignment-error')).toHaveCount(0);
-  await expect(gitContext).toHaveText(new RegExp(`^integry/propr#2664.*@${prAssignee.login}`));
+  await expect(gitContext).toHaveText(new RegExp(`^#2664.*@${prAssignee.login}`));
   await expect(header.getByTestId('task-status-badge').locator('svg')).toHaveCount(0);
   await expect(header.getByRole('group', { name: 'Run', exact: true })).toHaveText('Run 3/8 (Completed 36 mins ago): Found 2 issues');
   // Wrapping metadata groups use spacing so no separator can lead a new line.
@@ -282,8 +285,9 @@ test('1920px opens a task beside the list and steps through rows from the keyboa
   await expect(header).not.toContainText('3.9M');
   // No standalone hairline precedes the assignment, status or Stop.
   await expect(header.getByTestId('task-header-identity').locator('.w-px')).toHaveCount(0);
-  expect((await header.boundingBox())!.height).toBeLessThanOrEqual(120);
-  // The pane's controls are icons in the header's first row, not a row of their own.
+  // The repository's two-line block is the only tier added above the controls row.
+  expect((await header.boundingBox())!.height).toBeLessThanOrEqual(160);
+  // The pane's controls are icons in the controls row under the repository, not a row of their own.
   await expect(header.getByTestId('task-header-identity').getByRole('button', { name: 'Close task details' })).toBeVisible();
   // The inspected run is named in the panels it changed; the way back to the live run sits at the right of the timeline's header, where the run was opened.
   const inspected = details.getByTestId('inspected-run-context').filter({ visible: true });

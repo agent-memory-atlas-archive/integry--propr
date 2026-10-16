@@ -48,9 +48,10 @@ const TaskBreadcrumb: React.FC<{ label: string }> = ({ label }) => (
 );
 
 /**
- * The task in two tiers. The first is the task: where it lives, what state it
- * is in, with its actions (Stop included, while its newest run works) and the
- * pane's controls on the right. It never changes when the timeline opens an
+ * The task in two tiers. The first is the task: its repository across the
+ * full width, owner above name, then the rest of where it lives and what state
+ * it is in, with its actions (Stop included, while its newest run works) and
+ * the pane's controls on the right. It never changes when the timeline opens an
  * earlier run. The second is the title, then the run on screen: which run it
  * is and how it ended, its model, runtime and consumption, so every run's
  * spend can be read, and the run number says whose it is.
@@ -77,16 +78,20 @@ const DesktopTaskHeader: React.FC<DesktopTaskHeaderProps> = ({ headerProps, cont
   return (
     <div data-testid="task-header-tiers" className="flex flex-col gap-1 border-b border-slate-200 px-6 py-2">
       {breadcrumb && <TaskBreadcrumb label={crumbLabel(taskInfo)} />}
-      <div data-testid="task-header-identity" className="flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1">
-        <div className="flex min-w-[12rem] flex-1 flex-wrap items-center gap-x-2 gap-y-1">
-          <ContextStrip {...contextStripProps} part="git" />
-          <TaskStatusBadge {...headerProps} />
-        </div>
-        <div className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1">
-          <ActionBar {...actionBarProps} />
-          {paneControls && (
-            <div className="ml-1 flex items-center gap-0.5 border-l border-slate-200 pl-2">{paneControls}</div>
-          )}
+      <div data-testid="task-header-identity" className="flex min-w-0 flex-col gap-1">
+        {/* Its own block, so the repository never shares its width with the actions. */}
+        <ContextStrip {...contextStripProps} part="repository" />
+        <div data-testid="task-header-controls" className="flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+          <div className="flex min-w-[12rem] flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+            <ContextStrip {...contextStripProps} part="git" />
+            <TaskStatusBadge {...headerProps} />
+          </div>
+          <div className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1">
+            <ActionBar {...actionBarProps} />
+            {paneControls && (
+              <div className="ml-1 flex items-center gap-0.5 border-l border-slate-200 pl-2">{paneControls}</div>
+            )}
+          </div>
         </div>
       </div>
       <h2 className="text-base font-semibold leading-tight text-gray-900 break-words line-clamp-2" title={title.tooltip}>

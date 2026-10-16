@@ -4,6 +4,7 @@ import { getDisplayTitle, getSubtitle } from './taskHeaderText';
 import { formatRelativeTime } from '../TaskList/utils.tsx';
 import { CheckCircle2, XCircle, Loader2, Clock, Play, GitPullRequest, Eye, Wrench, RefreshCw, History, ArrowRight, FileText } from 'lucide-react';
 import { AUTOMATION_REPORT_MODE, taskLabelMode } from './taskKind';
+import { RepoIdentity } from './ContextStrip';
 
 interface TaskHeaderProps {
   taskInfo: TaskInfo | null;
@@ -139,6 +140,8 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({ taskInfo, currentStatus }) => {
 
   return (
     <div className="flex flex-col gap-1.5">
+      {/* The repository leads, owner above name, as in the desktop header. */}
+      {taskInfo && <RepoIdentity taskInfo={taskInfo} />}
       {/* Status badge - inline pill */}
       <div className="flex items-center gap-2">
         <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${statusInfo.bgColor} ${statusInfo.color}`}>
