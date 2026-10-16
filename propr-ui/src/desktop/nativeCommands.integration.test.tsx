@@ -91,8 +91,8 @@ describe.each(['darwin', 'linux'] as const)('%s menu to dispatcher to preload to
   it('routes every section and creation shortcut to the real desktop URL', async () => {
     const value = fixture(platform);
     for (const [label, path, shortcut] of [
-      ['Dashboard', '/'], ['Inbox', '/inbox'], ['Plans', '/plans'],
-      ['Goals', '/goals'], ['Tasks', '/tasks'], ['Repositories', '/repositories'],
+      ['Dashboard', '/', 'D'], ['Inbox', '/inbox', 'I'], ['Plans', '/plans', 'P'],
+      ['Goals', '/goals', 'G'], ['Tasks', '/tasks', 'T'], ['Repositories', '/repositories', 'R'],
       ['Settings…', '/settings', ','], ['New Plan', '/studio/new', 'N'],
       ['New Task', '/tasks/new', 'Shift+T'], ['New Goal', '/goals?new=1', 'Shift+G'],
       ['New Automation', '/automations/new', 'Shift+A'],
