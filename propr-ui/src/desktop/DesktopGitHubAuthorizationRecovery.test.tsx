@@ -70,6 +70,24 @@ describe('Desktop GitHub grant recovery', () => {
     expect(screen.getByRole('region')).toBeInTheDocument();
   });
 
+  it('starts recovery from a saved loopback native profile origin and keeps renewal guidance truthful', async () => {
+    const adapters = adaptersFor();
+    const nativeProfile = { ...remoteProfile, baseUrl: 'http://127.0.0.1:4000' };
+    render(<>
+      <input aria-label="Task description" defaultValue="Review PR #18" />
+      <DesktopGitHubAuthorizationRecovery adapters={adapters} profile={nativeProfile} transportScope="current-scope" />
+    </>);
+    requireGrant();
+    expect(screen.getByText(/browser dashboard does not by itself renew authorization/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with GitHub in browser' }));
+    expect(await screen.findByRole('button', { name: 'Sign in with GitHub in browser' })).toBeEnabled();
+    // The API moves this alias to the configured callback origin before creating OAuth state.
+    expect(adapters.externalBrowser.open).toHaveBeenCalledExactlyOnceWith('http://127.0.0.1:4000/api/auth/github');
+    expect(adapters.authentication.authenticate).not.toHaveBeenCalled();
+    expect(screen.getByRole('region', { name: 'Authorize GitHub repository access' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Task description')).toHaveValue('Review PR #18');
+  });
+
   it('ignores another account and stale transport scopes', () => {
     render(<DesktopGitHubAuthorizationRecovery adapters={adaptersFor()} profile={remoteProfile} transportScope="current-scope" />);
     requireGrant('another-account');

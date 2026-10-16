@@ -30,6 +30,7 @@ import {
     buildConnectAuthorizationUrl,
     redeemConnectAuthorizationCode,
     resolveBrowserAuthMode,
+    type BrowserAuthMode,
 } from './connectAuth.js';
 import {
     authenticatedUserResponse,
@@ -43,6 +44,7 @@ import { rememberCreator } from './services/creatorProjection.js';
 import './authTypes.js';
 import { timeApiStage } from './apiPerformanceTiming.js';
 import { createCorsOriginValidator } from './corsValidation.js';
+import { loopbackOAuthStartRedirect } from './authLoopbackOrigin.js';
 
 declare module 'express-session' {
     interface SessionData {
@@ -234,6 +236,63 @@ export function createSessionCsrfProtection(
     };
 }
 
+/** Start browser OAuth; exported with the callback factory for cookie-jar route tests. */
+export function createOAuthStartHandler(browserAuthMode: BrowserAuthMode, demoModeAtStartup: boolean): RequestHandler {
+    return (req: Request, res: Response, next: NextFunction) => {
+        const redirectTo = getValidatedRedirectTo(req.query.redirect_to as string | undefined);
+
+        if (demoModeAtStartup) {
+            res.redirect(redirectTo || getDefaultRedirectUrl());
+            return;
+        }
+
+        // Create cookie-bound OAuth state only on the origin that receives the callback.
+        const canonicalStart = browserAuthMode === 'disabled'
+            ? null
+            : loopbackOAuthStartRedirect(req, process.env.GH_OAUTH_CALLBACK_URL);
+        if (canonicalStart) {
+            res.redirect(canonicalStart);
+            return;
+        }
+
+        if (redirectTo) {
+            (req.session as AuthSession).redirectTo = redirectTo;
+        } else {
+            delete (req.session as AuthSession).redirectTo;
+        }
+
+        if (browserAuthMode === 'connect') {
+            const state = randomBytes(32).toString('base64url');
+            (req.session as AuthSession).connectOAuthState = state;
+            req.session.save((error) => {
+                if (error) {
+                    console.error('Could not save Connect OAuth state:', error);
+                    redirectAuthError(res, 'session_unavailable');
+                    return;
+                }
+                try {
+                    res.redirect(buildConnectAuthorizationUrl({
+                        connectOrigin: process.env.PROPR_CONNECT_URL,
+                        callbackUrl: process.env.GH_OAUTH_CALLBACK_URL!,
+                        state,
+                        installationId: process.env.GH_INSTALLATION_ID,
+                    }));
+                } catch (buildError) {
+                    console.error('Could not build Connect authorization URL:', buildError);
+                    redirectAuthError(res, 'connect_not_configured');
+                }
+            });
+            return;
+        }
+
+        if (browserAuthMode === 'disabled') {
+            redirectAuthError(res, 'web_auth_not_configured');
+            return;
+        }
+        passport.authenticate('github', { scope: ['user:email', 'read:org', 'repo'] })(req, res, next);
+    };
+}
+
 export function setupAuth(app: Express, demoModeAtStartup = isDemoMode()): SocketAuthMiddlewareBundle {
     configureDemoMode(demoModeAtStartup);
     const browserAuthMode = demoModeAtStartup ? 'disabled' : resolveBrowserAuthMode();
@@ -326,50 +385,7 @@ export function setupAuth(app: Express, demoModeAtStartup = isDemoMode()): Socke
 
     // Routes
     // Accept optional redirect_to parameter for PR preview environments
-    app.get('/api/auth/github', (req: Request, res: Response, next: NextFunction) => {
-        const redirectTo = getValidatedRedirectTo(req.query.redirect_to as string | undefined);
-
-        if (demoModeAtStartup) {
-            res.redirect(redirectTo || getDefaultRedirectUrl());
-            return;
-        }
-
-        if (redirectTo) {
-            (req.session as AuthSession).redirectTo = redirectTo;
-        } else {
-            delete (req.session as AuthSession).redirectTo;
-        }
-
-        if (browserAuthMode === 'connect') {
-            const state = randomBytes(32).toString('base64url');
-            (req.session as AuthSession).connectOAuthState = state;
-            req.session.save((error) => {
-                if (error) {
-                    console.error('Could not save Connect OAuth state:', error);
-                    redirectAuthError(res, 'session_unavailable');
-                    return;
-                }
-                try {
-                    res.redirect(buildConnectAuthorizationUrl({
-                        connectOrigin: process.env.PROPR_CONNECT_URL,
-                        callbackUrl: process.env.GH_OAUTH_CALLBACK_URL!,
-                        state,
-                        installationId: process.env.GH_INSTALLATION_ID,
-                    }));
-                } catch (buildError) {
-                    console.error('Could not build Connect authorization URL:', buildError);
-                    redirectAuthError(res, 'connect_not_configured');
-                }
-            });
-            return;
-        }
-
-        if (browserAuthMode === 'disabled') {
-            redirectAuthError(res, 'web_auth_not_configured');
-            return;
-        }
-        passport.authenticate('github', { scope: ['user:email', 'read:org', 'repo'] })(req, res, next);
-    });
+    app.get('/api/auth/github', createOAuthStartHandler(browserAuthMode, demoModeAtStartup));
 
     if (demoModeAtStartup) {
         app.get('/api/auth/github/callback', (req: Request, res: Response) => {
