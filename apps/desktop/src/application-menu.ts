@@ -1,6 +1,7 @@
 import type { Menu, MenuItemConstructorOptions, PopupOptions } from 'electron';
 import type { DesktopNativeCommandDispatcher } from './native-commands';
 import type { DesktopApplicationMenuRequest } from './shared/contract';
+import { applicationMenuShortcut, NATIVE_ROLE_SHORTCUTS, type ApplicationMenuCommand, type ApplicationMenuPlatform } from './application-menu-shortcuts';
 
 interface ApplicationMenuHost {
   buildFromTemplate(template: MenuItemConstructorOptions[]): Menu;
@@ -11,39 +12,29 @@ export interface ApplicationMenuController {
   close(): void;
 }
 
-const commandItem = (
-  commands: DesktopNativeCommandDispatcher,
-  command: Parameters<DesktopNativeCommandDispatcher['dispatch']>[0],
-  label: string,
-  accelerator: string | undefined,
-  enabled = true,
-): MenuItemConstructorOptions => ({
-  label,
-  ...(accelerator ? { accelerator } : {}),
-  enabled,
-  click: () => commands.dispatch(command),
-});
-
 /**
- * File-menu creation entries, in toolbar order. New Plan keeps its original
- * CmdOrCtrl+N; the others share CmdOrCtrl+Shift with a mnemonic letter. None
- * collides with Edit/View roles, search (K), instances (Shift+I), settings (,),
- * quit (Q), navigation ([ ]), the renderer's reconnect (Shift+R) or IBus
- * (Shift+U/E), and Alt is avoided: Ctrl+Alt+T is GNOME's terminal and Alt+F
- * opens the Linux application menu. Renderer quick add keeps Alt+T.
+ * File-menu creation entries, in toolbar order, with the bindings from #3168.
+ * The full binding table and its conflict notes are in application-menu-shortcuts.
  */
-export const CREATION_MENU_ITEMS = Object.freeze([
-  { command: 'new-task', label: 'New Task', accelerator: 'CmdOrCtrl+Shift+T' },
-  { command: 'new-plan', label: 'New Plan', accelerator: 'CmdOrCtrl+N' },
-  { command: 'new-goal', label: 'New Goal', accelerator: 'CmdOrCtrl+Shift+G' },
-  { command: 'new-automation', label: 'New Automation', accelerator: 'CmdOrCtrl+Shift+A' },
-  { command: 'new-todo', label: 'New To-do', accelerator: 'CmdOrCtrl+Shift+D' },
-] as const);
+export const CREATION_MENU_ITEMS = Object.freeze(([
+  ['new-task', 'New Task'], ['new-plan', 'New Plan'], ['new-goal', 'New Goal'],
+  ['new-automation', 'New Automation'], ['new-todo', 'New To-do'],
+] as const).map(([command, label]) => ({ command, label, accelerator: applicationMenuShortcut('linux', command) })));
 
 export const createApplicationMenuTemplate = (
   platform: NodeJS.Platform,
   commands: DesktopNativeCommandDispatcher,
 ): MenuItemConstructorOptions[] => {
+  const mac = platform === 'darwin';
+  const shortcutPlatform: ApplicationMenuPlatform = mac ? 'darwin' : 'linux';
+  // Every command item shows and executes its binding; disabled items keep
+  // showing it but Electron does not run their click.
+  const commandItem = (command: ApplicationMenuCommand, label: string, enabled = true): MenuItemConstructorOptions => ({
+    label,
+    accelerator: applicationMenuShortcut(shortcutPlatform, command),
+    enabled,
+    click: () => commands.dispatch(command),
+  });
   const state = commands.getState();
   const authenticated = state.authenticated;
   const editMenu: MenuItemConstructorOptions = {
@@ -58,36 +49,35 @@ export const createApplicationMenuTemplate = (
   const viewMenu: MenuItemConstructorOptions = {
     label: 'View',
     submenu: [
-      commandItem(commands, 'toggle-sidebar', 'Toggle Sidebar', undefined, authenticated),
+      commandItem('toggle-sidebar', 'Toggle Sidebar', authenticated),
       { type: 'separator' },
       { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' },
       { type: 'separator' }, { role: 'togglefullscreen' },
     ],
   };
 
-  const mac = platform === 'darwin';
   return [
     {
       label: 'ProPR',
       submenu: [
-        commandItem(commands, 'about', 'About ProPR', undefined),
+        commandItem('about', 'About ProPR'),
         { type: 'separator' },
-        commandItem(commands, 'settings', 'Settings…', 'CmdOrCtrl+,', authenticated),
+        commandItem('settings', 'Settings…', authenticated),
         ...(mac ? [
           { type: 'separator' as const }, { role: 'services' as const },
           { type: 'separator' as const }, { role: 'hide' as const, label: 'Hide ProPR' },
-          { role: 'hideOthers' as const }, { role: 'unhide' as const },
+          { role: 'hideOthers' as const }, { role: 'unhide' as const, accelerator: NATIVE_ROLE_SHORTCUTS.unhide },
         ] : []),
-        { type: 'separator' }, commandItem(commands, 'quit', 'Quit ProPR', 'CmdOrCtrl+Q'),
+        { type: 'separator' }, commandItem('quit', 'Quit ProPR'),
       ],
     },
     {
       label: 'File',
       submenu: [
-        ...CREATION_MENU_ITEMS.map(item => commandItem(commands, item.command, item.label, item.accelerator, authenticated)),
+        ...CREATION_MENU_ITEMS.map(item => commandItem(item.command, item.label, authenticated)),
         { type: 'separator' },
-        commandItem(commands, 'connect-instance', 'Connect Instance…', undefined, state.canManageInstances !== false),
-        commandItem(commands, 'manage-instances', 'Switch Account / Instance…', 'CmdOrCtrl+Shift+I', state.canManageInstances !== false),
+        commandItem('connect-instance', 'Connect Instance…', state.canManageInstances !== false),
+        commandItem('manage-instances', 'Switch Account / Instance…', state.canManageInstances !== false),
         { type: 'separator' }, { role: 'close' },
       ],
     },
@@ -96,34 +86,37 @@ export const createApplicationMenuTemplate = (
     {
       label: 'Navigate',
       submenu: [
-        commandItem(commands, 'back', 'Back', 'CmdOrCtrl+[', state.canGoBack === true),
-        commandItem(commands, 'forward', 'Forward', 'CmdOrCtrl+]', state.canGoForward === true),
-        commandItem(commands, 'search', 'Search / Go To…', 'CmdOrCtrl+K', authenticated),
+        commandItem('back', 'Back', state.canGoBack === true),
+        commandItem('forward', 'Forward', state.canGoForward === true),
+        commandItem('search', 'Search / Go To…', authenticated),
         { type: 'separator' },
-        commandItem(commands, 'dashboard', 'Dashboard', undefined, authenticated),
-        commandItem(commands, 'inbox', 'Inbox', undefined, authenticated),
-        commandItem(commands, 'plans', 'Plans', undefined, authenticated),
-        commandItem(commands, 'goals', 'Goals', undefined, authenticated),
-        commandItem(commands, 'tasks', 'Tasks', undefined, authenticated),
-        commandItem(commands, 'repositories', 'Repositories', undefined, authenticated),
+        commandItem('dashboard', 'Dashboard', authenticated),
+        commandItem('inbox', 'Inbox', authenticated),
+        commandItem('plans', 'Plans', authenticated),
+        commandItem('goals', 'Goals', authenticated),
+        commandItem('tasks', 'Tasks', authenticated),
+        commandItem('repositories', 'Repositories', authenticated),
       ],
     },
     {
       label: 'Window',
       submenu: [
         { role: 'minimize' },
-        ...(mac ? [{ role: 'zoom' as const }, { type: 'separator' as const }, { role: 'front' as const }] : []),
+        ...(mac ? [
+          { role: 'zoom' as const, accelerator: NATIVE_ROLE_SHORTCUTS.zoom },
+          { type: 'separator' as const }, { role: 'front' as const, accelerator: NATIVE_ROLE_SHORTCUTS.front },
+        ] : []),
       ],
     },
     {
       label: 'Help',
       submenu: [
-        commandItem(commands, 'website', 'ProPR Website', undefined),
-        commandItem(commands, 'documentation', 'Documentation', undefined),
-        commandItem(commands, 'connection-help', 'Connection Help', undefined),
-        commandItem(commands, 'diagnostics', 'Connection Diagnostics…', undefined),
+        commandItem('website', 'ProPR Website'),
+        commandItem('documentation', 'Documentation'),
+        commandItem('connection-help', 'Connection Help'),
+        commandItem('diagnostics', 'Connection Diagnostics…'),
         { type: 'separator' },
-        commandItem(commands, 'report-problem', 'Report a Problem…', undefined),
+        commandItem('report-problem', 'Report a Problem…'),
       ],
     },
   ];

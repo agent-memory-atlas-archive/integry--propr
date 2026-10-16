@@ -168,6 +168,77 @@ and #2303 signing procedure; do not patch an already signed app. On an actual Ma
 5. Decline and accept leaving an unsaved plan through Settings, Back, instance management and Quit. Check native
    Edit/View/Window behavior, relaunch and `propr://` links. Capture the changed native menus, About and Dock as evidence.
 
+## Application menu shortcuts (#3177)
+
+Every actionable application-menu leaf on Linux and macOS shows and runs a shortcut. The Services submenu is the
+exception: macOS populates it and owns its behavior. App-owned bindings live in `src/application-menu-shortcuts.ts`.
+That file has a `Record` keyed by the closed `ApplicationMenuCommand` union, which `commandItem` requires, so a new menu
+command does not compile until it has a binding. The menu sets each accelerator on the existing item, so a shortcut runs
+the same `click` → `commands.dispatch(command)` as choosing the entry. Disabled items keep showing their shortcut, and
+Electron does not run them. The dispatcher's authenticated-command and connection-scope checks are unchanged. No
+`globalShortcut` is registered, so shortcuts act only while a ProPR window is focused.
+
+Scheme: `CmdOrCtrl+letter` opens a destination and `CmdOrCtrl+Shift+letter` runs an action. Tasks/New Task share `T`
+and Goals/New Goal share `G`. These bindings are kept: #3168's creation shortcuts (`Shift+T/G/A/D`, New Plan `N`), search
+`K`, instances `Shift+I`, settings `,`, quit `Q` and Back/Forward `[ ]`. Number keys stay unbound (#2306 rejected
+arbitrary `CmdOrCtrl+1..7`). Native roles keep Electron's defaults. These are recorded in
+`NATIVE_ROLE_DEFAULT_SHORTCUTS`, because Electron supplies them at build time and they do not appear in the template.
+The three macOS roles without a default get key equivalents and keep their native role: Show All
+`Cmd+Option+Shift+H`, Window → Zoom `Cmd+Shift+M` and Bring All to Front `Cmd+Option+Shift+M`. Toggle Sidebar follows
+Apple's Show Sidebar `Ctrl+Cmd+S` on macOS and uses `Ctrl+B` on Linux.
+
+`RESERVED_SHORTCUTS` lists chords that no binding may take, with the reason for each:
+
+- Renderer: reconnect `Shift+R`, quick add `Alt+T`, submit `Enter`, menu `F10`/`Alt+F`/`Shift+F10`.
+- IBus: `Ctrl+Shift+U`/`E`, `Ctrl+.`/`;`.
+- Linux text and terminal conventions: `Ctrl+Shift+C`/`V`, `Ctrl+Y`.
+- Common desktop chords: GNOME `Ctrl+Alt+T`, lock/workspace `Ctrl+Alt+…`, KDE `Ctrl+F1–F4`, `Alt+F1/F2/F4/Tab`.
+- macOS system chords: Spotlight, screenshots `Cmd+Shift+3–6`, log out `Cmd+Shift+Q`, Help search `Cmd+Shift+/`,
+  `Cmd+.`, Dock, Look Up, emoji, and AppKit's Minimize/Close All.
+
+Linux app bindings never use Alt or Super. `normalizeAccelerator` canonicalizes spellings before the uniqueness and
+reserved checks:
+
+- `CmdOrCtrl`/`CommandOrControl` → Command on macOS and Control on Linux.
+- `Command`/`Meta`/`Super` → Super on Linux.
+- `Option` = `Alt`, `Plus` = `Shift+=`, `?` = `Shift+/`.
+
+`src/application-menu-shortcuts.test.ts` checks the following for both platforms:
+
+- every leaf has a visible shortcut, matched against an explicit per-menu table;
+- every role used is in the defaults table;
+- no chord is used twice and no reserved chord is used;
+- role defaults are not overridden;
+- each command is bound once and dispatches itself;
+- disabled items keep their shortcut;
+- the installed menu and the Linux popup share the template.
+
+`scripts/desktop-native-menu.test.mjs` checks the shortcut rows in the production renderer fixture.
+
+Known limitations:
+
+- A desktop, input method or remapper can claim any chord before Electron sees it.
+- On Linux, Electron runs menu accelerators only for key events the page did not `preventDefault`. The renderer's own
+  `Cmd/Ctrl+K` handler therefore focuses search directly.
+- Destination shortcuts navigate like their menu entries, with the same unsaved Plan Studio confirmation.
+- Keyboard layouts that need AltGr for `[`, `]` or `/` may not reach those chords.
+- Mocked Darwin templates are not macOS hardware evidence. The Mac pass must press every chord above with the window
+  focused, including when it is disabled while signed out.
+
+Ctrl+Shift+D (New To-do) observation on a747 Linux: the item is built by the same `commandItem` and dispatcher path as
+the working Ctrl+Shift+T, with the same enablement. The renderer has no handler for Ctrl+Shift+D and calls no
+`preventDefault` that would stop it. No other chord in the menu or the reserved list normalizes to Ctrl+Shift+D. So the
+app-side path does not explain the missing delivery. This change keeps the binding rather than guessing at a cause.
+Next step on that machine, with the ProPR window focused:
+
+1. Run `xev -event keyboard` or `libinput debug-events` to confirm the chord reaches the window.
+2. Check the IBus/Fcitx and desktop keyboard-shortcut settings.
+3. Retry with the input method disabled.
+
+If the chord never reaches the window, it is an external claim. If it reaches the window but the menu does not fire,
+it is an Electron/app defect to reproduce with the X11 frame test (`PROPR_DESKTOP_FRAME_TEST=1`) using `xdotool key
+ctrl+shift+d`. CDP keyboard input does not exercise native accelerators.
+
 ## Native tray and menu verification
 
 Use a real Linux desktop panel or the macOS menu bar. Automated tests cover the application-owned activation and window
@@ -190,8 +261,8 @@ activation.
 4. Minimize and then hide the window. On Linux, left-click the tray icon after each state and confirm the window is
    restored and focused. Invoke each destination from the tray and application menu and confirm the same restoration
    behavior. In a plan composer, confirm leaving through a native command asks before navigating.
-5. Verify `CmdOrCtrl+N`, `CmdOrCtrl+1`, `CmdOrCtrl+2`, `CmdOrCtrl+3`, `CmdOrCtrl+Shift+I`, `CmdOrCtrl+,`, and
-   `CmdOrCtrl+Shift+N` on Linux. macOS application shortcuts are listed below.
+5. Verify the application-menu shortcuts listed under *Application menu shortcuts (#3177)* on Linux. macOS application
+   shortcuts are listed in the same section.
 6. Pause native notifications and confirm the item becomes unchecked and reads **Resume Native Notifications** while
    delivery is disabled. Resume and confirm it becomes checked and reads **Pause Native Notifications** while delivery is
    enabled. Make the same change in Settings and reopen the tray menu (and Linux application menu) to confirm they agree. Per-event choices must remain
