@@ -4,13 +4,14 @@ import type { Server } from 'node:http';
 import { after, before, beforeEach, test } from 'node:test';
 import { closeConnection } from '@propr/core';
 import express, { type Request } from 'express';
+import { rateLimit } from 'express-rate-limit';
 import session from 'express-session';
 import passport from 'passport';
-import { createConnectCallbackHandler, createOAuthStartHandler } from '../auth.js';
+import { createConnectCallbackHandler, createOAuthStartHandler, shouldUseSecureSessionCookie } from '../auth.js';
 import { configuredLoopbackCallbackOrigin, loopbackOAuthStartRedirect } from '../authLoopbackOrigin.js';
 import type { GitHubUser } from '../authTypes.js';
 
-const ENV_KEYS = ['FRONTEND_URL', 'GH_OAUTH_CALLBACK_URL', 'PROPR_CONNECT_URL', 'PROPR_GH_RELAY_URL', 'PROPR_GH_RELAY_TOKEN', 'GH_INSTALLATION_ID'] as const;
+const ENV_KEYS = ['API_PUBLIC_URL', 'FRONTEND_URL', 'GH_OAUTH_CALLBACK_URL', 'PROPR_CONNECT_URL', 'PROPR_GH_RELAY_URL', 'PROPR_GH_RELAY_TOKEN', 'GH_INSTALLATION_ID'] as const;
 const originalEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 const FRONTEND_URL = 'http://localhost:5174';
 const fakeUser: GitHubUser = {
@@ -55,12 +56,22 @@ async function startLogin(jar: CookieJar, href: string) {
   throw new Error('OAuth start did not reach Connect');
 }
 
+/** Session cookie attributes the API uses for a plain-HTTP loopback deployment. */
+function loopbackSessionCookie() {
+  process.env.API_PUBLIC_URL = 'http://localhost:4000';
+  const secure = shouldUseSecureSessionCookie(undefined);
+  // Secure cookies are never stored over plain HTTP, so loopback Desktop must not set them.
+  assert.equal(secure, false);
+  return { secure, httpOnly: true, sameSite: 'lax' } as const;
+}
+
 before(async () => {
   const app = express();
+  app.use(rateLimit({ windowMs: 60_000, limit: 100 }));
   const testPassport = new passport.Passport();
   testPassport.serializeUser((user, done) => done(null, user));
   testPassport.deserializeUser((user: Express.User, done) => done(null, user));
-  app.use(session({ secret: 'loopback-oauth-origin-test-secret-long-enough', resave: false, saveUninitialized: false, cookie: { httpOnly: true, sameSite: 'lax' } }));
+  app.use(session({ secret: 'loopback-oauth-origin-test-secret-long-enough', resave: false, saveUninitialized: false, cookie: loopbackSessionCookie() }));
   app.use(testPassport.initialize());
   app.use(testPassport.session());
   app.get('/api/auth/github', createOAuthStartHandler('connect', false));
@@ -199,7 +210,8 @@ test('only an exact plain-HTTP loopback callback route is trusted as a canonical
 
 test('direct GitHub mode redirects aliases before Passport creates session state', async () => {
   const app = express();
-  app.use(session({ secret: 'loopback-oauth-origin-test-secret-long-enough', resave: false, saveUninitialized: false }));
+  app.use(rateLimit({ windowMs: 60_000, limit: 100 }));
+  app.use(session({ secret: 'loopback-oauth-origin-test-secret-long-enough', resave: false, saveUninitialized: false, cookie: loopbackSessionCookie() }));
   let passportReached = false;
   app.get('/api/auth/github', createOAuthStartHandler('github', false), () => { passportReached = true; });
   const github = app.listen(0, '127.0.0.1');
