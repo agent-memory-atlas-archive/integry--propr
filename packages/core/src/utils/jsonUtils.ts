@@ -48,30 +48,61 @@ function findJsonStart(text: string): { start: number; type: 'object' | 'array' 
 }
 
 /**
- * Sanitize control characters in a string for JSON parsing.
- * Replaces literal control characters with their escape sequences.
+ * Escape control characters that appear inside JSON string literals.
+ * Some LLMs write literal newlines/tabs in string values instead of escape
+ * sequences; whitespace between tokens is left alone so pretty-printed JSON
+ * stays valid.
  */
-function sanitizeControlCharacters(text: string): string {
+function escapeControlCharactersInStrings(text: string): string {
   let result = '';
+  let inString = false;
+  let escaped = false;
   for (let i = 0; i < text.length; i++) {
-    const charCode = text.charCodeAt(i);
     const char = text[i];
-    // Check for control characters (0x00-0x1F and 0x7F)
-    if ((charCode >= 0 && charCode <= 31) || charCode === 127) {
-      // Preserve escaped sequences that are valid in JSON strings
-      if (char === '\n') {
-        result += '\\n';
-      } else if (char === '\r') {
-        result += '\\r';
-      } else if (char === '\t') {
-        result += '\\t';
-      }
-      // Remove other control characters (add nothing)
+    const charCode = text.charCodeAt(i);
+    if (!inString) {
+      if (char === '"') inString = true;
+      result += char;
+      continue;
+    }
+    if (escaped) {
+      escaped = false;
+      result += char;
+    } else if (char === '\\') {
+      escaped = true;
+      result += char;
+    } else if (char === '"') {
+      inString = false;
+      result += char;
+    } else if (charCode <= 31 || charCode === 127) {
+      if (char === '\n') result += '\\n';
+      else if (char === '\r') result += '\\r';
+      else if (char === '\t') result += '\\t';
+      // Other control characters are dropped.
     } else {
       result += char;
     }
   }
   return result;
+}
+
+/** Last-resort fixes for JS-style objects: trailing commas, single quotes, bare keys. */
+function applyLooseJsonFixes(text: string): string {
+  return text
+    .replace(/,\s*]/g, ']')
+    .replace(/,\s*}/g, '}')
+    .replace(/'/g, '"')
+    .replace(/([{,]\s*)(\w+)(\s*:)/g, '$1"$2"$3');
+}
+
+function describeParseError(error: unknown, text: string): string {
+  const message = (error as Error).message;
+  const posMatch = message.match(/position (\d+)/);
+  if (!posMatch) return message;
+  const pos = parseInt(posMatch[1], 10);
+  const before = text.substring(Math.max(0, pos - 50), pos);
+  const after = text.substring(pos, Math.min(text.length, pos + 50));
+  return `${message} | Context: ...${before}>>>HERE(char=${text.charCodeAt(pos)})<<<${after}...`;
 }
 
 export function parseLlmJson<T>(text: string): T {
@@ -106,37 +137,18 @@ export function parseLlmJson<T>(text: string): T {
   try {
     return JSON.parse(clean);
   } catch {
-    // Try fixing common issues
-    clean = clean
-      .replace(/,\s*]/g, ']')
-      .replace(/,\s*}/g, '}')
-      .replace(/'/g, '"')
-      .replace(/([{,]\s*)(\w+)(\s*:)/g, '$1"$2"$3');
-
+    // Literal control characters inside string values are the most common defect.
+    const sanitized = escapeControlCharactersInStrings(clean);
     try {
-      return JSON.parse(clean);
-    } catch (secondError) {
-      // Try to sanitize control characters that might be breaking JSON
-      // Some LLMs output literal control characters instead of escape sequences
-      const sanitized = sanitizeControlCharacters(clean);
-
+      return JSON.parse(sanitized);
+    } catch (sanitizedError) {
+      // The loose fixes rewrite every single quote, so they only run when the
+      // string-preserving pass failed; report that pass's error, which points
+      // at the real defect rather than at damage done by the loose fixes.
       try {
-        return JSON.parse(sanitized);
-      } catch (thirdError) {
-        // Provide detailed error with context around the error position
-        const err = thirdError as SyntaxError;
-        const posMatch = err.message.match(/position (\d+)/);
-        let context = '';
-        if (posMatch) {
-          const pos = parseInt(posMatch[1], 10);
-          const start = Math.max(0, pos - 50);
-          const end = Math.min(sanitized.length, pos + 50);
-          const before = sanitized.substring(start, pos);
-          const after = sanitized.substring(pos, end);
-          const charCode = sanitized.charCodeAt(pos);
-          context = ` | Context: ...${before}>>>HERE(char=${charCode})<<<${after}...`;
-        }
-        throw new JsonParseError(`Failed to parse JSON: ${(secondError as Error).message}${context}`);
+        return JSON.parse(applyLooseJsonFixes(sanitized));
+      } catch {
+        throw new JsonParseError(`Failed to parse JSON: ${describeParseError(sanitizedError, sanitized)}`);
       }
     }
   }
