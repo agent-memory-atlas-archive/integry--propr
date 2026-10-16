@@ -13,6 +13,8 @@ const focusableSelector = [
 interface BottomSheetProps {
   id: string;
   title: string;
+  /** Decorative mark shown before the title; the title alone names the dialog. */
+  titleIcon?: React.ReactNode;
   closeLabel: string;
   onClose: () => void;
   // A drill-down sheet (e.g. More › Usage) offers a way back to its parent.
@@ -26,7 +28,7 @@ interface BottomSheetProps {
 // scrim dims and blurs the page so a white sheet never floats on a white
 // dashboard. The bottom padding keeps the last row 20px clear of the
 // home-gesture bar.
-const BottomSheet: React.FC<BottomSheetProps> = ({ id, title, closeLabel, onClose, onBack, backLabel = 'Back', children }) => {
+const BottomSheet: React.FC<BottomSheetProps> = ({ id, title, titleIcon, closeLabel, onClose, onBack, backLabel = 'Back', children }) => {
   const sheetRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -95,7 +97,10 @@ const BottomSheet: React.FC<BottomSheetProps> = ({ id, title, closeLabel, onClos
               <ChevronLeft className="h-5 w-5" aria-hidden="true" />
             </button>
           )}
-          <h2 id={`${id}-title`} className="text-base font-semibold text-slate-900">{title}</h2>
+          <h2 id={`${id}-title`} className="flex min-w-0 items-center gap-2 text-base font-semibold text-slate-900">
+            {titleIcon}
+            <span className="min-w-0 truncate">{title}</span>
+          </h2>
           <button
             type="button"
             onClick={onClose}

@@ -190,7 +190,13 @@ html[data-desktop-window="linux"] .desktop-sidebar-header {
   width: 11.5rem;
   grid-template-columns: repeat(4, 1fr);
 }
-.desktop-window-controls .desktop-application-menu-button svg { width: 1.05rem; height: 1.05rem; }
+.desktop-window-controls .desktop-application-menu-logo {
+  /* logo.png is 30x32: fixed height, natural width, never stretched. */
+  width: auto;
+  height: 1.25rem;
+  pointer-events: none;
+  user-select: none;
+}
 .desktop-window-controls .desktop-window-close:hover { color: #fff; background: #dc2626; }
 .desktop-window-controls .desktop-window-close:active { color: #fff; background: #b91c1c; }
 .desktop-window-controls svg { width: .9rem; height: .9rem; stroke-width: 1.75; }

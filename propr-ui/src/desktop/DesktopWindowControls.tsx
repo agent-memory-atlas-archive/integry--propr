@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef } from 'react';
-import { EllipsisVertical, Minus, Square, X } from 'lucide-react';
+import { Minus, Square, X } from 'lucide-react';
 import type { DesktopApplicationMenuRequest } from '../../../apps/desktop/src/shared/contract';
 
 export interface DesktopWindowControlActions {
@@ -50,12 +50,14 @@ const ApplicationMenuButton: React.FC<{ show(request: DesktopApplicationMenuRequ
       aria-label="Application menu"
       aria-haspopup="menu"
       aria-keyshortcuts="F10 Alt+F"
-      title="Application menu (F10)"
+      title="ProPR application menu (F10)"
       // Keep focus in the current field so Edit menu roles act on it.
       onMouseDown={event => { if (event.button === 0) event.preventDefault(); }}
       onClick={event => open(event.detail === 0 ? 'keyboard' : 'mouse')}
     >
-      <EllipsisVertical aria-hidden="true" />
+      {/* The native popup cannot carry an image; this app-owned entry carries
+          the ProPR mark instead. Decorative: the button keeps its own name. */}
+      <img className="desktop-application-menu-logo" src="/logo.png" alt="" aria-hidden="true" draggable={false} />
     </button>
   );
 };

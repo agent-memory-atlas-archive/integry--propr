@@ -25,6 +25,7 @@ import {
 import type { HeaderStats } from '../hooks/useHeaderStats';
 import type { CurrentUser } from '../api/proprTypes';
 import { userHasPermission } from '../contexts/AuthContext';
+import { publicAssetUrl } from '../config/runtimeMode';
 import AgentTankSidebar from './AgentTankSidebar';
 import UserAvatar from './UserAvatar';
 import QuickAddTodo from './QuickAddTodo';
@@ -329,7 +330,16 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
       )}
 
       {openSheet === 'more' && (
-        <BottomSheet id="mobile-more-sheet" title="More" closeLabel="Close More menu" onClose={closeMore}>
+        // The tab says More; the sheet it opens is the app's own menu, so it
+        // carries the ProPR name and mark. The mark is decorative: the heading
+        // text alone names the dialog.
+        <BottomSheet
+          id="mobile-more-sheet"
+          title="ProPR"
+          titleIcon={<img src={publicAssetUrl('/logo.png')} alt="" aria-hidden="true" className="h-6 w-auto flex-none" />}
+          closeLabel="Close ProPR menu"
+          onClose={closeMore}
+        >
           {user && <ProfileRow user={user} onLogout={onLogout} />}
 
           <nav aria-label="More navigation">
@@ -357,7 +367,7 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
           closeLabel="Close usage"
           onClose={closeMore}
           onBack={backToMore}
-          backLabel="Back to More"
+          backLabel="Back to ProPR menu"
         >
           <AgentTankSidebar allowManualRefresh={!isDemoMode} expandAll />
         </BottomSheet>

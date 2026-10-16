@@ -152,13 +152,14 @@ it('Linux/macOS menu dispatch reaches actual search, sidebar, every creation for
     });
     await mkdir(join(directory, 'media'));
     await copyFile(join(root, 'propr-ui/public/media/logo-and-name-transparent.png'), join(directory, 'media/logo-and-name-transparent.png'));
+    await copyFile(join(root, 'propr-ui/public/logo.png'), join(directory, 'logo.png'));
     const compiled = await postcss([tailwind({ ...tailwindConfig, content: [join(root, 'propr-ui/src/**/*.{ts,tsx}')] })])
       .process(await readFile(join(root, 'propr-ui/src/index.css'), 'utf8'), { from: join(root, 'propr-ui/src/index.css') });
     await writeFile(join(directory, 'base.css'), compiled.css);
     await writeFile(join(directory, 'renderer.html'), '<!doctype html><html><head><link rel="stylesheet" href="base.css"><link rel="stylesheet" href="renderer.css"></head><body><div id="root"></div><script src="renderer.js"></script></body></html>');
     server = createServer(async (request, response) => {
       const asset = new URL(request.url, 'http://fixture').pathname.slice(1);
-      if (!['renderer.html', 'renderer.js', 'renderer.css', 'base.css', 'media/logo-and-name-transparent.png'].includes(asset)) { response.writeHead(404).end(); return; }
+      if (!['renderer.html', 'renderer.js', 'renderer.css', 'base.css', 'logo.png', 'media/logo-and-name-transparent.png'].includes(asset)) { response.writeHead(404).end(); return; }
       response.setHeader('Content-Type', asset.endsWith('.css') ? 'text/css' : asset.endsWith('.js') ? 'text/javascript' : asset.endsWith('.png') ? 'image/png' : 'text/html');
       response.end(await readFile(join(directory, asset)));
     });
@@ -251,6 +252,8 @@ it('Linux/macOS menu dispatch reaches actual search, sidebar, every creation for
               .filter(element => element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden').map(box);
             return {
               menu: box(menu), minimize: box(minimize), group: box(menu.parentElement),
+              logo: (({ naturalWidth, naturalHeight, complete }) => ({ naturalWidth, naturalHeight, complete }))(menu.querySelector('img')),
+              logoBox: box(menu.querySelector('img')),
               toolbarControls, appRegion: getComputedStyle(menu).getPropertyValue('-webkit-app-region') || getComputedStyle(menu).getPropertyValue('app-region'),
               toolbarRegion: getComputedStyle(toolbar).getPropertyValue('-webkit-app-region') || getComputedStyle(toolbar).getPropertyValue('app-region'),
               hit: document.elementFromPoint((menu.getBoundingClientRect().left + menu.getBoundingClientRect().right) / 2, 22) === menu
@@ -266,6 +269,12 @@ it('Linux/macOS menu dispatch reaches actual search, sidebar, every creation for
           expect(layout.menu.top).toBe(layout.minimize.top);
           expect(layout.menu.bottom).toBe(layout.minimize.bottom);
           expect(layout.group.bottom).toBe(44);
+          // The control carries the existing ProPR mark, loaded, unstretched and inside its hit target.
+          expect(layout.logo.complete && layout.logo.naturalWidth).toBeGreaterThan(0);
+          expect((layout.logoBox.right - layout.logoBox.left) / (layout.logoBox.bottom - layout.logoBox.top))
+            .toBeCloseTo(layout.logo.naturalWidth / layout.logo.naturalHeight, 1);
+          for (const edge of ['left', 'top']) expect(layout.logoBox[edge]).toBeGreaterThanOrEqual(layout.menu[edge]);
+          for (const edge of ['right', 'bottom']) expect(layout.logoBox[edge]).toBeLessThanOrEqual(layout.menu[edge]);
           expect(layout.toolbarControls.length).toBeGreaterThan(0);
           for (const control of layout.toolbarControls) expect(control.right).toBeLessThanOrEqual(layout.group.left);
         }
