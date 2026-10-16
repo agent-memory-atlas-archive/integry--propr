@@ -26,8 +26,23 @@ async function openMenu(page: Page, viewport: { width: number; height: number },
   await moreButton.click();
   const sheet = page.getByRole('dialog', { name: 'ProPR', exact: true });
   await expect(sheet).toBeVisible();
+  await settle(page);
   return { moreButton, sheet };
 }
+
+// Measure only once the sheet has finished rising (and the scrim fading):
+// mid-animation rectangles carry a fractional translate. Endless animations
+// elsewhere on the page (spinners) never finish, so only finite ones count.
+async function settle(page: Page) {
+  await page.evaluate(async () => {
+    const finite = document.getAnimations().filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity);
+    await Promise.all(finite.map(animation => animation.finished));
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
+}
+
+// Tight allowance for float noise in DOM rectangle arithmetic, not a looser target.
+const SUBPIXEL = 0.01;
 
 for (const { name, viewport, textScale } of cases) {
   test(`the More sheet is headed ProPR with its logo at ${name}`, async ({ page }) => {
@@ -55,18 +70,18 @@ for (const { name, viewport, textScale } of cases) {
     });
     // Logo, then title, then close: inside the header, never overlapping.
     for (const part of [layout.logo, layout.title, layout.close]) {
-      expect(part.left).toBeGreaterThanOrEqual(layout.header.left);
-      expect(part.right).toBeLessThanOrEqual(layout.header.right);
-      expect(part.top).toBeGreaterThanOrEqual(layout.header.top);
-      expect(part.bottom).toBeLessThanOrEqual(layout.header.bottom);
+      expect(part.left).toBeGreaterThanOrEqual(layout.header.left - SUBPIXEL);
+      expect(part.right).toBeLessThanOrEqual(layout.header.right + SUBPIXEL);
+      expect(part.top).toBeGreaterThanOrEqual(layout.header.top - SUBPIXEL);
+      expect(part.bottom).toBeLessThanOrEqual(layout.header.bottom + SUBPIXEL);
     }
-    expect(layout.logo.right).toBeLessThanOrEqual(layout.title.left);
-    expect(layout.title.right).toBeLessThanOrEqual(layout.close.left);
+    expect(layout.logo.right).toBeLessThanOrEqual(layout.title.left + SUBPIXEL);
+    expect(layout.title.right).toBeLessThanOrEqual(layout.close.left + SUBPIXEL);
     expect(layout.titleClipped).toBe(false);
     // The existing mark keeps its own proportions.
     expect(layout.logo.width / layout.logo.height).toBeCloseTo(layout.ratio, 1);
-    expect(layout.close.width).toBeGreaterThanOrEqual(36);
-    expect(layout.close.height).toBeGreaterThanOrEqual(36);
+    expect(layout.close.width).toBeGreaterThanOrEqual(36 - SUBPIXEL);
+    expect(layout.close.height).toBeGreaterThanOrEqual(36 - SUBPIXEL);
     await expect(sheet.getByRole('link', { name: 'Goals' })).toBeVisible();
     await capture(page, `mobile-propr-menu-${name}`);
 
@@ -138,8 +153,8 @@ for (const { name, viewport, textScale } of cases) {
       expect(tile.lines, `${tile.text} breaks mid-word`).toBeLessThanOrEqual(tile.words);
       expect(inside(tile.label, tile.link), `${tile.text} spills out of its tile`).toBe(true);
       expect(inside(tile.link, layout.sheet)).toBe(true);
-      expect(tile.link.height).toBeGreaterThanOrEqual(44);
-      expect(tile.link.width).toBeGreaterThanOrEqual(44);
+      expect(tile.link.height).toBeGreaterThanOrEqual(44 - SUBPIXEL);
+      expect(tile.link.width).toBeGreaterThanOrEqual(44 - SUBPIXEL);
     }
     for (const [index, tile] of layout.tiles.entries()) {
       for (const other of layout.tiles.slice(index + 1)) expect(overlaps(tile.link, other.link)).toBe(false);
@@ -157,7 +172,7 @@ for (const { name, viewport, textScale } of cases) {
     }
     expect(inside(layout.signOut, layout.profile)).toBe(true);
     expect(inside(layout.profile, layout.sheet)).toBe(true);
-    expect(layout.signOut.height).toBeGreaterThanOrEqual(40);
+    expect(layout.signOut.height).toBeGreaterThanOrEqual(40 - SUBPIXEL);
     await sheet.evaluate(dialog => { dialog.scrollTop = 0; });
     await capture(page, `mobile-propr-menu-readable-${name}`);
 
