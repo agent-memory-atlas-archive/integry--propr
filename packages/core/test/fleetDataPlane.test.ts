@@ -304,6 +304,42 @@ test('signed requests are refused on customer TCP listener and forwarded tunnel 
   assert.match(source, /app\.use\(refusePublicFleetData\)/);
 });
 
+test('retired in-guest reset protocol is not registered or reachable; the data plane remains intact', async t => {
+  const f = await fixture(t);
+  const socketPath = f.server.address() as string;
+  const refused = await new Promise<{ status: number; body: Buffer }>((resolve, reject) => {
+    const req = request({ socketPath, path: '/reset/v1/invoke', method: 'POST', headers: { 'Content-Type': 'application/json' } }, res => {
+      const parts: Buffer[] = []; res.on('data', chunk => parts.push(chunk)); res.on('end', () => resolve({ status: res.statusCode!, body: Buffer.concat(parts) })); res.on('error', reject);
+    }); req.on('error', reject); req.end('{}');
+  });
+  assert.equal(refused.status, 403);
+  assert.deepEqual(JSON.parse(refused.body.toString('utf8')), { error: 'fleet_data_unavailable' });
+  // Each retired reset-only module, contract, recovery entry point and generator is gone.
+  for (const retired of ['packages/core/src/fleet/resetFence.ts', 'packages/core/src/fleet/resetProof.ts', 'packages/core/src/fleet/nativeReset.ts',
+    'packages/core/src/fleet/resetAdapters.ts', 'packages/core/src/fleet/configuredReset.ts', 'packages/api/fleetResetRecovery.ts',
+    'packages/shared/src/fleetReset.ts', 'docs/contracts/fleet-reset-v1', 'scripts/generate-fleet-reset-fixtures.mjs', '.github/workflows/fleet-reset-mounts.yml']) {
+    await assert.rejects(fs.lstat(path.resolve(retired)), { code: 'ENOENT' }, retired);
+  }
+  // The retired contract is no longer exported from the shared index.
+  const shared = await import('@propr/shared') as Record<string, unknown>;
+  for (const name of ['FLEET_RESET_CONTRACT', 'FLEET_RESET_PATH', 'FLEET_RESET_LIMITS', 'fleetResetEnvelopeSchema', 'fleetResetReceiptSchema', 'FLEET_RESET_SCHEMA']) assert.equal(name in shared, false, name);
+  // Surviving files carry no retired reset symbol, import or registration. Exact
+  // names only: unrelated reset wording and the native --reset flags stay legal.
+  const retiredSymbols: Record<string, string[]> = {
+    'packages/api/fleetDataListener.ts': ['FLEET_RESET_PATH', 'FLEET_RESET_LIMITS', 'FleetResetProofPlane', 'NativeResetRuntime', 'listenFleetResetRecovery', '/reset/v1/invoke', 'fleet-reset-control', 'fleet_reset_unavailable'],
+    'packages/api/server.ts': ['configuredNativeReset', 'assertConfiguredResetGeneration', 'fleet-reset-control', 'fleetResetRecovery', 'instance_generation_unavailable'],
+    'packages/shared/src/index.ts': ['./fleetReset.js'],
+    'src/daemon.ts': ['watchResetGeneration', 'fleet/resetFence'],
+    'src/worker.ts': ['watchResetGeneration', 'fleet/resetFence'],
+  };
+  for (const [file, symbols] of Object.entries(retiredSymbols)) {
+    const contents = await fs.readFile(path.resolve(file), 'utf8');
+    for (const symbol of symbols) assert.ok(!contents.includes(symbol), `${file} still references ${symbol}`);
+  }
+  // Ordinary signed data-plane work still succeeds on the same private listener.
+  assert.equal((await f.http(f.sign({ action: 'repositories.list' }))).status, 200);
+});
+
 test('foreign confirmation, cross-tenant status and artifact grants are refused', async t => {
   const f = await fixture(t);
   const native = await f.storage.preview(f.runtime.storageInstanceId, ['repository_caches'], 'fleet');
@@ -690,10 +726,7 @@ test('configured startup rejects a live overlapping listener and succeeds after 
   const next = await f.restart();
   const nextRuntime = await next.runtime();
   assert.notEqual(nextRuntime.runtimeGeneration, f.runtime.runtimeGeneration);
-  let nativeCloses = 0;
-  const ownedNative = { close: () => { nativeCloses++; } } as unknown as Parameters<typeof startConfiguredFleetData>[2];
-  await assert.rejects(startConfiguredFleetData(next.storage, f.authorizeActor, ownedNative), /Fleet listener already active/);
-  assert.equal(nativeCloses, 1, 'failed configured startup releases the native runtime');
+  await assert.rejects(startConfiguredFleetData(next.storage, f.authorizeActor), /Fleet listener already active/);
   const preserved = await fs.lstat(oldSocket);
   assert.equal(preserved.dev, oldIdentity.dev);
   assert.equal(preserved.ino, oldIdentity.ino);
@@ -701,7 +734,7 @@ test('configured startup rejects a live overlapping listener and succeeds after 
   // The old listener still accepts connections, but its generation is fenced.
   assert.equal((await f.http(f.sign({ action: 'repositories.list' }))).status, 403);
   await f.server.shutdown();
-  const listener = await startConfiguredFleetData(next.storage, f.authorizeActor, ownedNative);
+  const listener = await startConfiguredFleetData(next.storage, f.authorizeActor);
   assert.ok(listener);
   t.after(() => listener.shutdown());
   assert.notEqual(listener.address(), oldSocket);
@@ -715,12 +748,11 @@ test('configured startup rejects a live overlapping listener and succeeds after 
   });
   assert.equal(response, 200);
   await listener.shutdown();
-  assert.equal(nativeCloses, 2, 'configured listener shutdown releases the native runtime');
 
   // Production must propagate that rejection before opening readiness/customer HTTP.
   const source = await fs.readFile(path.resolve('packages/api/server.ts'), 'utf8');
-  // Execute the actual startup expression with capability sentinels. This catches
-  // dropped awaits, accidental exposure and reset construction in demo mode.
+  // Execute the actual startup expression with capability sentinels. This
+  // catches dropped awaits and accidental exposure in demo mode.
   const tree = ts.createSourceFile('server.ts', source, ts.ScriptTarget.Latest, true);
   let startup: ts.BinaryExpression | undefined;
   const visit = (node: ts.Node) => {
@@ -731,41 +763,29 @@ test('configured startup rejects a live overlapping listener and succeeds after 
   visit(tree);
   assert.ok(startup);
   const code = ts.transpile(`return ${startup!.right.getText(tree)};`);
-  const native = Object.freeze({ capability: 'private-reset' });
   const storage = {};
-  const run = (demoMode: boolean, configured: unknown, failure?: Error) => {
+  const run = (demoMode: boolean) => {
     const calls: string[] = [];
-    const execute = new Function('demoMode', 'configuredNativeReset', 'path', 'storageControlRoot',
-      'taskQueue', 'runtimeBuildQueue', 'redisClient', 'startConfiguredFleetData', 'storageService',
+    const execute = new Function('demoMode', 'startConfiguredFleetData', 'storageService',
       'resolveDurableInstanceAuthorization', code);
-    const result = execute(demoMode, async (root: string, resources: any) => {
-      calls.push('native');
-      assert.equal(root, '/private/fleet-reset-control');
-      assert.equal(typeof resources.close, 'function');
-      await Promise.resolve();
-      if (failure) throw failure;
-      return configured;
-    }, path, () => '/private/storage-control', {}, {}, {},
-    (actualStorage: unknown, authorize: Function, reset: unknown) => {
+    const result = execute(demoMode, (actualStorage: unknown, authorize: Function) => {
       calls.push('listener'); assert.equal(actualStorage, storage);
       assert.equal(authorize(123), 'authorized');
-      assert.equal(reset, configured);
       return 'listener';
     }, storage, (actor: string) => {
       assert.equal(actor, '123'); return 'authorized';
     });
     return { result, calls };
   };
-  for (const configured of [native, undefined]) {
-    const runResult = run(false, configured);
-    assert.equal(await runResult.result, 'listener');
-    assert.deepEqual(runResult.calls, ['native', 'listener']);
+  const configured = run(false);
+  assert.equal(await configured.result, 'listener');
+  assert.deepEqual(configured.calls, ['listener']);
+  const demo = run(true); assert.equal(await demo.result, undefined); assert.deepEqual(demo.calls, []);
+  // The retired in-guest reset protocol stays out of production startup: no
+  // native-reset wiring, generation-fence middleware or recovery registration.
+  for (const symbol of ['configuredNativeReset', 'assertConfiguredResetGeneration', 'watchResetGeneration', 'fleet-reset-control', 'fleetResetRecovery', 'fleet/resetFence', 'fleet/configuredReset']) {
+    assert.ok(!source.includes(symbol), `server.ts still references ${symbol}`);
   }
-  const demo = run(true, native); assert.equal(await demo.result, undefined); assert.deepEqual(demo.calls, []);
-  const failure = new Error('invalid provisioning'); const failed = run(false, native, failure);
-  await assert.rejects(failed.result, error => error === failure); assert.deepEqual(failed.calls, ['native']);
-  // The local capability has exactly one consumer, the private listener.
-  assert.equal((source.match(/\bnativeReset\b/g) ?? []).length, 2);
   const setup = source.indexOf('    setupRoutes();');
   const gate = source.indexOf('try { await fleetDataListener; }', setup);
   assert.ok(gate > setup && gate < source.indexOf('httpServer.listen(PORT'));

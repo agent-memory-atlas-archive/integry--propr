@@ -1,4 +1,3 @@
-import { assertConfiguredResetGeneration } from '../fleet/resetFence.js';
 import { captureApplicationRecord } from '../diagnostics/managedLogRuntime.js';
 import { pino, Logger, LoggerOptions } from 'pino';
 import { v4 as uuidv4 } from 'uuid';
@@ -17,7 +16,6 @@ const logFileDescriptor: 1 | 2 = process.env.NODE_TEST_CONTEXT === undefined ? 1
 const baseOptions: LoggerOptions = {
     hooks: {
         streamWrite: line => {
-            try { assertConfiguredResetGeneration(); } catch { return ''; }
             const redacted = /(?:\.propr|propr-previews)/i.test(line)
                 ? JSON.stringify(redactVisualPreviewValue(JSON.parse(line))) + '\n'
                 : line;
