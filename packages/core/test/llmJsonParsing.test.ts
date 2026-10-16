@@ -28,3 +28,9 @@ test('reports the defect position rather than damage from the recovery passes', 
     return true;
   });
 });
+
+test('recovers single-quoted strings that hold literal newlines', () => {
+  assert.deepEqual(parseLlmJson("{summary: 'line one\nline two'}"), { summary: 'line one\nline two' });
+  const tasks = "[{'title':'A','body':'line one\nline two','implementation':'c'}]";
+  assert.deepEqual(parseLlmJson(tasks), [{ title: 'A', body: 'line one\nline two', implementation: 'c' }]);
+});

@@ -142,8 +142,10 @@ export function parseLlmJson<T>(text: string): T {
       // The loose fixes rewrite every single quote, so they only run when the
       // string-preserving pass failed; report that pass's error, which points
       // at the real defect rather than at damage done by the loose fixes.
+      // Single-quoted strings only become strings here, so escape their
+      // control characters again.
       try {
-        return JSON.parse(applyLooseJsonFixes(sanitized));
+        return JSON.parse(escapeControlCharactersInStrings(applyLooseJsonFixes(sanitized)));
       } catch {
         throw new JsonParseError(`Failed to parse JSON: ${describeParseError(sanitizedError, sanitized)}`);
       }

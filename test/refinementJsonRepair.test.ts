@@ -1,10 +1,11 @@
 import { after, beforeEach, describe, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const llmResponses: string[] = [];
+const llmResponses: (string | Error)[] = [];
 const runLightweightLLMAnalysis = mock.fn(async () => {
     const next = llmResponses.shift();
     if (next === undefined) throw new Error('no scripted LLM response left');
+    if (next instanceof Error) throw next;
     return next;
 });
 const claudeService = await import('../packages/core/src/claude/claudeService.js');
@@ -28,9 +29,17 @@ await mock.module('../packages/core/src/config/configManager.js', {
     namedExports: { ...configManager, loadSettings: async () => ({ planner_generation_model: 'codex:gpt-6-astra' }) },
 });
 const configuredModel = await import('../packages/core/src/config/configuredModel.js');
+let defaultModelError: Error | undefined;
 await mock.module('../packages/core/src/config/configuredModel.js', {
     // With no argument this resolves the configured default coding model.
-    namedExports: { ...configuredModel, resolveConfiguredModel: async (model?: string) => model ?? 'claude:claude-opus-5' },
+    namedExports: {
+        ...configuredModel,
+        resolveConfiguredModel: async (model?: string) => {
+            if (model) return model;
+            if (defaultModelError) throw defaultModelError;
+            return 'claude:claude-opus-5';
+        },
+    },
 });
 const routes: unknown[] = [];
 const routingSession = { select: async () => ({ physicalAgentAlias: 'codex', physicalModel: 'gpt-6-astra' }), fork() { return routingSession; } };
@@ -56,12 +65,16 @@ const currentPlan = [issue('History store'), issue('Trend chart')];
 const options = { currentPlan, instruction: 'Drop the JSON backend', worktreePath: '/tmp', repository: 'integry/propr', githubToken: 't', draftId: 'draft-1' };
 const refined = [issue('SQLite history store'), issue('Trend chart')];
 // Unescaped quotes inside a string value: no parser pass can recover this.
+const usageLimit = () => Object.assign(new Error('usage limit reached'), { name: 'UsageLimitError' });
+// Edit instructions instead of a full plan trigger the complete-plan follow-up.
+const incomplete = JSON.stringify({ action: 'modified', summary: 'Edits', plan: [{ number: 1, action: 'retain' }] });
 const broken = `Here is the refined plan:\n{\n  "action": "modified",\n  "summary": "Removed the "JSON" backend",\n  "plan": ${JSON.stringify(refined)}\n}\n`;
 
 beforeEach(() => {
     llmResponses.length = 0;
     routes.length = 0;
     repairResult = undefined;
+    defaultModelError = undefined;
     runLightweightLLMAnalysis.mock.resetCalls();
     runPlanFileAgent.mock.resetCalls();
 });
@@ -107,5 +120,49 @@ describe('plan refinement JSON repair', () => {
         llmResponses.push('I could not refine this plan.');
         await assert.rejects(refinePlan(options), /Failed to parse refined plan: No JSON object or array/);
         assert.equal(runPlanFileAgent.mock.callCount(), 0);
+    });
+
+    test('parses a single-quoted task array with literal newlines without a repair', async () => {
+        llmResponses.push("[{'title':'History store','body':'line one\nline two','implementation':'c'},{'title':'Trend chart','body':'b','implementation':'i'}]");
+        const result = await refinePlan(options);
+        assert.equal(result.plan[0].body, 'line one\nline two');
+        assert.equal(runPlanFileAgent.mock.callCount(), 0);
+    });
+
+    test('fails without starting an agent when the validator cannot read the original', async () => {
+        // A truncated document: no repair of it could pass validation.
+        llmResponses.push(`{"action": "modified", "summary": "Cut "short", "plan": [{"title": "A"}`);
+        await assert.rejects(refinePlan(options), /cannot be repaired in place: original\.txt: cannot establish original content/);
+        assert.equal(runPlanFileAgent.mock.callCount(), 0);
+    });
+
+    test('reports a missing default model as a failed repair', async () => {
+        llmResponses.push(broken);
+        defaultModelError = Object.assign(new Error('No default model is configured'), { name: 'NoDefaultModelConfiguredError' });
+        await assert.rejects(refinePlan(options), (error: Error) => {
+            assert.equal(error.name, 'PlanningFailedError');
+            assert.match(error.message, /in-place repair failed: No default model is configured/);
+            return true;
+        });
+        assert.equal(runPlanFileAgent.mock.callCount(), 0);
+    });
+
+    test('does not attribute the repair to a made-up draft id', async () => {
+        llmResponses.push(broken);
+        repairResult = { action: 'modified', summary: 'Removed the "JSON" backend', plan: refined };
+        await refinePlan({ ...options, draftId: undefined });
+        assert.equal(runPlanFileAgent.mock.calls[0].arguments[0].draftId, undefined);
+    });
+
+    test('keeps a usage limit from the complete-plan follow-up repair', async () => {
+        llmResponses.push(incomplete, broken);
+        repairResult = usageLimit();
+        await assert.rejects(refinePlan(options), { name: 'UsageLimitError' });
+        assert.equal(runPlanFileAgent.mock.callCount(), 1);
+    });
+
+    test('keeps a usage limit from the complete-plan follow-up request', async () => {
+        llmResponses.push(incomplete, usageLimit());
+        await assert.rejects(refinePlan(options), { name: 'UsageLimitError' });
     });
 });

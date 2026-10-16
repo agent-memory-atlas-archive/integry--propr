@@ -143,7 +143,8 @@ export interface PlanFileAgentOptions {
   document?: boolean;
   /** `agent:model`, as configured for planning. */
   model: string;
-  draftId: string;
+  /** The plan draft, when there is one; it attributes the agent run. */
+  draftId?: string;
   repository: string;
   githubToken: string;
   executionType: ExecutionType;

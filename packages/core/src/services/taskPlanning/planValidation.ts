@@ -301,6 +301,16 @@ export async function validatePlanText(planText: string, original?: string, opti
 }
 
 /**
+ * Why the validator cannot read `original` as a document to repair, or null
+ * when it can. Checked before starting a repair agent, whose result would be
+ * rejected anyway when the original itself cannot be established.
+ */
+export async function unreadableDocumentOriginal(original: string): Promise<string | null> {
+  const report = await validatePlanText('{}', original, { document: true });
+  return report.errors.find(error => error.startsWith(`${PLAN_ORIGINAL_FILE}: `)) ?? null;
+}
+
+/**
  * Assembles and validates task files (name → content, one task object each)
  * with ProPR's own validator. Returns the assembled plan text when valid.
  */

@@ -12,7 +12,7 @@ import { loadSettings } from '../../config/configManager.js';
 import { resolveConfiguredModel } from '../../config/configuredModel.js';
 import { AgentRegistry } from '../../agents/AgentRegistry.js';
 import { PlanningFailedError, getRawInputCharLimit, type MinimalLogger } from '../planning/index.js';
-import { incompletePlanItems, PLAN_FILE, PLAN_ORIGINAL_FILE } from './planValidation.js';
+import { incompletePlanItems, PLAN_FILE, PLAN_ORIGINAL_FILE, unreadableDocumentOriginal } from './planValidation.js';
 import { runPlanFileAgent } from './planFileAgent.js';
 import {
   normalizeRefinedPlan,
@@ -190,6 +190,8 @@ Fix ${PLAN_FILE} so that \`node validate-plan.mjs --document\` exits with status
 Run \`node validate-plan.mjs --document\` after each change and stop once it reports "valid": true.`;
 }
 
+const isUsageLimitError = (error: unknown) => (error as Error)?.name === 'UsageLimitError';
+
 interface RefinementRepairContext {
   draftId?: string;
   repository: string;
@@ -222,16 +224,24 @@ async function parseRefinementWithRepair(response: string, context: RefinementRe
     throw new PlanningFailedError(`Failed to parse refined plan: ${parseError.message}`);
   }
 
-  // JSON repair is handled by the configured default coding model, as for plan generation.
-  const repairModel = await resolveConfiguredModel();
-  const separator = repairModel.indexOf(':');
-  const repairRoute = AgentRegistry.getInstance().beginRoutingSession(separator < 0
-    ? { requestedAgentAlias: repairModel }
-    : { requestedAgentAlias: repairModel.slice(0, separator), requestedModel: repairModel.slice(separator + 1) });
-  correlatedLogger.warn({
-    error: parseError.message, responseLength: response.length, generationModel: context.generationModel, repairModel,
-  }, 'Failed to parse refinement response, repairing it in place with an agent');
+  const unreadable = await unreadableDocumentOriginal(original);
+  if (unreadable) {
+    // A validator that cannot read the original rejects every repair of it.
+    correlatedLogger.error({ error: parseError.message, unreadable, responseLength: response.length }, 'Refinement response cannot be repaired in place');
+    throw new PlanningFailedError(`Failed to parse refined plan: ${parseError.message}. It cannot be repaired in place: ${unreadable}`);
+  }
+
+  let repairModel: string | undefined;
   try {
+    // JSON repair is handled by the configured default coding model, as for plan generation.
+    repairModel = await resolveConfiguredModel();
+    const separator = repairModel.indexOf(':');
+    const repairRoute = AgentRegistry.getInstance().beginRoutingSession(separator < 0
+      ? { requestedAgentAlias: repairModel }
+      : { requestedAgentAlias: repairModel.slice(0, separator), requestedModel: repairModel.slice(separator + 1) });
+    correlatedLogger.warn({
+      error: parseError.message, responseLength: response.length, generationModel: context.generationModel, repairModel,
+    }, 'Failed to parse refinement response, repairing it in place with an agent');
     const repaired = await runPlanFileAgent<RefinementResponse | PlanItem[]>({
       purpose: 'repair',
       document: true,
@@ -239,7 +249,7 @@ async function parseRefinementWithRepair(response: string, context: RefinementRe
       files: { [PLAN_FILE]: original, [PLAN_ORIGINAL_FILE]: original },
       original,
       model: repairModel,
-      draftId: context.draftId || 'plan-refinement',
+      draftId: context.draftId,
       repository: context.repository,
       githubToken: context.githubToken,
       executionType: 'plan-refinement',
@@ -250,7 +260,7 @@ async function parseRefinementWithRepair(response: string, context: RefinementRe
     correlatedLogger.info({ originalError: parseError.message, repairModel }, 'Repaired refinement response passed validation');
     return toRefinementResponse(repaired, correlatedLogger);
   } catch (repairError) {
-    if ((repairError as Error)?.name === 'UsageLimitError') throw repairError;
+    if (isUsageLimitError(repairError)) throw repairError;
     correlatedLogger.error({
       originalError: parseError.message,
       repairError: repairError instanceof Error ? repairError.message : String(repairError),
@@ -303,6 +313,8 @@ async function requestCompletePlan(
       const repaired = validateRefinementResponse(await context.parse(await context.llm(repairPrompt)), correlatedLogger);
       return repaired.action === 'modified' ? repaired : { ...repaired, plan: currentPlan };
     } catch (repairError) {
+      // Usage limits keep their identity for upstream requeueing.
+      if (isUsageLimitError(repairError)) throw repairError;
       correlatedLogger.warn({ error: repairError instanceof Error ? repairError.message : String(repairError) }, 'Complete-plan repair failed');
     }
   }
