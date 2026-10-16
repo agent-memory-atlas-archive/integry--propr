@@ -169,8 +169,9 @@ const LeftPaneBody: React.FC<LeftPaneBodyProps> = ({
     ? runs.find(run => run.task.id === taskId)?.number
     : undefined;
 
+  // `isolate` keeps the rails' and nodes' z-indexes inside the body, so none paints over the pane's sticky heading.
   return (
-    <div className="p-3 lg:p-4 space-y-2">
+    <div data-testid="task-timeline-body" className="isolate p-3 lg:p-4 space-y-2">
       {timeline ? (
         <RunTimeline revealHistory={revealHistory} runs={runs} selectedTaskId={taskId} onSelectRun={onSelectRun} reviewScores={reviewScores} outcome={outcome}>
           <TaskStatusTable history={history} commandMode={taskLabelMode(taskInfo)} variant="branch" />
