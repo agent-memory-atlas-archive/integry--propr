@@ -33,6 +33,8 @@ export function DesktopGitHubAuthorizationRecovery({ adapters, profile, transpor
     try {
       // Use the saved instance origin, never a URL or redirect from an error response.
       // This starts OAuth even if the browser already has an instance session.
+      // A loopback alias is moved server-side to the configured callback origin
+      // before OAuth state is created, so the saved origin stays authoritative here.
       await adapters.externalBrowser.open(new URL('/api/auth/github', profile.baseUrl).href);
     } catch {
       setBrowserError(true);
@@ -49,6 +51,7 @@ export function DesktopGitHubAuthorizationRecovery({ adapters, profile, transpor
     <p>Your Desktop pairing is still connected. Pairing again does not renew GitHub authorization.</p>
     <p>Sign in to this instance in your browser with {profile.account ? <strong>@{profile.account.username}</strong> : 'the same GitHub account as Desktop'}. If the browser uses another account, switch to this account first.</p>
     <p>After GitHub sign-in, return to Desktop and retry your original action. Your current work stays open.</p>
+    <p>Reaching your browser dashboard does not by itself renew authorization. If the browser shows a sign-in error, or this notice returns after retrying, sign in again.</p>
     {browserError && <p role="alert">Could not open GitHub sign-in. Check your default browser, then try again.</p>}
     <div className="desktop-actions">
       <button type="button" className="desktop-primary-button" disabled={opening} onClick={() => void openGitHubSignIn()}>{opening ? 'Opening browser…' : 'Sign in with GitHub in browser'}</button>
