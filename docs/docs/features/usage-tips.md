@@ -31,4 +31,4 @@ Discovery scores occupy the 70–79 range, below strong corrective gaps. Candida
 
 **Display history is not tracked.** Rendering, mounting, reloading and reading tips record no impressions, display counts, first/last-shown timestamps, or acknowledgements. Only an explicit dismissal records acknowledgement. Previous selection does not make a tip ineligible.
 
-The committed catalog is generated from documentation with `npm run tips:generate`. Its stable identities survive wording changes, preserving dismissal history. Runtime services import the catalog and never read the documentation tree.
+The committed catalog is generated from documentation with `npm run tips:generate`. The generator links each tip to its published `/docs/...` route and fails if the target page or heading anchor does not exist; `npm run tips:check` reports catalog drift, and `node scripts/generate-usage-tips.mjs --check --site <build-dir>` also verifies every link against a fresh Docusaurus build. Its stable identities survive wording changes, preserving dismissal history. Runtime services import the catalog and never read the documentation tree.
