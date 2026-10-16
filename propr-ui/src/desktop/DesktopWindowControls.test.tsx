@@ -39,6 +39,11 @@ describe('DesktopWindowControls', () => {
     const button = screen.getByRole('button', { name: 'Application menu' });
     expect(button).toHaveAttribute('aria-haspopup', 'menu');
     expect(button).toHaveAttribute('aria-keyshortcuts', 'F10 Alt+F');
+    // Branded with the existing ProPR mark; decorative, so the name stays put.
+    expect(button).toHaveAttribute('title', 'ProPR application menu (F10)');
+    expect(button.querySelector('img')).toHaveAttribute('src', '/logo.png');
+    expect(button.querySelector('img')).toHaveAttribute('alt', '');
+    expect(button.querySelector('svg')).toBeNull();
     const group = screen.getByRole('group', { name: 'Window controls' });
     expect(group.firstElementChild).toBe(button);
     vi.spyOn(button, 'getBoundingClientRect').mockReturnValue({ left: 696, bottom: 44, top: 0, right: 742, width: 46, height: 44, x: 696, y: 0, toJSON: () => ({}) });

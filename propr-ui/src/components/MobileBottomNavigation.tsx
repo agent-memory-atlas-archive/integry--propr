@@ -25,6 +25,7 @@ import {
 import type { HeaderStats } from '../hooks/useHeaderStats';
 import type { CurrentUser } from '../api/proprTypes';
 import { userHasPermission } from '../contexts/AuthContext';
+import { publicAssetUrl } from '../config/runtimeMode';
 import AgentTankSidebar from './AgentTankSidebar';
 import UserAvatar from './UserAvatar';
 import QuickAddTodo from './QuickAddTodo';
@@ -160,21 +161,22 @@ const ListSection: React.FC<{ title: string; children: React.ReactNode }> = ({ t
 );
 
 // The workspace destinations are what More is opened for, so they lead the
-// sheet as one row of tiles rather than four list rows: always above the fold,
-// and visibly weightier than the logs and settings beneath them.
+// sheet as tiles rather than list rows: always above the fold, and visibly
+// weightier than the logs and settings beneath them. Labels are never cut:
+// four across only once the sheet is wide enough for "Repositories" at the
+// current text size (the rem query grows with enlarged text), two by two
+// below that, and a label that still runs long wraps instead.
 const WorkspaceSection: React.FC<{ items: MoreItem[]; onNavigate: () => void }> = ({ items, onNavigate }) => (
-  <section aria-labelledby={sectionId('Workspace')}>
+  <section aria-labelledby={sectionId('Workspace')} className="[container-type:inline-size]">
     <h3 id={sectionId('Workspace')} className={sectionHeadingClassName}>Workspace</h3>
-    <ul className="grid grid-cols-4 gap-2 px-3 pb-3 pt-1">
+    <ul className="grid grid-cols-2 gap-2 px-3 pb-3 pt-1 [@container(min-width:23rem)]:grid-cols-4">
       {items.map(item => (
-        <li key={item.to} className="min-w-0">
-          <Link
-            to={item.to}
-            onClick={onNavigate}
-            className="flex min-h-16 flex-col items-center justify-center gap-1 rounded-xl bg-slate-50 px-1 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+        <li key={item.to} className="flex min-w-0">
+          <Link to={item.to} onClick={onNavigate}
+            className="flex min-h-16 w-full min-w-0 flex-col items-center justify-center gap-1 rounded-xl bg-slate-50 px-1 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
           >
             <item.icon className="h-5 w-5 flex-none text-primary-700" aria-hidden="true" />
-            <span className="max-w-full truncate">{item.label}</span>
+            <span className="max-w-full break-words text-center leading-tight">{item.label}</span>
           </Link>
         </li>
       ))}
@@ -192,22 +194,27 @@ const MoreLink: React.FC<{ item: MoreItem; onNavigate: () => void }> = ({ item, 
   </li>
 );
 
+// Identity and Sign out share a line while the name has room to be read;
+// with narrow screens or enlarged text Sign out wraps beneath it instead of
+// squeezing the name down to a couple of letters.
 const ProfileRow: React.FC<{ user: CurrentUser; onLogout: () => void }> = ({ user, onLogout }) => (
-  <div className="flex items-center gap-3 px-4 py-2.5">
-    <UserAvatar
-      user={user}
-      className="flex h-9 w-9 flex-none items-center justify-center rounded-full border border-slate-200 object-cover text-xs font-bold"
-      fallbackClassName="bg-primary-100 text-primary-700"
-      decorative
-    />
-    <div className="min-w-0 flex-1">
-      <p className="truncate text-sm font-semibold text-slate-800">{user.displayName || user.username}</p>
-      <p className="truncate text-xs text-slate-500">@{user.username}</p>
+  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5">
+    <div className="flex min-w-0 flex-[1_1_10rem] items-center gap-3">
+      <UserAvatar
+        user={user}
+        className="flex h-9 w-9 flex-none items-center justify-center rounded-full border border-slate-200 object-cover text-xs font-bold"
+        fallbackClassName="bg-primary-100 text-primary-700"
+        decorative
+      />
+      <div className="min-w-0 flex-1">
+        <p className="break-words text-sm font-semibold text-slate-800">{user.displayName || user.username}</p>
+        <p className="break-all text-xs text-slate-500">@{user.username}</p>
+      </div>
     </div>
     <button
       type="button"
       onClick={onLogout}
-      className="inline-flex min-h-10 flex-none items-center gap-2 rounded-md px-3 text-sm font-medium text-slate-600 hover:bg-red-50 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+      className="ml-auto inline-flex min-h-10 flex-none items-center gap-2 rounded-md px-3 text-sm font-medium text-slate-600 hover:bg-red-50 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
     >
       <LogOut className="h-4 w-4" aria-hidden="true" />
       Sign out
@@ -329,7 +336,16 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
       )}
 
       {openSheet === 'more' && (
-        <BottomSheet id="mobile-more-sheet" title="More" closeLabel="Close More menu" onClose={closeMore}>
+        // The tab says More; the sheet it opens is the app's own menu, so it
+        // carries the ProPR name and mark. The mark is decorative: the heading
+        // text alone names the dialog.
+        <BottomSheet
+          id="mobile-more-sheet"
+          title="ProPR"
+          titleIcon={<img src={publicAssetUrl('/logo.png')} alt="" aria-hidden="true" className="h-6 w-auto flex-none" />}
+          closeLabel="Close ProPR menu"
+          onClose={closeMore}
+        >
           {user && <ProfileRow user={user} onLogout={onLogout} />}
 
           <nav aria-label="More navigation">
@@ -357,7 +373,7 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
           closeLabel="Close usage"
           onClose={closeMore}
           onBack={backToMore}
-          backLabel="Back to More"
+          backLabel="Back to ProPR menu"
         >
           <AgentTankSidebar allowManualRefresh={!isDemoMode} expandAll />
         </BottomSheet>

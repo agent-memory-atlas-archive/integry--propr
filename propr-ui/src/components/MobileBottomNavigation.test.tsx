@@ -156,8 +156,24 @@ describe('MobileBottomNavigation', () => {
   it('keeps creation out of the More sheet', () => {
     renderNavigation('/');
     fireEvent.click(screen.getByRole('button', { name: 'More' }));
-    const more = screen.getByRole('dialog', { name: 'More' });
+    const more = screen.getByRole('dialog', { name: 'ProPR' });
     expect(within(more).queryAllByRole('link', { name: /^New / })).toHaveLength(0);
+  });
+
+  it('brands the More sheet as ProPR with the decorative logo, while Create keeps its own name', () => {
+    renderNavigation('/');
+    fireEvent.click(screen.getByRole('button', { name: 'More' }));
+    const more = screen.getByRole('dialog', { name: 'ProPR' });
+    const heading = within(more).getByRole('heading', { level: 2, name: 'ProPR' });
+    const logo = heading.querySelector('img');
+    expect(logo).toHaveAttribute('src', '/logo.png');
+    expect(logo).toHaveAttribute('alt', '');
+    expect(within(more).queryByText('More')).not.toBeInTheDocument();
+    fireEvent.click(within(more).getByRole('button', { name: 'Close ProPR menu' }));
+    expect(screen.getByRole('button', { name: 'More' })).toHaveFocus();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    expect(within(screen.getByRole('dialog', { name: 'Create' })).getByRole('heading', { level: 2 }).querySelector('img')).toBeNull();
   });
 
   it('names the dashboard tab the way the sidebar does, with no second name for it', () => {
@@ -178,7 +194,7 @@ describe('MobileBottomNavigation', () => {
 
     fireEvent.click(moreButton);
 
-    const dialog = screen.getByRole('dialog', { name: 'More' });
+    const dialog = screen.getByRole('dialog', { name: 'ProPR' });
     expect(dialog).toBeInTheDocument();
     expect(within(dialog).queryByRole('link', { name: 'Dashboard' })).not.toBeInTheDocument();
     expect(within(dialog).queryByRole('link', { name: 'Tasks' })).not.toBeInTheDocument();
@@ -206,13 +222,13 @@ describe('MobileBottomNavigation', () => {
 
     fireEvent.keyDown(document, { key: 'Escape' });
 
-    expect(screen.queryByRole('dialog', { name: 'More' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'ProPR' })).not.toBeInTheDocument();
     expect(moreButton).toHaveFocus();
 
     fireEvent.click(moreButton);
     fireEvent.click(screen.getByTestId('mobile-more-sheet-backdrop'));
 
-    expect(screen.queryByRole('dialog', { name: 'More' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'ProPR' })).not.toBeInTheDocument();
     expect(moreButton).toHaveFocus();
   });
 
@@ -224,7 +240,7 @@ describe('MobileBottomNavigation', () => {
     fireEvent.click(screen.getByRole('link', { name: 'Plans' }));
 
     expect(screen.getByTestId('location')).toHaveTextContent('/plans');
-    expect(screen.queryByRole('dialog', { name: 'More' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'ProPR' })).not.toBeInTheDocument();
     expect(moreButton).toHaveAttribute('aria-current', 'page');
   });
 
@@ -393,7 +409,7 @@ describe('MobileBottomNavigation', () => {
     fireEvent.click(moreButton);
     fireEvent.click(await screen.findByRole('button', { name: /API & quota usage/ }));
 
-    expect(screen.queryByRole('dialog', { name: 'More' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'ProPR' })).not.toBeInTheDocument();
     const usageSheet = await screen.findByRole('dialog', { name: 'API & quota usage' });
     // Opened to read the numbers, so every provider starts expanded.
     expect(within(usageSheet).getByRole('button', { name: /Claude/ })).toHaveAttribute('aria-expanded', 'true');
@@ -401,9 +417,9 @@ describe('MobileBottomNavigation', () => {
     expect(within(usageSheet).getByText('Weekly')).toBeInTheDocument();
     expect(within(usageSheet).getByTitle('Refresh usage')).toBeInTheDocument();
 
-    fireEvent.click(within(usageSheet).getByRole('button', { name: 'Back to More' }));
+    fireEvent.click(within(usageSheet).getByRole('button', { name: 'Back to ProPR menu' }));
     expect(screen.queryByRole('dialog', { name: 'API & quota usage' })).not.toBeInTheDocument();
-    expect(screen.getByRole('dialog', { name: 'More' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'ProPR' })).toBeInTheDocument();
 
     fireEvent.click(await screen.findByRole('button', { name: /API & quota usage/ }));
     await screen.findByRole('dialog', { name: 'API & quota usage' });
