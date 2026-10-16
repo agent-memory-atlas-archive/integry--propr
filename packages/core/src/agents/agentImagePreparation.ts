@@ -7,9 +7,12 @@ import {
     ensureAgentDockerImage,
 } from '../claude/docker/dockerExecutor.js';
 import { resolveAgentRuntimeImage } from './runtime/agentRuntimePackages.js';
+import { resolveManagedAgentImage } from './managedAgentImage.js';
+import { readManagedAgentPin } from './managedAgentPin.js';
 import type { AgentConfig } from './types.js';
 import { AGENT_DEFAULT_VERSIONS } from './version/types.js';
 import {
+    type AgentCliVersionMatrix,
     computeContentHash,
     generateAgentBundleImageTag,
     getAgentCliVersionMatrix,
@@ -22,10 +25,9 @@ export interface AgentImageResolution {
 }
 
 async function resolveBundleBaseImage(
-    configs: AgentConfig[],
+    versions: AgentCliVersionMatrix,
     prepareImages: boolean,
 ): Promise<AgentImageResolution> {
-    const versions = getAgentCliVersionMatrix(configs);
     const contentHash = computeContentHash();
     const imageTag = generateAgentBundleImageTag(versions, contentHash);
     if (prepareImages) {
@@ -45,7 +47,11 @@ export async function resolveUnifiedAgentImage(
 ): Promise<AgentImageResolution> {
     let imageTag: string | undefined;
     try {
-        const base = await resolveBundleBaseImage(configs, prepareImages);
+        const versions = getAgentCliVersionMatrix(configs);
+        // A published Desktop runtime's verified managed pin serves the matching
+        // CLI matrix directly; only other matrices need a generated bundle.
+        const base = await resolveManagedAgentImage(versions, prepareImages)
+            ?? await resolveBundleBaseImage(versions, prepareImages);
         imageTag = base.imageTag;
         if (!base.image) return base;
         return {
@@ -82,9 +88,13 @@ export async function resolveDefaultAgentConfig(
     prepareImages: boolean,
 ): Promise<{ config?: AgentConfig; imageTag?: string; error?: string }> {
     const configuredImage = process.env.AGENT_DOCKER_IMAGE;
+    // The launcher maps a legacy default onto the managed pin, which resolves
+    // (and is verified) like the empty-config default rather than as an
+    // arbitrary pull-or-build image.
+    const usesManagedPin = !!configuredImage && configuredImage === readManagedAgentPin()?.image;
     let resolution: AgentImageResolution;
     try {
-        resolution = configuredImage
+        resolution = configuredImage && !usesManagedPin
             ? await resolveConfiguredDefaultImage(configuredImage, prepareImages)
             : await resolveUnifiedAgentImage([], prepareImages);
     } catch (error) {

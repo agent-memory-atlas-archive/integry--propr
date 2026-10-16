@@ -11,6 +11,7 @@ import {
 } from '../../agents/version/versionService.js';
 import { assertAgentImageBuildCapacity } from '../../agents/agentImageBuildCapacity.js';
 import { withAgentImageBuildSlot } from '../../agents/agentImageBuildLock.js';
+import { readManagedAgentPin } from '../../agents/managedAgentPin.js';
 import { executeDockerCommand } from './dockerExecutor.js';
 
 const PROJECT_ROOT = process.env.PROPR_ROOT
@@ -116,6 +117,10 @@ function scheduleBundleImageCleanup(imageTag: string): void {
                 // is never referenced by a config, so keep it explicitly.
                 const defaultBundleTag = generateAgentBundleImageTag(getDefaultAgentCliVersionMatrix(), computeContentHash());
                 tagsInUse.add(defaultBundleTag.slice(prefix.length));
+                // A Desktop runtime's published pin serves default matrices; a
+                // custom build must not untag it.
+                const managedPin = readManagedAgentPin();
+                if (managedPin) tagsInUse.add(managedPin.sourceRevision);
                 for (const agent of await loadAgents()) {
                     if (agent.dockerImage.startsWith(prefix)) {
                         tagsInUse.add(agent.dockerImage.slice(prefix.length));
