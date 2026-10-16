@@ -51,4 +51,15 @@ describe('LoginPage OAuth failure reporting', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('GitHub sign-in did not complete. Try again.');
     expect(screen.queryByText('<injected>')).not.toBeInTheDocument();
   });
+
+  it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty'])(
+    'renders generic copy and a usable sign-in button for inherited property code %s',
+    async (code) => {
+      renderLogin(`/login?error=${code}`);
+
+      expect(await screen.findByRole('alert')).toHaveTextContent('GitHub sign-in did not complete. Try again.');
+      expect(screen.getByRole('button', { name: 'Sign in with GitHub' })).toBeEnabled();
+      expect(mockGetCurrentUser).not.toHaveBeenCalled();
+    },
+  );
 });
