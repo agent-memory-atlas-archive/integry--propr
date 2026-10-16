@@ -39,7 +39,8 @@ function hasToolResult(content: unknown): boolean {
  * tool result, in order. When a reply reaches the model's output-token limit,
  * Claude Code has the model continue in a new message, and the result line
  * then carries only that last message. Joining without a separator restores a
- * reply that was cut mid-token, such as a large JSON plan.
+ * reply that was cut mid-token, such as a large JSON plan. When the model
+ * started the answer over instead, only the restarted answer is returned.
  */
 export function getFinalAnswerText(conversationLog: Array<{ type?: string; message?: Record<string, unknown> }>): string {
     let start = 0;
@@ -62,7 +63,31 @@ export function getFinalAnswerText(conversationLog: Array<{ type?: string; messa
             parts.push(text);
         });
     }
-    return parts.join('').trim();
+    return parts.slice(restartIndex(parts)).join('').trim();
+}
+
+/** Whitespace-insensitive opening of a text, used to recognise a restarted answer. */
+function answerOpening(text: string, length: number): string {
+    return text.replace(/\s+/g, '').slice(0, length);
+}
+
+const MIN_RESTART_OPENING = 16;
+
+/**
+ * Index of the block where the model last started its answer over. After the
+ * output-token limit a model sometimes rewrites the whole answer instead of
+ * resuming it; joining the cut-off first attempt with the rewrite would yield
+ * neither (two JSON documents spliced mid-string). A genuine continuation
+ * resumes mid-text and does not repeat the answer's opening.
+ */
+function restartIndex(parts: string[]): number {
+    const opening = answerOpening(parts[0] ?? '', 64);
+    if (opening.length < MIN_RESTART_OPENING) return 0;
+    for (let index = parts.length - 1; index > 0; index--) {
+        const candidate = answerOpening(parts[index], opening.length);
+        if (candidate.length >= MIN_RESTART_OPENING && opening.startsWith(candidate)) return index;
+    }
+    return 0;
 }
 
 export function getClaudeAnalysisText(claudeOutput: { finalResult?: { result?: string } | null; conversationLog: Array<{ type?: string; message?: Record<string, unknown> }> }): string {

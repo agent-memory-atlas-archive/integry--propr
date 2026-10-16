@@ -47,3 +47,39 @@ test('an ordinary single-message result is unchanged', () => {
   // A result that is not the tail of the joined answer is kept as reported.
   assert.equal(getClaudeAnalysisText({ finalResult: { result: 'Different text.' }, conversationLog }), 'Different text.');
 });
+
+test('a reply restarted after the output-token limit returns only the restarted answer', () => {
+  const response = JSON.stringify({ action: 'modified', summary: 'Reworked the history store', plan: JSON.parse(plan) }, null, 2);
+  // The first attempt is cut mid-string; the model then rewrites the whole document.
+  const firstAttempt = response.slice(0, response.indexOf('history store'));
+  const conversationLog = [
+    user('Refine the plan'),
+    assistant('msg_1', text(firstAttempt)),
+    user('Output token limit hit. Resume directly.'),
+    assistant('msg_2', text(response)),
+  ];
+  const output = { finalResult: { result: response }, conversationLog };
+
+  assert.equal(getFinalAnswerText(conversationLog), response);
+  assert.equal(getClaudeAnalysisText(output), response);
+  assert.deepEqual(JSON.parse(getClaudeAnalysisText(output)), JSON.parse(response));
+});
+
+test('a restart is taken from the last block that repeats the opening', () => {
+  const response = '{"action": "modified", "summary": "Done", "plan": []}';
+  const conversationLog = [
+    assistant('msg_1', text('{"action": "modified", "summary": "Fi')),
+    assistant('msg_2', text('{"action": "modified", "summary": "Sec')),
+    assistant('msg_3', text(response.slice(0, 30))),
+    assistant('msg_4', text(response.slice(30))),
+  ];
+  assert.equal(getFinalAnswerText(conversationLog), response);
+});
+
+test('a short or non-repeating continuation is still joined', () => {
+  // Continuations that only resume mid-text never repeat the opening.
+  const conversationLog = [assistant('msg_1', text('{"a": [1, 2,')), assistant('msg_2', text(' 3]}'))];
+  assert.equal(getFinalAnswerText(conversationLog), '{"a": [1, 2, 3]}');
+  // An opening too short to identify a restart is not treated as one.
+  assert.equal(getFinalAnswerText([assistant('m1', text('[')), assistant('m2', text('[1]]'))]), '[[1]]');
+});
