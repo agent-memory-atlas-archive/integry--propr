@@ -24,6 +24,22 @@ const commandItem = (
   click: () => commands.dispatch(command),
 });
 
+/**
+ * File-menu creation entries, in toolbar order. New Plan keeps its original
+ * CmdOrCtrl+N; the others share CmdOrCtrl+Shift with a mnemonic letter. None
+ * collides with Edit/View roles, search (K), instances (Shift+I), settings (,),
+ * quit (Q), navigation ([ ]), the renderer's reconnect (Shift+R) or IBus
+ * (Shift+U/E), and Alt is avoided: Ctrl+Alt+T is GNOME's terminal and Alt+F
+ * opens the Linux application menu. Renderer quick add keeps Alt+T.
+ */
+export const CREATION_MENU_ITEMS = Object.freeze([
+  { command: 'new-task', label: 'New Task', accelerator: 'CmdOrCtrl+Shift+T' },
+  { command: 'new-plan', label: 'New Plan', accelerator: 'CmdOrCtrl+N' },
+  { command: 'new-goal', label: 'New Goal', accelerator: 'CmdOrCtrl+Shift+G' },
+  { command: 'new-automation', label: 'New Automation', accelerator: 'CmdOrCtrl+Shift+A' },
+  { command: 'new-todo', label: 'New To-do', accelerator: 'CmdOrCtrl+Shift+D' },
+] as const);
+
 export const createApplicationMenuTemplate = (
   platform: NodeJS.Platform,
   commands: DesktopNativeCommandDispatcher,
@@ -68,8 +84,7 @@ export const createApplicationMenuTemplate = (
     {
       label: 'File',
       submenu: [
-        commandItem(commands, 'new-plan', 'New Plan', 'CmdOrCtrl+N', authenticated),
-        commandItem(commands, 'new-task', 'New Task…', undefined, authenticated),
+        ...CREATION_MENU_ITEMS.map(item => commandItem(commands, item.command, item.label, item.accelerator, authenticated)),
         { type: 'separator' },
         commandItem(commands, 'connect-instance', 'Connect Instance…', undefined, state.canManageInstances !== false),
         commandItem(commands, 'manage-instances', 'Switch Account / Instance…', 'CmdOrCtrl+Shift+I', state.canManageInstances !== false),

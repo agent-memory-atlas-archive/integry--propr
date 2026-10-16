@@ -15,6 +15,8 @@ import type { CurrentUser } from '../api/proprTypes';
 import MobileBottomNavigation from './MobileBottomNavigation';
 import { getCreationActions } from './creationActions';
 
+const DESKTOP_CREATION_COMMANDS = new Set(['new-task', 'new-plan', 'new-goal', 'new-automation', 'new-todo']);
+
 interface GlobalHeaderProps {
   user: CurrentUser | null;
   onLogout: () => void;
@@ -203,6 +205,7 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = ({ user, onLogout, onMenuToggl
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [quickAddOpen, setQuickAddOpen] = useState(false);
   const [searchRequest, setSearchRequest] = useState(0);
+  const [mobileQuickAddRequest, setMobileQuickAddRequest] = useState(0);
 
   const headerStats = useHeaderStats();
   const { systemHealth } = resolveHeaderStats(headerStatsOverride, headerStats);
@@ -211,11 +214,22 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = ({ user, onLogout, onMenuToggl
   useEffect(() => {
     if (!desktop) return;
     const handleCommand = (event: Event) => {
-      if ((event as CustomEvent).detail === 'search') setSearchRequest(value => value + 1);
+      const command = (event as CustomEvent).detail;
+      if (command === 'search') setSearchRequest(value => value + 1);
+      else if (!DESKTOP_CREATION_COMMANDS.has(command)) return;
+      // Cancelling tells the native dispatcher creation is unavailable here,
+      // so demo mode never opens a form the toolbar itself keeps inert.
+      else if (isDemoMode) event.preventDefault();
+      // Quick add lives in the toolbar from `md`; below that (a narrow or
+      // zoomed window) the same form sits in the bottom bar's Create sheet.
+      else if (command === 'new-todo') {
+        if (window.matchMedia('(min-width: 768px)').matches) setQuickAddOpen(true);
+        else setMobileQuickAddRequest(value => value + 1);
+      }
     };
     window.addEventListener(DESKTOP_UI_COMMAND_EVENT, handleCommand);
     return () => window.removeEventListener(DESKTOP_UI_COMMAND_EVENT, handleCommand);
-  }, [desktop]);
+  }, [desktop, isDemoMode]);
 
   useEffect(() => {
     if (searchRequest) searchInputRef.current?.focus();
@@ -279,6 +293,7 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = ({ user, onLogout, onMenuToggl
       isDemoMode={isDemoMode}
       unreadCount={inboxUnreadCount}
       systemHealth={systemHealth}
+      quickAddRequest={mobileQuickAddRequest}
     />
     </>
   );

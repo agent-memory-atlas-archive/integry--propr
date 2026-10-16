@@ -37,6 +37,8 @@ interface MobileBottomNavigationProps {
   isDemoMode: boolean;
   unreadCount: number | null;
   systemHealth: HeaderStats['systemHealth'];
+  /** Increments to open the Create sheet with quick add expanded (Desktop New To-do). */
+  quickAddRequest?: number;
 }
 
 type SheetId = 'create' | 'more' | 'usage';
@@ -254,9 +256,11 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
   isDemoMode,
   unreadCount,
   systemHealth,
+  quickAddRequest,
 }) => {
   const location = useLocation();
   const [openSheet, setOpenSheet] = useState<SheetId | null>(null);
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
   const createButtonRef = useRef<HTMLButtonElement>(null);
   const moreButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -276,6 +280,12 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
   useEffect(() => {
     setOpenSheet(null);
   }, [location.pathname, location.search, location.hash]);
+
+  useEffect(() => {
+    if (!quickAddRequest || isDemoMode) return;
+    setOpenSheet('create');
+    setQuickAddOpen(true);
+  }, [isDemoMode, quickAddRequest]);
 
   const active = getNavigationState(location.pathname, location.search);
   const groups = getMoreGroups(user);
@@ -306,7 +316,12 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
                 </li>
               ))}
               <li>
-                <QuickAddTodo layout="inline" disabled={isDemoMode} />
+                <QuickAddTodo
+                  layout="inline"
+                  disabled={isDemoMode}
+                  externalOpen={quickAddOpen}
+                  onExternalOpenHandled={() => setQuickAddOpen(false)}
+                />
               </li>
             </ul>
           </nav>
