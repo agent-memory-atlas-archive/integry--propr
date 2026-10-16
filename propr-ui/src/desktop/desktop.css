@@ -83,6 +83,11 @@ html[data-desktop-window="linux"] #root {
      the app itself is inert. Clip their backgrounds at the upper corners. */
   transform: translateZ(0);
   clip-path: inset(0 round var(--desktop-frame-radius));
+  /* The frame allowance makes the root shorter than the viewport. Never let
+     content below it make the document scrollable: a scrolled document moves
+     the toolbar but not the window controls pinned to this root. */
+  overflow: hidden;
+  overflow: clip;
 }
 
 html[data-desktop-window="linux"] .desktop-entry {
@@ -147,10 +152,23 @@ html[data-desktop-window="linux"] .desktop-sidebar-header {
   margin: 0;
   padding: 0;
   grid-template-columns: repeat(3, 1fr);
-  border-bottom: 1px solid #e2e8f0;
+  /* The divider is drawn by ::after over the buttons, so every hit target
+     spans the full titlebar height, flush with the toolbar's lower edge. */
+  border-bottom: 0 solid #e2e8f0;
   color: #475569;
   background: #f8fafc;
   -webkit-app-region: no-drag;
+}
+
+.desktop-window-controls::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  border-bottom: 1px solid;
+  border-bottom-color: inherit;
+  pointer-events: none;
 }
 
 .desktop-window-controls button {
@@ -181,6 +199,15 @@ html[data-desktop-window="linux"] .desktop-sidebar-header {
   height: 100vh;
   overflow: hidden;
   background: #f8fafc;
+}
+
+/* These clip like `overflow: hidden` but are not scroll containers, so focus
+   or scrollIntoView can never offset the toolbar and its drag region from the
+   fixed window controls, even if some content outgrows the window. */
+.desktop-app,
+.desktop-app > .desktop-shell,
+.desktop-app .desktop-shell-content {
+  overflow: clip;
 }
 
 .desktop-app > .desktop-shell {

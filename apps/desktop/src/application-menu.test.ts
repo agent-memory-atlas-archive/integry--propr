@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { Menu, MenuItemConstructorOptions } from 'electron';
-import { configureApplicationMenu, createApplicationMenuPopup, createApplicationMenuTemplate } from './application-menu';
+import { CREATION_MENU_ITEMS, configureApplicationMenu, createApplicationMenuPopup, createApplicationMenuTemplate } from './application-menu';
 import type { DesktopNativeCommandDispatcher } from './native-commands';
 
 const fixture = (overrides: Partial<ReturnType<DesktopNativeCommandDispatcher['getState']>> = {}) => {
@@ -51,7 +51,8 @@ describe('desktop application menu', () => {
       assert.equal(new Set(accelerators).size, accelerators.length);
       assert.ok(!accelerators.some(accelerator => /CmdOrCtrl\+[1-7]/.test(accelerator)));
       for (const [label, command] of [
-        ['New Plan', 'new-plan'], ['New Task…', 'new-task'],
+        ['New Task', 'new-task'], ['New Plan', 'new-plan'], ['New Goal', 'new-goal'],
+        ['New Automation', 'new-automation'], ['New To-do', 'new-todo'],
         ['Connect Instance…', 'connect-instance'], ['Switch Account / Instance…', 'manage-instances'],
         ['Toggle Sidebar', 'toggle-sidebar'], ['Search / Go To…', 'search'],
         ['Dashboard', 'dashboard'], ['Inbox', 'inbox'], ['Plans', 'plans'],
@@ -76,7 +77,7 @@ describe('desktop application menu', () => {
       const value = fixture({ authenticated: false, canManageInstances: false });
       const controller = configureApplicationMenu(value.host, value.commands, platform);
       const all = items(value.template());
-      for (const label of ['New Plan', 'New Task…', 'Settings…', 'Back', 'Forward', 'Toggle Sidebar', 'Search / Go To…', 'Connect Instance…', 'Switch Account / Instance…']) {
+      for (const label of ['New Task', 'New Plan', 'New Goal', 'New Automation', 'New To-do', 'Settings…', 'Back', 'Forward', 'Toggle Sidebar', 'Search / Go To…', 'Connect Instance…', 'Switch Account / Instance…']) {
         assert.equal(all.find(item => item.label === label)?.enabled, false);
       }
       for (const label of ['About ProPR', 'ProPR Website', 'Connection Diagnostics…']) {
@@ -85,6 +86,39 @@ describe('desktop application menu', () => {
       assert.equal(value.listeners.size, 1);
       controller.close();
       assert.equal(value.listeners.size, 0);
+    });
+  }
+
+  for (const platform of ['darwin', 'linux'] as const) {
+    it(`${platform} File menu lists every creation action with its own accelerator`, () => {
+      const value = fixture();
+      configureApplicationMenu(value.host, value.commands, platform);
+      const file = value.template().find(item => item.label === 'File');
+      const creation = (file?.submenu as MenuItemConstructorOptions[]).slice(0, CREATION_MENU_ITEMS.length);
+      assert.deepEqual(creation.map(item => [item.label, item.accelerator]), [
+        ['New Task', 'CmdOrCtrl+Shift+T'],
+        ['New Plan', 'CmdOrCtrl+N'],
+        ['New Goal', 'CmdOrCtrl+Shift+G'],
+        ['New Automation', 'CmdOrCtrl+Shift+A'],
+        ['New To-do', 'CmdOrCtrl+Shift+D'],
+      ]);
+      for (const item of creation) assert.doesNotMatch(String(item.label), /…|\.\.\./);
+      // Unique against every menu accelerator, and clear of the renderer's
+      // reconnect, Electron role defaults and OS-reserved chords.
+      const all = items(value.template());
+      const normalize = (accelerator: string) => accelerator.toLowerCase().split('+').sort().join('+');
+      const taken = all.flatMap(item => item.accelerator ? [normalize(String(item.accelerator))] : []);
+      assert.equal(new Set(taken).size, taken.length);
+      const reserved = [
+        'CmdOrCtrl+Shift+R', 'CmdOrCtrl+Shift+I', 'CmdOrCtrl+K', 'CmdOrCtrl+Z', 'CmdOrCtrl+Shift+Z', 'CmdOrCtrl+Y',
+        'CmdOrCtrl+X', 'CmdOrCtrl+C', 'CmdOrCtrl+V', 'CmdOrCtrl+Shift+V', 'CmdOrCtrl+A', 'CmdOrCtrl+0',
+        'CmdOrCtrl+Plus', 'CmdOrCtrl+-', 'CmdOrCtrl+W', 'CmdOrCtrl+M', 'CmdOrCtrl+H', 'CmdOrCtrl+Q', 'F10', 'F11', 'Alt+F',
+        'CmdOrCtrl+Shift+U', 'CmdOrCtrl+Shift+E', 'Ctrl+Alt+T', 'Alt+T',
+      ].map(normalize);
+      for (const item of CREATION_MENU_ITEMS) {
+        assert.ok(!reserved.includes(normalize(item.accelerator)), `${item.label} uses a reserved accelerator`);
+        assert.doesNotMatch(item.accelerator, /Alt/);
+      }
     });
   }
 

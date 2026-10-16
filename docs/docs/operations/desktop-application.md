@@ -164,7 +164,7 @@ Installation-level **Settings** belong to the connected server. Connection manag
 | Menu | Actions and shortcuts |
 | --- | --- |
 | ProPR | About ProPR, Settings… (`Cmd+,`), Services and Hide (macOS only), Quit ProPR (`Cmd+Q`) |
-| File | New Plan (`Cmd+N`), New Task…, Connect Instance…, Switch Account / Instance… (`Cmd+Shift+I`), Close Window |
+| File | New Task (`Cmd+Shift+T`), New Plan (`Cmd+N`), New Goal (`Cmd+Shift+G`), New Automation (`Cmd+Shift+A`), New To-do (`Cmd+Shift+D`), Connect Instance…, Switch Account / Instance… (`Cmd+Shift+I`), Close Window |
 | Edit | Native editing |
 | View | Toggle Sidebar, zoom, full screen |
 | Navigate | Back (`Cmd+[`), Forward (`Cmd+]`), Search / Go To… (`Cmd+K`), Dashboard, Inbox, Plans, Goals, Tasks, Repositories |
@@ -173,7 +173,9 @@ Installation-level **Settings** belong to the connected server. Connection manag
 
 On Linux, use `Ctrl` in place of `Cmd`. The Linux window has no native menu bar, so open these menus with the
 **Application menu** button (⋮) beside the minimize, maximize and close buttons, or press `F10` or `Alt+F`. The
-shortcuts leave focus in the current field, so Edit actions apply to it. Press `Escape` to close the menu. The Linux tray icon and the macOS menu-bar item show task and plan counts and
+shortcuts leave focus in the current field, so Edit actions apply to it. Press `Escape` to close the menu. The
+File creation entries open the same forms as the toolbar's creation button and quick add To-Do; nothing is created
+until you submit the form, and they are unavailable in demo mode. `Alt+T` still opens quick add. The Linux tray icon and the macOS menu-bar item show task and plan counts and
 offer New Plan, Tasks, Plans, Inbox, instance switching, notification settings, and pausing or resuming native
 notifications. On Linux, left-clicking the tray icon restores the ProPR window.
 

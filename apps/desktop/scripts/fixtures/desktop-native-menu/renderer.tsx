@@ -5,6 +5,9 @@ import { HashRouter, Routes, Route } from 'react-router-dom';
 import Layout from '../../../../../propr-ui/src/components/Layout';
 import PlanStudioPage from '../../../../../propr-ui/src/pages/PlanStudioPage';
 import NewTaskPage from '../../../../../propr-ui/src/pages/NewTaskPage';
+import GoalsPage from '../../../../../propr-ui/src/pages/GoalsPage';
+import AgentsPage from '../../../../../propr-ui/src/pages/AgentsPage';
+import { AppViewport } from '../../../../../propr-ui/src/components/AppViewport';
 import { DesktopNativeNavigationObserver } from '../../../../../propr-ui/src/desktop/DesktopNativeNavigationObserver';
 import type { MenuItemConstructorOptions } from 'electron';
 import { createApplicationMenuPopup, createApplicationMenuTemplate } from '../../../src/application-menu';
@@ -64,6 +67,8 @@ Object.assign(window, { nativeMenu: {
     menus: popup.template.map(item => item.label),
     roles: popup.template.flatMap(item => Array.isArray(item.submenu) ? item.submenu : []).flatMap(item => item.role ? [item.role] : []),
     x: popup.options.x, y: popup.options.y, sourceType: popup.options.sourceType,
+    file: (popup.template.find(item => item.label === 'File')?.submenu as MenuItemConstructorOptions[])
+      .flatMap(item => item.label ? [{ label: item.label, accelerator: item.accelerator ?? null }] : []),
   },
   choose(label: string) {
     const item = popup?.template.flatMap(item => Array.isArray(item.submenu) ? item.submenu : []).find(item => item.label === label);
@@ -106,16 +111,19 @@ const socket = createInertSocketContextValue({ isConnected: true });
 
 createRoot(document.getElementById('root')!).render(
   <DesktopExperience adapters={adapters} deepLinks={deepLinks}>
+    {/* The production app frame: its height decides whether `.desktop-app` overflows. */}
+    <AppViewport>
     <HashRouter><DesktopNativeNavigationObserver />
       <SocketContext.Provider value={socket}>
         <ToastProvider>
           <AuthProvider user={{ id: 'frame-user', login: 'frame-user', username: 'frame-user', displayName: 'Frame Test', email: null, avatarUrl: null, role: 'member', permissions: [], authorizationSource: 'local' }}>
             <NotificationCenterProvider>
-              <Layout><Routes><Route path="/studio/new" element={<PlanStudioPage isNew />} /><Route path="/tasks/new" element={<NewTaskPage />} /><Route path="*" element={<div className="p-6">Desktop menu test workspace</div>} /></Routes></Layout>
+              <Layout><Routes><Route path="/studio/new" element={<PlanStudioPage isNew />} /><Route path="/tasks/new" element={<NewTaskPage />} /><Route path="/goals" element={<GoalsPage />} /><Route path="/automations/new" element={<AgentsPage isNew />} /><Route path="*" element={<div className="p-6">Desktop menu test workspace</div>} /></Routes></Layout>
             </NotificationCenterProvider>
           </AuthProvider>
         </ToastProvider>
       </SocketContext.Provider>
     </HashRouter>
+    </AppViewport>
   </DesktopExperience>,
 );

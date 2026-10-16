@@ -59,12 +59,13 @@ const QuickAddTodo: React.FC<QuickAddTodoProps> = ({ externalOpen, onExternalOpe
     }
   }, [inferRepoFromUrl, selectedRepo]);
 
-  // Handle external open trigger (keyboard shortcut)
+  // Handle external open trigger (keyboard shortcut or native New To-do).
+  // Always consume the request: a refused (demo) or redundant (already open)
+  // request must not linger and reopen the form after it is closed.
   useEffect(() => {
-    if (externalOpen && !isOpen && !disabled) {
-      setIsOpen(true);
-      onExternalOpenHandled?.();
-    }
+    if (!externalOpen) return;
+    if (!isOpen && !disabled) setIsOpen(true);
+    onExternalOpenHandled?.();
   }, [disabled, externalOpen, isOpen, onExternalOpenHandled]);
 
   // Click outside to close

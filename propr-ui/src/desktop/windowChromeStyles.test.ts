@@ -75,6 +75,17 @@ describe('desktop window chrome styles', () => {
     expect(ruleFor('.desktop-platform-linux.desktop-has-application-menu')).toContain('--desktop-window-controls-end-inset: 11.5rem');
   });
 
+  it('keeps the frame-inset chrome containers unscrollable and control hit targets full height', () => {
+    expect(ruleFor('html[data-desktop-window="linux"] #root')).toContain('overflow: clip');
+    expect(ruleFor('.desktop-app,\n.desktop-app > .desktop-shell,\n.desktop-app .desktop-shell-content')).toContain('overflow: clip');
+    expect(ruleFor('.desktop-window-controls')).toContain('border-bottom: 0 solid');
+    const divider = ruleFor('.desktop-window-controls::after');
+    expect(divider).toContain('bottom: 0');
+    expect(divider).toContain('border-bottom: 1px solid');
+    expect(divider).toContain('border-bottom-color: inherit');
+    expect(divider).toContain('pointer-events: none');
+  });
+
   it('uses subtle eight-pixel scrollbars throughout the desktop surface', () => {
     expect(desktopStyles).toMatch(/::-webkit-scrollbar[^}]+width: 8px;/s);
     expect(desktopStyles).toMatch(/::-webkit-scrollbar-track[^}]+background: transparent;/s);
