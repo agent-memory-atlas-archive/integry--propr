@@ -1,5 +1,5 @@
 import type { Agent, AgentConfig } from '@propr/core';
-import { computeContentHash, generateAgentBundleImageTag, getAgentCliVersionMatrix, redactSecrets } from '@propr/core';
+import { effectiveAgentBaseImage, redactSecrets } from '@propr/core';
 import { AGENT_MODELS } from '@propr/shared';
 
 // Prefer inexpensive, quick models already offered by this configuration.
@@ -52,8 +52,9 @@ export function createAgentHealthCheck(dependencies: {
   async function loadEffectiveAgents(): Promise<AgentConfig[]> {
     const agents = await dependencies.loadAgents();
     // Match registry resolution: saved tags can outlive bundle/version changes,
-    // and even a sibling provider's CLI version changes the shared image.
-    const image = generateAgentBundleImageTag(getAgentCliVersionMatrix(agents), computeContentHash());
+    // even a sibling provider's CLI version changes the shared image, and a
+    // Desktop runtime's managed pin replaces the bundle for a matching matrix.
+    const image = effectiveAgentBaseImage(agents);
     return agents.map(agent => ({ ...agent, dockerImage: image }));
   }
 

@@ -1,7 +1,12 @@
 import { AGENT_TYPES } from './constants.js';
-import type { AgentType } from './types.js';
+import type { AgentConfig, AgentType } from './types.js';
 import { AGENT_DEFAULT_VERSIONS } from './version/types.js';
-import type { AgentCliVersionMatrix } from './version/versionService.js';
+import {
+    type AgentCliVersionMatrix,
+    computeContentHash,
+    generateAgentBundleImageTag,
+    getAgentCliVersionMatrix,
+} from './version/versionService.js';
 
 /**
  * A published Desktop runtime binds one digest-pinned managed agent image to
@@ -37,4 +42,17 @@ export function managedAgentVersionDifferences(versions: AgentCliVersionMatrix):
 export function managedAgentPinFor(versions: AgentCliVersionMatrix, env: NodeJS.ProcessEnv = process.env): ManagedAgentPin | null {
     const pin = readManagedAgentPin(env);
     return pin && managedAgentVersionDifferences(versions).length === 0 ? pin : null;
+}
+
+/**
+ * The base image reference the registry resolves for these agent configs:
+ * the managed pin when it serves their CLI matrix, otherwise the generated
+ * bundle tag. Saved configs can carry a stale dockerImage, so consumers that
+ * inspect or request preparation for the registry's target (runtime packages,
+ * API health checks) use this rather than deriving their own tag. The pin is
+ * still verified by the registry before anything runs on it.
+ */
+export function effectiveAgentBaseImage(configs: AgentConfig[], env: NodeJS.ProcessEnv = process.env): string {
+    const versions = getAgentCliVersionMatrix(configs);
+    return managedAgentPinFor(versions, env)?.image ?? generateAgentBundleImageTag(versions, computeContentHash());
 }

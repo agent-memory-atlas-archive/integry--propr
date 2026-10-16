@@ -12,6 +12,7 @@ import {
     AnalyzeOptions
 } from '../types.js';
 import { executeDockerCommand } from '../../claude/docker/dockerExecutor.js';
+import { agentDockerImageExists } from '../../claude/docker/dockerImagePresence.js';
 import {
     verifyWorktreeStructure,
     verifyWorktreePostExecution,
@@ -380,8 +381,7 @@ export class ClaudeAgent implements Agent {
     async healthCheck(): Promise<boolean> {
         logger.debug({ agentAlias: this.config.alias, dockerImage: this.config.dockerImage }, 'Running health check for Claude agent...');
         try {
-            const result = await executeDockerCommand('docker', ['images', '-q', this.config.dockerImage], { timeout: 10000 });
-            const imageExists = !!result.stdout.trim();
+            const imageExists = await agentDockerImageExists(this.config.dockerImage, 10000);
             logger.info({
                 agentAlias: this.config.alias, dockerImage: this.config.dockerImage, imageExists
             }, imageExists ? 'Health check passed' : 'Health check failed: Docker image not found');

@@ -512,6 +512,7 @@ export { DEFAULT_CONFIG_PATHS, resolveConfigPath, getDefaultConfigPath, loadAgen
 
 // Agent version management
 export * from './agents/version/index.js';
+export { effectiveAgentBaseImage } from './agents/managedAgentPin.js';
 
 // Repository chat message persistence
 export {

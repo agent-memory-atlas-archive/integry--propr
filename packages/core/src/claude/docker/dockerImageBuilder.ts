@@ -13,6 +13,9 @@ import { assertAgentImageBuildCapacity } from '../../agents/agentImageBuildCapac
 import { withAgentImageBuildSlot } from '../../agents/agentImageBuildLock.js';
 import { readManagedAgentPin } from '../../agents/managedAgentPin.js';
 import { executeDockerCommand } from './dockerExecutor.js';
+import { agentDockerImageExists } from './dockerImagePresence.js';
+
+export { agentDockerImageExists };
 
 const PROJECT_ROOT = process.env.PROPR_ROOT
     || (fs.existsSync(path.join(process.cwd(), 'Dockerfile.agent')) ? process.cwd() : '/usr/src/app');
@@ -50,11 +53,6 @@ function bundleBuildArgs(versions: AgentCliVersionMatrix): string[] {
         '--build-arg', `OPENCODE_CLI_VERSION=${versions.opencode}`,
         '--build-arg', `VIBE_CLI_VERSION=${versions.vibe}`
     ];
-}
-
-export async function agentDockerImageExists(image: string): Promise<boolean> {
-    const result = await executeDockerCommand('docker', ['images', '-q', image]);
-    return result.exitCode === 0 && Boolean(result.stdout.trim());
 }
 
 async function pullImage(image: string): Promise<boolean> {
