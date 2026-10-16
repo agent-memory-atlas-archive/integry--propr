@@ -136,6 +136,11 @@ export interface PlanFileAgentOptions {
    * single plan.json, so no single tool call has to hold the whole plan.
    */
   taskFiles?: boolean;
+  /**
+   * plan.json holds a whole JSON document (such as a refinement response)
+   * rather than a plan array; only its content is checked against `original`.
+   */
+  document?: boolean;
   /** `agent:model`, as configured for planning. */
   model: string;
   draftId: string;
@@ -184,8 +189,8 @@ async function preparePlanWorkspace(options: PlanFileAgentOptions, workspaces: s
   return workspace;
 }
 
-export async function runPlanFileAgent(options: PlanFileAgentOptions): Promise<PlanItem[]> {
-  const { purpose, prompt, original, taskFiles = false, model, draftId, repository, githubToken, executionType, correlationId, metadata, routingSession } = options;
+export async function runPlanFileAgent<T = PlanItem[]>(options: PlanFileAgentOptions): Promise<T> {
+  const { purpose, prompt, original, taskFiles = false, document = false, model, draftId, repository, githubToken, executionType, correlationId, metadata, routingSession } = options;
   const log = correlationId ? logger.withCorrelation(correlationId) : logger;
   const workspaces: string[] = [];
   try {
@@ -250,14 +255,14 @@ export async function runPlanFileAgent(options: PlanFileAgentOptions): Promise<P
     } else {
       planText = await readWorkspaceFile(path.join(workspace, PLAN_FILE));
       if (planText === null) throw new PlanningFailedError(`Plan ${purpose} produced no ${PLAN_FILE}.${agentFailure}`);
-      report = await validatePlanText(planText, original);
+      report = await validatePlanText(planText, original, { document });
     }
     if (!report.valid) {
       log.warn({ purpose, model, errors: report.errors.slice(0, 10) }, 'Plan file agent result failed validation');
       throw new PlanningFailedError(`Plan ${purpose} did not produce a valid plan: ${report.errors.slice(0, 3).join('; ')}.${agentFailure}`);
     }
     log.info({ purpose, model, taskCount: report.taskCount }, 'Plan file agent produced a valid plan');
-    return JSON.parse(planText!) as PlanItem[];
+    return JSON.parse(planText!) as T;
   } finally {
     for (const workspace of workspaces) {
       await rm(workspace, { recursive: true, force: true }).catch(error => {

@@ -1,0 +1,111 @@
+import { after, beforeEach, describe, mock, test } from 'node:test';
+import assert from 'node:assert/strict';
+
+const llmResponses: string[] = [];
+const runLightweightLLMAnalysis = mock.fn(async () => {
+    const next = llmResponses.shift();
+    if (next === undefined) throw new Error('no scripted LLM response left');
+    return next;
+});
+const claudeService = await import('../packages/core/src/claude/claudeService.js');
+await mock.module('../packages/core/src/claude/claudeService.js', { namedExports: { ...claudeService, runLightweightLLMAnalysis } });
+
+type RepairCall = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+let repairResult: unknown = undefined;
+const runPlanFileAgent = mock.fn(async (_options: RepairCall) => {
+    if (repairResult instanceof Error) throw repairResult;
+    return repairResult;
+});
+const planFileAgent = await import('../packages/core/src/services/taskPlanning/planFileAgent.js');
+await mock.module('../packages/core/src/services/taskPlanning/planFileAgent.js', { namedExports: { ...planFileAgent, runPlanFileAgent } });
+
+const estimation = await import('../packages/core/src/utils/llmEstimation.js');
+await mock.module('../packages/core/src/utils/llmEstimation.js', {
+    namedExports: { ...estimation, estimateLlmDuration: async () => ({ estimatedDurationMs: 1000, isHistoricalEstimate: false, sampleCount: 0 }) },
+});
+const configManager = await import('../packages/core/src/config/configManager.js');
+await mock.module('../packages/core/src/config/configManager.js', {
+    namedExports: { ...configManager, loadSettings: async () => ({ planner_generation_model: 'codex:gpt-6-astra' }) },
+});
+const configuredModel = await import('../packages/core/src/config/configuredModel.js');
+await mock.module('../packages/core/src/config/configuredModel.js', {
+    // With no argument this resolves the configured default coding model.
+    namedExports: { ...configuredModel, resolveConfiguredModel: async (model?: string) => model ?? 'claude:claude-opus-5' },
+});
+const routes: unknown[] = [];
+const routingSession = { select: async () => ({ physicalAgentAlias: 'codex', physicalModel: 'gpt-6-astra' }), fork() { return routingSession; } };
+const agentRegistry = await import('../packages/core/src/agents/AgentRegistry.js');
+await mock.module('../packages/core/src/agents/AgentRegistry.js', {
+    namedExports: {
+        ...agentRegistry,
+        AgentRegistry: {
+            getInstance: () => ({
+                ensureInitialized: async () => undefined,
+                beginRoutingSession: (route: unknown) => { routes.push(route); return routingSession; },
+            }),
+        },
+    },
+});
+
+const { refinePlan } = await import('../packages/core/src/services/taskPlanning/refinement.js');
+const { closeConnection } = await import('../packages/core/src/db/connection.js');
+after(async () => { await closeConnection(); });
+
+const issue = (title: string) => ({ title, body: `${title} body`, implementation: `${title} implementation` });
+const currentPlan = [issue('History store'), issue('Trend chart')];
+const options = { currentPlan, instruction: 'Drop the JSON backend', worktreePath: '/tmp', repository: 'integry/propr', githubToken: 't', draftId: 'draft-1' };
+const refined = [issue('SQLite history store'), issue('Trend chart')];
+// Unescaped quotes inside a string value: no parser pass can recover this.
+const broken = `Here is the refined plan:\n{\n  "action": "modified",\n  "summary": "Removed the "JSON" backend",\n  "plan": ${JSON.stringify(refined)}\n}\n`;
+
+beforeEach(() => {
+    llmResponses.length = 0;
+    routes.length = 0;
+    repairResult = undefined;
+    runLightweightLLMAnalysis.mock.resetCalls();
+    runPlanFileAgent.mock.resetCalls();
+});
+
+describe('plan refinement JSON repair', () => {
+    test('repairs malformed JSON in place with the file agent, never by asking a model again', async () => {
+        llmResponses.push(broken);
+        repairResult = { action: 'modified', summary: 'Removed the "JSON" backend', plan: refined };
+
+        const result = await refinePlan(options);
+
+        assert.deepEqual(result.plan, refined);
+        assert.equal(result.summary, 'Removed the "JSON" backend');
+        assert.equal(runLightweightLLMAnalysis.mock.callCount(), 1, 'no model call is used to repair JSON');
+        assert.equal(runPlanFileAgent.mock.callCount(), 1);
+        const call = runPlanFileAgent.mock.calls[0].arguments[0];
+        const original = broken.slice(broken.indexOf('{'), broken.lastIndexOf('}') + 1);
+        assert.equal(call.purpose, 'repair');
+        assert.equal(call.document, true);
+        assert.equal(call.original, original, 'the agent repairs exactly the JSON that failed to parse');
+        assert.deepEqual(call.files, { 'plan.json': original, 'original.txt': original });
+        assert.equal(call.model, 'claude:claude-opus-5', 'repair uses the default coding model');
+        assert.equal(call.executionType, 'plan-refinement');
+        assert.match(call.prompt, /validate-plan\.mjs --document/);
+        assert.deepEqual(routes.at(-1), { requestedAgentAlias: 'claude', requestedModel: 'claude-opus-5' });
+    });
+
+    test('parses recoverable JSON without starting a repair', async () => {
+        llmResponses.push(`{\n  "action": "modified",\n  "summary": "Line one.\n\nLine two",\n  "plan": ${JSON.stringify(refined)}\n}`);
+        const result = await refinePlan(options);
+        assert.equal(result.summary, 'Line one.\n\nLine two');
+        assert.equal(runPlanFileAgent.mock.callCount(), 0);
+    });
+
+    test('fails and keeps the plan when the in-place repair fails', async () => {
+        llmResponses.push(broken);
+        repairResult = new Error('Plan repair did not produce a valid plan: plan.json does not match original.txt');
+        await assert.rejects(refinePlan(options), /in-place repair failed: Plan repair did not produce a valid plan/);
+        assert.equal(runLightweightLLMAnalysis.mock.callCount(), 1);
+    });
+
+    test('does not start a repair when the response holds no JSON at all', async () => {
+        llmResponses.push('I could not refine this plan.');
+        await assert.rejects(refinePlan(options), /Failed to parse refined plan: No JSON object or array/);
+        assert.equal(runPlanFileAgent.mock.callCount(), 0);
+    });
+});

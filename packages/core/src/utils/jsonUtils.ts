@@ -105,8 +105,13 @@ function describeParseError(error: unknown, text: string): string {
   return `${message} | Context: ...${before}>>>HERE(char=${text.charCodeAt(pos)})<<<${after}...`;
 }
 
-export function parseLlmJson<T>(text: string): T {
-  let clean = text.replace(/```json/g, '').replace(/```/g, '');
+/**
+ * The JSON document in an LLM response: code fences removed, from the first
+ * JSON-looking opener to the last matching closer. This is the text that
+ * parseLlmJson parses and that a file-based repair receives.
+ */
+export function extractLlmJsonText(text: string): string {
+  const clean = text.replace(/```json/g, '').replace(/```/g, '');
 
   // Find the JSON structure using smart pattern matching
   const jsonLocation = findJsonStart(clean);
@@ -115,24 +120,16 @@ export function parseLlmJson<T>(text: string): T {
     throw new JsonParseError('No JSON object or array found in LLM response');
   }
 
-  let start: number;
-  let end: number;
-
-  if (jsonLocation.type === 'object') {
-    start = jsonLocation.start;
-    end = clean.lastIndexOf('}');
-    if (end === -1) {
-      throw new JsonParseError('No closing brace found for JSON object');
-    }
-  } else {
-    start = jsonLocation.start;
-    end = clean.lastIndexOf(']');
-    if (end === -1) {
-      throw new JsonParseError('No closing bracket found for JSON array');
-    }
+  const end = clean.lastIndexOf(jsonLocation.type === 'object' ? '}' : ']');
+  if (end === -1) {
+    throw new JsonParseError(jsonLocation.type === 'object' ? 'No closing brace found for JSON object' : 'No closing bracket found for JSON array');
   }
 
-  clean = clean.substring(start, end + 1);
+  return clean.substring(jsonLocation.start, end + 1);
+}
+
+export function parseLlmJson<T>(text: string): T {
+  const clean = extractLlmJsonText(text);
 
   try {
     return JSON.parse(clean);

@@ -99,6 +99,35 @@ describe('plan validator', () => {
   });
 });
 
+describe('plan validator document mode', () => {
+  const response = JSON.stringify({ action: 'modified', summary: 'Reworked "storage".\nI didn\'t add a backend.', plan: [task('A'), { op: 'delete', index: 2 }] }, null, 2);
+  // Literal newlines and unescaped quotes inside the summary, as models write them.
+  const brokenResponse = response.replace('Reworked \\"storage\\".\\nI', 'Reworked "storage".\nI');
+
+  test('accepts a syntax-only repair of a refinement response object', async () => {
+    assert.throws(() => JSON.parse(brokenResponse));
+    assert.deepEqual(await validatePlanText(response, brokenResponse, { document: true }), { valid: true, taskCount: 2, errors: [] });
+  });
+
+  test('rejects a repair that changes any value of the document', async () => {
+    const reworded = response.replace('Reworked', 'Rewrote');
+    const report = await validatePlanText(reworded, brokenResponse, { document: true });
+    assert.equal(report.valid, false);
+    assert.match(report.errors.join('\n'), /fix syntax only/);
+    const dropped = JSON.stringify({ ...JSON.parse(response), plan: [task('A')] });
+    assert.equal((await validatePlanText(dropped, brokenResponse, { document: true })).valid, false);
+  });
+
+  test('still rejects invalid JSON and a non-container root', async () => {
+    assert.equal((await validatePlanText(brokenResponse, brokenResponse, { document: true })).valid, false);
+    assert.equal((await validatePlanText('"text"', undefined, { document: true })).valid, false);
+  });
+
+  test('plan mode still rejects a refinement object', async () => {
+    assert.equal((await validatePlanText(response)).valid, false);
+  });
+});
+
 describe('plan response shape', () => {
   test('extracts a whole array from prose and code fences', () => {
     assert.equal(extractWholeJsonArray(plan), plan);
