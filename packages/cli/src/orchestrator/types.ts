@@ -68,6 +68,10 @@ export interface OrchestratorConfig {
   readonly manifest: { version: string; images: Record<string, string> } & Record<string, unknown>;
   readonly images: Record<string, string>;
   readonly manifestPath: string;
+  /** Published digest-pinned managed agent image bound by a Desktop runtime manifest. */
+  readonly managedAgent?: { readonly image: string; readonly sourceRevision: string };
+  /** Pin that replaces the legacy generated AGENT_DOCKER_IMAGE default inside app containers. */
+  readonly agentDockerImageOverride?: string;
 }
 
 /** State of a single service container, derived from `docker ps`. */

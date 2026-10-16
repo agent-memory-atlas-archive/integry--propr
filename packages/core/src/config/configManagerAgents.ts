@@ -8,6 +8,7 @@ import {
 import logger from '../utils/logger.js';
 import { getConfig, saveConfig } from './configStore.js';
 import { computeContentHash, generateAgentBundleImageTag, getAgentCliVersionMatrix } from '../agents/version/versionService.js';
+import { managedAgentPinFor } from '../agents/managedAgentPin.js';
 import { migrateAgentConfig } from './configManagerAgentMigrations.js';
 
 export { migrateAgentConfig } from './configManagerAgentMigrations.js';
@@ -79,7 +80,10 @@ export async function loadEffectiveAgentBaseImages(): Promise<string[]> {
         // on AGENT_DOCKER_IMAGE when set.
         return [process.env.AGENT_DOCKER_IMAGE];
     }
-    return [generateAgentBundleImageTag(getAgentCliVersionMatrix(agents), computeContentHash())];
+    const versions = getAgentCliVersionMatrix(agents);
+    // A published Desktop runtime runs its managed pin for a matching matrix.
+    const managedPin = managedAgentPinFor(versions);
+    return [managedPin ? managedPin.image : generateAgentBundleImageTag(versions, computeContentHash())];
 }
 
 /**

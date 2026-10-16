@@ -114,6 +114,9 @@ const PlansPage: React.FC = () => {
         status: status === 'all' ? undefined : status
       });
       if (requestId !== draftsRequestId.current) return;
+      // Record statuses with the response, not in a post-commit effect, so a
+      // draft update arriving before effects flush still sees them.
+      for (const draft of data.drafts) liveDraftStatusesRef.current.set(draft.draft_id, draft.status);
       setDrafts(data.drafts);
       setTotalDrafts(data.total);
       setHasMore(data.hasMore);
@@ -128,10 +131,6 @@ const PlansPage: React.FC = () => {
       }
     }
   }, [queryScope]);
-
-  useEffect(() => {
-    for (const draft of drafts) liveDraftStatusesRef.current.set(draft.draft_id, draft.status);
-  }, [drafts]);
 
   const refreshLiveDrafts = useCallback(async () => {
     await Promise.all([

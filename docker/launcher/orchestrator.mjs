@@ -267,7 +267,8 @@ export function resolveConfig(env = process.env, overrides = {}) {
     // developer's shell NODE_ENV cannot accidentally describe (or alter) the
     // packaged container runtime.
     const authorizedEnvFileValues = overrides.envFileValues;
-    const nodeEnv = (authorizedEnvFileValues ?? readEnvFile(envFileLocal)).NODE_ENV || undefined;
+    const envFileValues = authorizedEnvFileValues ?? readEnvFile(envFileLocal);
+    const nodeEnv = envFileValues.NODE_ENV || undefined;
 
     // value precedence: explicit override → process env → .env file
     const get = (name) => env[name] !== undefined
@@ -337,6 +338,10 @@ export function resolveConfig(env = process.env, overrides = {}) {
 
     const manifestPath = overrides.manifestPath ?? resolve(__dirname, 'manifest.json');
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    const managedAgent = managedAgentPinFrom(manifest);
+    // Like NODE_ENV, the app containers receive AGENT_DOCKER_IMAGE from the
+    // stack --env-file, so inspect that exact source rather than the CLI shell.
+    const agentDockerImageOverride = managedAgentImageOverride(managedAgent, envFileValues.AGENT_DOCKER_IMAGE);
 
     // Hosted UI tunnel: expose this local stack's UI/API to the hosted control
     // plane (https://app.propr.dev) via a Cloudflare Tunnel. A token alone is
@@ -397,7 +402,49 @@ export function resolveConfig(env = process.env, overrides = {}) {
         mistralApiKey,
         vibeConfigPath: get('VIBE_CONFIG_PATH'),
         manifest, images: manifest.images, manifestPath,
+        managedAgent, agentDockerImageOverride,
     });
+}
+
+// The generated stack .env has always carried this unified default. It names
+// "whatever the release provides", not an operator's image choice.
+export const LEGACY_DEFAULT_AGENT_DOCKER_IMAGE = 'propr/agent:latest';
+const MANAGED_AGENT_IMAGE = /^propr\/agent:([0-9a-f]{40})@sha256:[0-9a-f]{64}$/;
+
+/**
+ * The published, digest-pinned managed agent image a Desktop/preview runtime
+ * manifest binds to its source revision, or undefined for every other
+ * manifest (generic launcher/hosted stacks keep their existing behavior).
+ * The app image must come from the same revision: that revision fixes the
+ * CLI defaults and bundle content the app expects the pin to provide.
+ */
+export function managedAgentPinFrom(manifest) {
+    const runtime = manifest?.desktopRuntime;
+    const image = runtime?.managedAgent?.image;
+    if (runtime?.distribution !== 'published' || typeof image !== 'string' || manifest.images?.agent !== image) return undefined;
+    const sourceRevision = MANAGED_AGENT_IMAGE.exec(image)?.[1];
+    if (!sourceRevision || sourceRevision !== runtime.sourceRevision || manifest.git_sha !== sourceRevision) return undefined;
+    if (typeof manifest.images.app !== 'string' || !manifest.images.app.startsWith(`propr/app:${sourceRevision}@sha256:`)) return undefined;
+    return Object.freeze({ image, sourceRevision });
+}
+
+/**
+ * Existing profiles migrate without rewriting the user's .env: the legacy
+ * generated default resolves to the bound pin inside the app containers, while
+ * an unset value stays unset and any other value is an intentional selection
+ * that is passed through untouched.
+ */
+export function managedAgentImageOverride(managedAgent, envFileAgentImage) {
+    return managedAgent && envFileAgentImage?.trim() === LEGACY_DEFAULT_AGENT_DOCKER_IMAGE ? managedAgent.image : undefined;
+}
+
+function managedAgentEnvArgs(cfg) {
+    if (!cfg.managedAgent) return [];
+    return [
+        '-e', `PROPR_MANAGED_AGENT_IMAGE=${cfg.managedAgent.image}`,
+        '-e', `PROPR_MANAGED_AGENT_REVISION=${cfg.managedAgent.sourceRevision}`,
+        ...(cfg.agentDockerImageOverride ? ['-e', `AGENT_DOCKER_IMAGE=${cfg.agentDockerImageOverride}`] : []),
+    ];
 }
 
 /**
@@ -981,6 +1028,8 @@ function appBaseArgs(cfg) {
         // explicit after --env-file so a missing value cannot regress it. A
         // conflicting existing value is rejected above rather than overwritten.
         '-e', 'NODE_ENV=production',
+        // The published managed agent pin follows --env-file for the same reason.
+        ...managedAgentEnvArgs(cfg),
         '-v', `${cfg.hostLogs}:/usr/src/app/logs`,
         '-v', `${cfg.hostData}:/usr/src/app/data`,
         '-v', '/var/run/docker.sock:/var/run/docker.sock',
