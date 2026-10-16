@@ -13,6 +13,9 @@ import { selectLiveEvents } from './liveEventSelection.js';
 import { projectLiveOutputRead, readLiveOutput, type LiveOutputProjector, type LiveOutputRead, type LiveOutputRedis } from './liveOutputStream.js';
 import { resolveConfigPath } from '@propr/core';
 import { findAgentConfigForTask, findExecutionStartTimestampForTask, findLatestExecutionStartForTask } from './taskWatcherLookup.js';
+import { completedExecutionDetails } from '../routes/liveDetailsCanonical.js';
+import { isLiveTask } from '../routes/liveDetailsTaskState.js';
+import { findSessionId } from '../routes/liveDetailsRoutes.js';
 
 const LIVE_EXECUTION_STATES = new Set(['claude_execution', 'codex_execution', 'gemini_execution', 'opencode_execution']);
 
@@ -497,6 +500,8 @@ export class TaskWatcherManager {
       const snapshotSignature = JSON.stringify([snapshot.todos, snapshot.currentTask, snapshot.tokenUsage]);
       if (events.length === 0 && omittedEventCount === undefined && snapshotSignature === watcherInfo.lastSnapshotSignature) return;
       watcherInfo.lastSnapshotSignature = snapshotSignature;
+      // HTTP serves a finished task's persisted details; its live log must not replace them.
+      if (await this.servesPersistedDetails(taskId) || this.taskWatchers.get(taskId) !== watcherInfo) return;
 
       const payload: TaskLiveUpdatePayload = {
         eventType: TASK_LIVE_UPDATE,
@@ -514,6 +519,24 @@ export class TaskWatcherManager {
     } catch (error) {
       console.error(`[TaskWatcher] Error sending Redis live update for task ${taskId}:`, error);
     }
+  }
+
+  /**
+   * Whether live-details reads of this finished task serve its persisted
+   * execution details (see completedExecutionDetails). The task's live log may
+   * then hold a coarser or different execution, so broadcasting it would
+   * replace the complete history clients read. Resolved for every update: a
+   * follow-up can start and finish another execution between polls, so an
+   * earlier answer says nothing about the execution this update belongs to.
+   */
+  private async servesPersistedDetails(taskId: string): Promise<boolean> {
+    if (!this.deps) return false;
+    const { redisClient, db } = this.deps;
+    const normalizedTaskId = this.normalizeTaskId(taskId);
+    if (await isLiveTask(redisClient, db, normalizedTaskId)) return false;
+    // Resolved as live-details reads resolve it, so both serve the same execution.
+    const sessionId = await findSessionId(redisClient, db, normalizedTaskId).catch(() => null);
+    return Boolean(sessionId && await completedExecutionDetails(redisClient, db, normalizedTaskId, sessionId));
   }
 
   /**

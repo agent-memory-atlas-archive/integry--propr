@@ -14,7 +14,7 @@ import {
 } from './liveDetailsCodexParser.js';
 import { isAntigravityStreamAwaitingNarration, parseAntigravityOutputToConversationResult, parseVibeOutputToConversationResult } from './liveDetailsOutputParsers.js';
 import { parseOpenCodeOutputToConversationResult } from './liveDetailsOpenCodeParser.js';
-import { parseExecutionDetailsRows, type ExecutionDetailRow } from './liveDetailsExecutionParser.js';
+import { completedExecutionDetails, parseExecutionDetailsFromDb } from './liveDetailsCanonical.js';
 import { detectStoredOutputFormat, hasCodexAppServerNotification, type StoredOutputFormat } from './liveDetailsStoredOutputFormat.js';
 import { parseRedisOutput } from '../services/redisOutputParser.js';
 import { type AgentStreamParseOptions } from '../services/agentStreamProjection.js';
@@ -60,6 +60,12 @@ export function createLiveDetailsRoutes(deps: LiveDetailsRoutesDeps) {
       const conversationPath = await findClaudeConversationPath(sessionId);
       console.log(`[live-details] Checking Claude conversation path: ${conversationPath ?? 'not found'}`);
       if (!conversationPath) {
+        const canonicalResult = await completedExecutionDetails(redisClient, db, taskId, sessionId);
+        if (canonicalResult) {
+          console.log('[live-details] Task finished, using persisted execution details');
+          send(res, { ...withStableResultEventIds(taskId, 'database', sessionId, canonicalResult), omittedEventCount: 0 });
+          return;
+        }
         console.log('[live-details] Claude conversation file not found, trying active Redis output');
         const activeRedisResult = await parseActiveExecutionOutput(redisClient, db, taskId);
         if (activeRedisResult) {
@@ -129,7 +135,8 @@ function withStableResultEventIds(
     }),
   };
 }
-async function findSessionId(redisClient: RedisClientType, db: Knex, taskId: string): Promise<string | null> {
+/** The session live-details reads resolve for a task: its latest execution state, else its latest persisted execution. */
+export async function findSessionId(redisClient: RedisClientType, db: Knex, taskId: string): Promise<string | null> {
   const redisSessionId = await findSessionIdFromRedis(redisClient, taskId);
   if (redisSessionId) return redisSessionId;
   return findSessionIdFromDb(db, taskId);
@@ -311,7 +318,10 @@ export async function projectTaskLiveDetails(
   db: Knex,
   taskId: string,
   { sessionId, rethrowReadErrors = false, ...options }: AgentStreamParseOptions & { sessionId?: string | null; rethrowReadErrors?: boolean } = {},
-): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal'] }) | null> {
+): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal']; omittedEventCount?: number }) | null> {
+  // A finished task's persisted transcript outranks whatever its live log last held.
+  const canonical = sessionId ? await completedExecutionDetails(redisClient, db, taskId, sessionId) : null;
+  if (sessionId && canonical) return { ...withStableResultEventIds(taskId, 'database', sessionId, canonical), omittedEventCount: 0 };
   const active = await parseActiveExecutionOutput(redisClient, db, taskId, options);
   if (active) return active;
   try {
@@ -387,27 +397,4 @@ function parseStoredOutputForFormat(output: string, format: StoredOutputFormat):
 function buildRawOutputConversationResult(output: string): ConversationResult | null {
   const trimmed = output.trim();
   return trimmed ? { events: [{ type: 'thought', content: trimmed }], todos: [], currentTask: null, tokenUsage: null } : null;
-}
-async function parseExecutionDetailsFromDb(db: Knex, taskId: string, sessionId: string): Promise<ConversationResult | null> {
-  const execution = await db('llm_executions')
-    .where({ task_id: taskId, session_id: sessionId })
-    .orderBy('start_time', 'desc')
-    .first('execution_id', 'input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens');
-  if (!execution?.execution_id) return null;
-  const details = await db('llm_execution_details')
-    .where({ execution_id: execution.execution_id })
-    .orderBy('sequence_number', 'asc')
-    .select('event_type', 'event_timestamp', 'content', 'is_error', 'tool_name', 'tool_input', 'metadata');
-  if (!details.length) return null;
-  const result = parseExecutionDetailsRows(details as ExecutionDetailRow[]);
-  const hasTokens = (execution.input_tokens ?? 0) || (execution.output_tokens ?? 0) || (execution.cache_creation_input_tokens ?? 0) || (execution.cache_read_input_tokens ?? 0);
-  return {
-    ...result,
-    tokenUsage: hasTokens ? {
-      input_tokens: execution.input_tokens ?? 0,
-      output_tokens: execution.output_tokens ?? 0,
-      cache_creation_input_tokens: execution.cache_creation_input_tokens ?? 0,
-      cache_read_input_tokens: execution.cache_read_input_tokens ?? 0
-    } : null
-  };
 }
