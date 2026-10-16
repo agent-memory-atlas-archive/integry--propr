@@ -71,21 +71,26 @@ const DiffViewer: React.FC<DiffViewerProps> = ({ file, onClose }) => {
       onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId}
         className="bg-white rounded-lg shadow-2xl border border-gray-200 h-full max-h-[calc(100dvh-1.5rem)] sm:max-h-[calc(100dvh-2rem)] w-full max-w-6xl min-w-0 flex flex-col overflow-hidden">
-        {/* Header */}
-        <div className="flex flex-none flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-gray-200 bg-gray-50">
-          <div className="flex flex-1 items-center gap-3 min-w-0">
-            <FileCode className="h-5 w-5 text-gray-600 flex-shrink-0" />
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span id={titleId} className="font-medium text-gray-900 truncate">{fileName}</span>
-                {getStatusLabel()}
-              </div>
-              {/* A phone has room for neither in full, so the path wraps there to still name the file. */}
-              <div data-testid="diff-file-path" className="text-xs text-gray-500 break-all sm:truncate" title={path}>{path}</div>
-            </div>
-          </div>
-          <div className="flex flex-none items-center gap-4">
-            <div className="flex items-center gap-3 text-sm font-mono">
+        {/* Header. On a phone the close control floats top-right so a long name wraps beneath it at full width, the path
+            takes the full width under the name and the status and counts follow on their own row; from sm up a grid
+            puts them back beside the name and path. */}
+        <div data-testid="diff-header" className="flow-root flex-none px-4 py-3 border-b border-gray-200 bg-gray-50 sm:grid sm:grid-cols-[auto_minmax(0,max-content)_auto_minmax(0,1fr)_auto_auto] sm:items-center sm:gap-x-3 sm:[grid-template-areas:'icon_name_status_._counts_close'_'icon_path_path_path_counts_close']">
+          <button
+            ref={closeRef}
+            type="button"
+            aria-label="Close diff view"
+            onClick={onClose}
+            className="float-right -mt-2.5 -mr-2 ml-2 sm:float-none sm:m-0 sm:ml-1 sm:[grid-area:close] min-h-11 min-w-11 inline-flex items-center justify-center p-1.5 rounded hover:bg-gray-200 transition-colors"
+            title="Close diff view"
+          >
+            <X className="h-5 w-5 text-gray-600" />
+          </button>
+          <FileCode aria-hidden="true" className="hidden sm:block h-5 w-5 text-gray-600 sm:[grid-area:icon]" />
+          <div id={titleId} data-testid="diff-file-name" className="sm:[grid-area:name] font-medium text-gray-900 [overflow-wrap:anywhere]">{fileName}</div>
+          <div data-testid="diff-file-path" className="clear-right sm:clear-none mt-0.5 sm:mt-0 sm:[grid-area:path] text-xs text-gray-500 [overflow-wrap:anywhere]" title={path}>{path}</div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 sm:contents">
+            <span className="sm:[grid-area:status] sm:justify-self-start whitespace-nowrap">{getStatusLabel()}</span>
+            <div data-testid="diff-line-counts" className="sm:[grid-area:counts] sm:ml-1 flex items-center gap-3 text-sm font-mono">
               <span className="flex items-center text-green-600">
                 <Plus className="h-4 w-4 mr-0.5" />
                 {linesAdded}
@@ -95,16 +100,6 @@ const DiffViewer: React.FC<DiffViewerProps> = ({ file, onClose }) => {
                 {linesRemoved}
               </span>
             </div>
-            <button
-              ref={closeRef}
-              type="button"
-              aria-label="Close diff view"
-              onClick={onClose}
-              className="min-h-11 min-w-11 inline-flex items-center justify-center p-1.5 rounded hover:bg-gray-200 transition-colors"
-              title="Close diff view"
-            >
-              <X className="h-5 w-5 text-gray-600" />
-            </button>
           </div>
         </div>
 
