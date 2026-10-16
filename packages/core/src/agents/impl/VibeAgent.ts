@@ -5,6 +5,7 @@ import { buildAgentGitCredentialArgs, buildAgentGitMountArgs, prepareAgentGitAcc
 import logger from '../../utils/logger.js';
 import { Agent, AgentConfig, AgentTaskOptions, AgentExecutionResult, AnalysisResult, AnalyzeOptions } from '../types.js';
 import { executeDockerCommand } from '../../claude/docker/dockerExecutor.js';
+import { agentDockerImageExists } from '../../claude/docker/dockerImagePresence.js';
 import { buildAgentContainerResourceArgs, wrapDockerRunArgsWithRepoSetup } from '../../claude/docker/repoSetupWrapper.js';
 import { verifyWorktreeStructure, verifyWorktreePostExecution, setWorktreeOwnership, UsageLimitError } from '../../claude/claudeHelpers.js';
 import { resolveConfigPath, loadSettings, AgentConfigPathUnavailableError } from '../../config/configManager.js';
@@ -297,8 +298,7 @@ export class VibeAgent implements Agent {
     async healthCheck(): Promise<boolean> {
         logger.debug({ agentAlias: this.config.alias, dockerImage: this.config.dockerImage }, 'Running health check for Vibe agent...');
         try {
-            const result = await executeDockerCommand('docker', ['images', '-q', this.config.dockerImage], { timeout: 10000 });
-            const imageExists = !!result.stdout.trim();
+            const imageExists = await agentDockerImageExists(this.config.dockerImage, 10000);
             if (!imageExists) {
                 logger.info({ agentAlias: this.config.alias, dockerImage: this.config.dockerImage }, 'Health check failed: Docker image not found');
                 return false;

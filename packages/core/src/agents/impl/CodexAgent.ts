@@ -5,6 +5,7 @@ import { execSync } from 'child_process';
 import logger from '../../utils/logger.js';
 import { Agent, AgentConfig, AgentTaskOptions, AgentExecutionResult, AnalysisResult, AnalyzeOptions } from '../types.js';
 import { executeDockerCommand } from '../../claude/docker/dockerExecutor.js';
+import { agentDockerImageExists } from '../../claude/docker/dockerImagePresence.js';
 import { verifyWorktreeStructure, verifyWorktreePostExecution, setWorktreeOwnership, UsageLimitError } from '../../claude/claudeHelpers.js';
 import { buildCodexPrompt, parseCodexStreamOutput, storeCodexPromptInRedis } from '../../codex/codexHelpers.js';
 import {
@@ -395,8 +396,7 @@ export class CodexAgent implements Agent {
         try {
             const configPath = resolveCodexConfigPath(this.config.configPath);
             assertCodexConfigPathAvailable(configPath);
-            const result = await executeDockerCommand('docker', ['images', '-q', dockerImage], { timeout: 10000 });
-            const imageExists = !!result.stdout.trim();
+            const imageExists = await agentDockerImageExists(dockerImage, 10000);
             logger.info({ agentAlias, dockerImage, imageExists }, imageExists ? 'Health check passed' : 'Health check failed: Docker image not found');
             return imageExists;
         } catch (error) {

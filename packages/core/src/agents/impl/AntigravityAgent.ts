@@ -5,6 +5,7 @@ import logger from '../../utils/logger.js';
 import { type ModelReasoningLevel } from '@propr/shared';
 import { Agent, AgentConfig, AgentTaskOptions, AgentExecutionResult, AnalysisResult, AnalyzeOptions, type TokenUsage } from '../types.js';
 import { executeDockerCommand } from '../../claude/docker/dockerExecutor.js';
+import { agentDockerImageExists } from '../../claude/docker/dockerImagePresence.js';
 import { wrapDockerRunArgsWithRepoSetup } from '../../claude/docker/repoSetupWrapper.js';
 import { verifyWorktreeStructure, verifyWorktreePostExecution, setWorktreeOwnership, UsageLimitError } from '../../claude/claudeHelpers.js';
 import { resolveConfigPath, loadModelReasoningLevel, resolveAgentModelReasoningLevel } from '../../config/configManager.js';
@@ -422,8 +423,7 @@ export class AntigravityAgent implements Agent {
     async healthCheck(): Promise<boolean> {
         logger.debug({ agentAlias: this.config.alias, dockerImage: this.config.dockerImage }, 'Running health check for Antigravity agent...');
         try {
-            const result = await executeDockerCommand('docker', ['images', '-q', this.config.dockerImage], { timeout: 10000 });
-            const imageExists = !!result.stdout.trim();
+            const imageExists = await agentDockerImageExists(this.config.dockerImage, 10000);
             logger.info({ agentAlias: this.config.alias, dockerImage: this.config.dockerImage, imageExists }, imageExists ? 'Health check passed' : 'Health check failed: Docker image not found');
             return imageExists;
         } catch (error) {

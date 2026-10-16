@@ -6,6 +6,7 @@ import { execSync } from 'child_process';
 import logger from '../../utils/logger.js';
 import { Agent, AgentConfig, AgentTaskOptions, AgentExecutionResult, AnalysisResult, AnalyzeOptions } from '../types.js';
 import { executeDockerCommand } from '../../claude/docker/dockerExecutor.js';
+import { agentDockerImageExists } from '../../claude/docker/dockerImagePresence.js';
 import { verifyWorktreeStructure, verifyWorktreePostExecution, setWorktreeOwnership, UsageLimitError } from '../../claude/claudeHelpers.js';
 import { resolveConfigPath } from '../../config/configManager.js';
 import { persistLlmLog, createLlmLogFromAnalysis, createLlmLogFromAgentExecution, buildTaskWorkRef, buildAnalysisWorkRef, formatUsageMetrics, resolveTaskLogAttribution } from '../../utils/llmLogger.js';
@@ -196,8 +197,7 @@ export class OpenCodeAgent implements Agent {
 
     async healthCheck(): Promise<boolean> {
         try {
-            const result = await executeDockerCommand('docker', ['images', '-q', this.config.dockerImage], { timeout: 10000 });
-            return !!result.stdout.trim();
+            return await agentDockerImageExists(this.config.dockerImage, 10000);
         } catch (error) {
             logger.error({ agentAlias: this.config.alias, error: (error as Error).message }, 'OpenCode health check failed');
             return false;
