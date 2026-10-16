@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { X, FileCode, Plus, Minus } from 'lucide-react';
 import { FileChange } from '../../api/fileChangesApi';
 import { SyntaxHighlighter, vscDarkPlus } from './syntaxHighlighter';
+import { inertOutside } from '../../utils/modalBackground';
 
 interface DiffViewerProps {
   file: FileChange;
@@ -21,9 +22,8 @@ const DiffViewer: React.FC<DiffViewerProps> = ({ file, onClose }) => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    const background = Array.from(document.body.children).filter(element => !element.contains(dialogRef.current)) as HTMLElement[];
-    const previousInert = background.map(element => element.inert);
-    background.forEach(element => { element.inert = true; });
+    // Desktop window controls stay usable; the rest of the app is inert.
+    const restoreBackground = dialogRef.current ? inertOutside(dialogRef.current) : undefined;
     closeRef.current?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -44,7 +44,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({ file, onClose }) => {
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
       document.body.style.overflow = previousOverflow;
-      background.forEach((element, index) => { element.inert = previousInert[index]; });
+      restoreBackground?.();
       if (previousFocus?.isConnected) previousFocus.focus();
     };
   }, []);
@@ -67,7 +67,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({ file, onClose }) => {
   };
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 p-3 sm:p-4"
+    <div className="app-modal-layer fixed inset-0 z-50 flex items-center justify-center bg-black/20 p-3 sm:p-4"
       onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId}
         className="bg-white rounded-lg shadow-2xl border border-gray-200 h-full max-h-[calc(100dvh-1.5rem)] sm:max-h-[calc(100dvh-2rem)] w-full max-w-6xl min-w-0 flex flex-col overflow-hidden">
