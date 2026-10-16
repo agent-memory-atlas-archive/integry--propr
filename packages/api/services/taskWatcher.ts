@@ -13,6 +13,9 @@ import { selectLiveEvents } from './liveEventSelection.js';
 import { projectLiveOutputRead, readLiveOutput, type LiveOutputProjector, type LiveOutputRead, type LiveOutputRedis } from './liveOutputStream.js';
 import { resolveConfigPath } from '@propr/core';
 import { findAgentConfigForTask, findExecutionStartTimestampForTask, findLatestExecutionStartForTask } from './taskWatcherLookup.js';
+import { completedExecutionDetails } from '../routes/liveDetailsCanonical.js';
+import { isLiveTask } from '../routes/liveDetailsTaskState.js';
+import { findSessionId } from '../routes/liveDetailsRoutes.js';
 
 const LIVE_EXECUTION_STATES = new Set(['claude_execution', 'codex_execution', 'gemini_execution', 'opencode_execution']);
 
@@ -44,6 +47,8 @@ export interface TaskWatcherInfo {
   /** Last broadcast buffered message and snapshot, so unchanged polls send nothing. */
   lastPendingSignature?: string;
   lastSnapshotSignature?: string;
+  /** Set once the finished task's persisted execution details were found; cleared while the task is live. */
+  persistedDetailsAvailable?: boolean;
 }
 
 /** Dependencies for task watching */
@@ -491,6 +496,8 @@ export class TaskWatcherManager {
     try {
       const update = await this.readRedisLiveEvents(taskId, watcherInfo, isInitial);
       if (!update || this.taskWatchers.get(taskId) !== watcherInfo) return;
+      // HTTP serves a finished task's persisted details; its live log must not replace them.
+      if (await this.servesPersistedDetails(taskId, watcherInfo) || this.taskWatchers.get(taskId) !== watcherInfo) return;
       const { events, omittedEventCount, historyTruncated } = update;
       const snapshot = update.projector.snapshot();
       const liveOutputPosition = update.projector.position();
@@ -514,6 +521,29 @@ export class TaskWatcherManager {
     } catch (error) {
       console.error(`[TaskWatcher] Error sending Redis live update for task ${taskId}:`, error);
     }
+  }
+
+  /**
+   * Whether live-details reads of this finished task serve its persisted
+   * execution details (see completedExecutionDetails). The task's live log may
+   * then hold a coarser or different execution, so broadcasting it would
+   * replace the complete history clients read. Rechecked whenever the task is
+   * live again, since a follow-up starts a new execution.
+   */
+  private async servesPersistedDetails(taskId: string, watcherInfo: TaskWatcherInfo): Promise<boolean> {
+    if (!this.deps) return false;
+    const { redisClient, db } = this.deps;
+    const normalizedTaskId = this.normalizeTaskId(taskId);
+    if (await isLiveTask(redisClient, db, normalizedTaskId)) {
+      watcherInfo.persistedDetailsAvailable = undefined;
+      return false;
+    }
+    if (watcherInfo.persistedDetailsAvailable) return true;
+    // Resolved as live-details reads resolve it, so both serve the same execution.
+    // Only a positive answer is kept: a failed read must not disable this for good.
+    const sessionId = await findSessionId(redisClient, db, normalizedTaskId).catch(() => null);
+    watcherInfo.persistedDetailsAvailable = Boolean(sessionId && await completedExecutionDetails(redisClient, db, normalizedTaskId, sessionId));
+    return watcherInfo.persistedDetailsAvailable;
   }
 
   /**
