@@ -102,7 +102,7 @@ const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelec
   return (
     <div data-testid="run-timeline-scroll" className="pr-1">
       <ol aria-label="Runs" className="relative m-0 list-none p-0" data-testid="run-timeline">
-        {/* The trunk paints above the rows, so an open run's tinted row and its steps never cut it. */}
+        {/* The trunk paints above the rows, so an open run's tinted row and its steps never cut it; the body's isolation keeps it under the heading. */}
         <span aria-hidden="true" data-testid="run-timeline-trunk" className="pointer-events-none absolute bottom-3 left-[7px] top-3 z-[1] w-0.5 bg-slate-300" />
         {runs.map(run => {
           const selected = run.task.id === selectedTaskId;
