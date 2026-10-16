@@ -171,7 +171,7 @@ test('390px completed PR: inspect the review, then open and close an added file\
   await expect(dialog).toBeVisible();
   await expect(close).toBeFocused();
   await expect(dialog.getByText('NEW', { exact: true })).toBeVisible();
-  // The name truncates beside its status, so the path wraps in full to say which file this is.
+  // The name wraps in full beside and then beneath the close control, and the path wraps in full under it.
   const path = dialog.getByTestId('diff-file-path');
   await expect(path).toHaveText(addedPath);
   expect(await path.evaluate(element => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().height > 20)).toBe(true);
@@ -191,7 +191,17 @@ test('390px completed PR: inspect the review, then open and close an added file\
     // The title, its status and the counts share the header without covering each other or the close control.
     const heading = dialog.getByText(addedName, { exact: true });
     await expect(heading).toBeInViewport({ ratio: 1 });
-    await expectPhoneLayout(page, [heading, dialog.getByText('NEW', { exact: true }), close, diff]);
+    await expectPhoneLayout(page, [heading, diff]);
+    await expectPhoneLayout(page, [dialog.getByText('NEW', { exact: true }), path, close, diff]);
+    // The name's box runs under the floated close control, so its rendered lines are what must stay clear of it.
+    const closeBox = (await close.boundingBox())!;
+    for (const line of await heading.evaluate(element => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      return Array.from(range.getClientRects(), ({ x, y, width, height }) => ({ x, y, width, height }));
+    })) {
+      expect(line.x + line.width <= closeBox.x || line.y + line.height <= closeBox.y || line.y >= closeBox.y + closeBox.height).toBe(true);
+    }
     expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   };
   await dialogLayout();
