@@ -314,11 +314,27 @@ test('retired in-guest reset protocol is not registered or reachable; the data p
   });
   assert.equal(refused.status, 403);
   assert.deepEqual(JSON.parse(refused.body.toString('utf8')), { error: 'fleet_data_unavailable' });
-  // Reset-specific modules and contracts are gone; only the data plane remains.
-  assert.deepEqual((await fs.readdir(path.resolve('packages/core/src/fleet'))).sort(), ['contract.ts', 'dataPlane.ts', 'files.ts']);
-  await assert.rejects(fs.lstat(path.resolve('docs/contracts/fleet-reset-v1')), { code: 'ENOENT' });
-  for (const file of ['packages/api/fleetDataListener.ts', 'packages/api/server.ts', 'packages/shared/src/index.ts', 'src/daemon.ts', 'src/worker.ts'] as const) {
-    assert.doesNotMatch(await fs.readFile(path.resolve(file), 'utf8'), /fleet[-_ ]?reset|resetfence|nativereset|resetproof|watchresetgeneration|assertconfiguredresetgeneration/i, file);
+  // Each retired reset-only module, contract, recovery entry point and generator is gone.
+  for (const retired of ['packages/core/src/fleet/resetFence.ts', 'packages/core/src/fleet/resetProof.ts', 'packages/core/src/fleet/nativeReset.ts',
+    'packages/core/src/fleet/resetAdapters.ts', 'packages/core/src/fleet/configuredReset.ts', 'packages/api/fleetResetRecovery.ts',
+    'packages/shared/src/fleetReset.ts', 'docs/contracts/fleet-reset-v1', 'scripts/generate-fleet-reset-fixtures.mjs', '.github/workflows/fleet-reset-mounts.yml']) {
+    await assert.rejects(fs.lstat(path.resolve(retired)), { code: 'ENOENT' }, retired);
+  }
+  // The retired contract is no longer exported from the shared index.
+  const shared = await import('@propr/shared') as Record<string, unknown>;
+  for (const name of ['FLEET_RESET_CONTRACT', 'FLEET_RESET_PATH', 'FLEET_RESET_LIMITS', 'fleetResetEnvelopeSchema', 'fleetResetReceiptSchema', 'FLEET_RESET_SCHEMA']) assert.equal(name in shared, false, name);
+  // Surviving files carry no retired reset symbol, import or registration. Exact
+  // names only: unrelated reset wording and the native --reset flags stay legal.
+  const retiredSymbols: Record<string, string[]> = {
+    'packages/api/fleetDataListener.ts': ['FLEET_RESET_PATH', 'FLEET_RESET_LIMITS', 'FleetResetProofPlane', 'NativeResetRuntime', 'listenFleetResetRecovery', '/reset/v1/invoke', 'fleet-reset-control', 'fleet_reset_unavailable'],
+    'packages/api/server.ts': ['configuredNativeReset', 'assertConfiguredResetGeneration', 'fleet-reset-control', 'fleetResetRecovery', 'instance_generation_unavailable'],
+    'packages/shared/src/index.ts': ['./fleetReset.js'],
+    'src/daemon.ts': ['watchResetGeneration', 'fleet/resetFence'],
+    'src/worker.ts': ['watchResetGeneration', 'fleet/resetFence'],
+  };
+  for (const [file, symbols] of Object.entries(retiredSymbols)) {
+    const contents = await fs.readFile(path.resolve(file), 'utf8');
+    for (const symbol of symbols) assert.ok(!contents.includes(symbol), `${file} still references ${symbol}`);
   }
   // Ordinary signed data-plane work still succeeds on the same private listener.
   assert.equal((await f.http(f.sign({ action: 'repositories.list' }))).status, 200);
@@ -765,8 +781,11 @@ test('configured startup rejects a live overlapping listener and succeeds after 
   assert.equal(await configured.result, 'listener');
   assert.deepEqual(configured.calls, ['listener']);
   const demo = run(true); assert.equal(await demo.result, undefined); assert.deepEqual(demo.calls, []);
-  // The retired in-guest reset protocol stays out of production startup entirely.
-  assert.doesNotMatch(source, /reset/i);
+  // The retired in-guest reset protocol stays out of production startup: no
+  // native-reset wiring, generation-fence middleware or recovery registration.
+  for (const symbol of ['configuredNativeReset', 'assertConfiguredResetGeneration', 'watchResetGeneration', 'fleet-reset-control', 'fleetResetRecovery', 'fleet/resetFence', 'fleet/configuredReset']) {
+    assert.ok(!source.includes(symbol), `server.ts still references ${symbol}`);
+  }
   const setup = source.indexOf('    setupRoutes();');
   const gate = source.indexOf('try { await fleetDataListener; }', setup);
   assert.ok(gate > setup && gate < source.indexOf('httpServer.listen(PORT'));

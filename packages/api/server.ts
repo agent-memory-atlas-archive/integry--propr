@@ -186,7 +186,7 @@ const handleCommentEditedWrapper = (payload: CommentPayload, eventType: CommentE
 
 export const app = express();
 app.use(refusePublicFleetData);
-const PORT =Number(process.env.DASHBOARD_API_PORT || 4000);
+const PORT = Number(process.env.DASHBOARD_API_PORT || 4000);
 const HOST = resolveApiListenHost();
 
 configureApiProxyTrust(app);
