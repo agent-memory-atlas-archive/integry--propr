@@ -1,6 +1,3 @@
-import type { NativeResetRuntime } from '../core/src/fleet/nativeReset.js';
-import { FLEET_RESET_PATH, FLEET_RESET_LIMITS } from '@propr/shared';
-import { FleetResetProofPlane } from '../core/src/fleet/resetProof.js';
 import type { RequestHandler } from 'express';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -86,11 +83,9 @@ async function bindUnix(socket: string): Promise<{ server: UnixServer; identity:
 
 /** Explicit refusal on the customer listener, also used by tunnel ingress. */
 export const refusePublicFleetData: RequestHandler = (req, res, next) => {
-  if (req.path !== '/v1/invoke' && req.path !== FLEET_RESET_PATH) { next(); return; }
-  res.set('Cache-Control', 'no-store').status(404).json({ error: req.path === FLEET_RESET_PATH ? 'fleet_reset_unavailable' : 'fleet_data_unavailable' });
+  if (req.path !== '/v1/invoke') { next(); return; }
+  res.set('Cache-Control', 'no-store').status(404).json({ error: 'fleet_data_unavailable' });
 };
-
-const refusalCode = (url: string | undefined) => url === FLEET_RESET_PATH ? 'fleet_reset_unavailable' : 'fleet_data_unavailable';
 
 async function readRequestBytes(req: import('node:http').IncomingMessage): Promise<Buffer> {
   const parts: Buffer[] = []; let length = 0;
@@ -103,20 +98,12 @@ async function readRequestBytes(req: import('node:http').IncomingMessage): Promi
 }
 
 /** Separate Unix listener only. Never mount this handler on Express or the tunnel. */
-interface FleetListenerPlane {
-  files: FleetDataPlane['files'];
-  runtime(): Promise<{ runtimeGeneration: string }>;
-  invoke?: FleetDataPlane['invoke'];
-  stream?: FleetDataPlane['stream'];
-}
-export async function listenFleetData(plane: FleetListenerPlane, reset?: FleetResetProofPlane): Promise<FleetDataListener> {
+export async function listenFleetData(plane: Pick<FleetDataPlane, 'files' | 'runtime' | 'invoke' | 'stream'>): Promise<FleetDataListener> {
   const runtime = await plane.runtime();
   const socket = path.join(plane.files.root, `data-${runtime.runtimeGeneration}.sock`);
   await removeStaleSockets(plane);
   const active = new Set<Promise<void>>();
   let stopping = false;
-  const isSupportedPath = (url: string | undefined) =>
-    Boolean(plane.invoke && plane.stream && url === '/v1/invoke') || Boolean(reset && url === FLEET_RESET_PATH);
   const server = createServer((req, res) => {
     if (stopping) { res.destroy(); return; }
     const work = handle(req, res);
@@ -127,17 +114,13 @@ export async function listenFleetData(plane: FleetListenerPlane, reset?: FleetRe
     res.setHeader('Cache-Control', 'no-store');
     let timer: NodeJS.Timeout | undefined;
     try {
-      if (req.method !== 'POST' || !isSupportedPath(req.url) || req.headers['content-type'] !== 'application/json' || req.headers['content-encoding']) throw new Error();
+      if (req.method !== 'POST' || req.url !== '/v1/invoke' || req.headers['content-type'] !== 'application/json' || req.headers['content-encoding']) throw new Error();
       timer = setTimeout(() => req.destroy(), 5000);
       const bytes = await readRequestBytes(req);
       clearTimeout(timer);
       const raw = bytes.toString('utf8');
-      if (req.url === FLEET_RESET_PATH) {
-        const body = JSON.stringify(await reset!.invoke(raw));
-        if (Buffer.byteLength(body) > FLEET_RESET_LIMITS.responseBytes) throw new Error();
-        res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(body);
-      } else if (parseEnvelope(raw).request.action === 'artifact.stream') {
-        await plane.stream!(raw, async (download, authorize) => {
+      if (parseEnvelope(raw).request.action === 'artifact.stream') {
+        await plane.stream(raw, async (download, authorize) => {
           await authorize();
           const size = download.status.sizeBytes!;
           res.writeHead(200, { 'Content-Type': 'application/vnd.sqlite3', 'Content-Length': size, 'X-Content-Type-Options': 'nosniff' });
@@ -180,14 +163,14 @@ export async function listenFleetData(plane: FleetListenerPlane, reset?: FleetRe
           if (sent !== size) throw new Error();
         });
       } else {
-        const result = await plane.invoke!(raw);
+        const result = await plane.invoke(raw);
         const body = JSON.stringify(result);
         if (Buffer.byteLength(body) > 32768) throw new Error();
         res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(body);
       }
     } catch {
       if (res.headersSent) res.destroy();
-      else { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: refusalCode(req.url) })); }
+      else { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'fleet_data_unavailable' })); }
     } finally { clearTimeout(timer); }
   };
   server.requestTimeout = 10_000;
@@ -208,7 +191,7 @@ export async function listenFleetData(plane: FleetListenerPlane, reset?: FleetRe
   server.emit('listening');
   let shutdown: Promise<void> | undefined;
   const close = () => shutdown ??= (async () => {
-    stopping = true; reset?.shutdown();
+    stopping = true;
     // Unlink only our captured inode in the unchanged private management root.
     // The transferred descriptor has no libuv bind pathname to auto-unlink.
     let cleanupError: unknown;
@@ -231,41 +214,11 @@ export async function listenFleetData(plane: FleetListenerPlane, reset?: FleetRe
 }
 
 /** Provisioning is Fleet's job. Missing authority does not create or enable controls. */
-export async function startConfiguredFleetData(storage: InstanceStorageService, authorizeActor: FleetActorAuthorization, nativeReset?: NativeResetRuntime): Promise<FleetDataListener | undefined> {
-  try {
-    const listener = await openConfiguredFleetData(storage, authorizeActor, nativeReset);
-    if (!listener) { nativeReset?.close(); return; }
-    return { address: listener.address, shutdown: async () => {
-      try { await listener.shutdown(); } finally { nativeReset?.close(); }
-    } };
-  } catch (error) { nativeReset?.close(); throw error; }
-}
-
-async function openConfiguredFleetData(storage: InstanceStorageService, authorizeActor: FleetActorAuthorization, nativeReset?: NativeResetRuntime): Promise<FleetDataListener | undefined> {
+export async function startConfiguredFleetData(storage: InstanceStorageService, authorizeActor: FleetActorAuthorization): Promise<FleetDataListener | undefined> {
   const root = path.join(path.dirname(storageControlRoot()), 'fleet-data-control');
   try { await fs.lstat(path.join(root, 'authority.json')); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
   const plane = new FleetDataPlane(storage, root, undefined, authorizeActor);
   await plane.initialize();
-  // Reset uses separately provisioned authority and a dedicated secret. It is
-  // absent by default; the export secret cannot authorize reset.
-  const resetRoot = path.join(path.dirname(root), 'fleet-reset-control');
-  try { await fs.lstat(path.join(resetRoot, 'authority.json')); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    return listenFleetData(plane);
-  }
-  const reset = new FleetResetProofPlane(resetRoot, undefined, undefined, nativeReset);
-  try { await reset.initialize(); }
-  catch { throw new Error('Configured Fleet reset authority unavailable'); }
-  return listenFleetData(plane, reset);
-}
-
-/** Restart entry point that does not open customer SQLite, queues, sessions or
- * on-boot tasks. It can observe an interrupted reset even when Core admission is
- * permanently fenced. Fleet chooses when to replace the application process. */
-export async function listenFleetResetRecovery(root: string, native: NativeResetRuntime): Promise<FleetDataListener> {
-  const reset = new FleetResetProofPlane(root, undefined, undefined, native, true);
-  await reset.initialize();
-  const authority = JSON.parse(await reset.files.read('authority.json'));
-  return listenFleetData({ files: reset.files, runtime: async () => ({ runtimeGeneration: authority.binding.predecessor.runtimeId }) }, reset);
+  return listenFleetData(plane);
 }
