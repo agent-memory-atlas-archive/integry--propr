@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { X, type LucideIcon } from 'lucide-react';
+import { inertOutside } from '../utils/modalBackground';
 
 interface CreationDialogProps {
   title: string;
@@ -24,9 +25,8 @@ export function CreationDialog({ title, icon: Icon, description, closeLabel, onC
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    const background = Array.from(document.body.children).filter(element => !element.contains(paneRef.current)) as HTMLElement[];
-    const previousInert = background.map(element => element.inert);
-    background.forEach(element => { element.inert = true; });
+    // Desktop window controls stay usable; the rest of the app is inert.
+    const restoreBackground = paneRef.current ? inertOutside(paneRef.current) : undefined;
     const frame = requestAnimationFrame(() => {
       (paneRef.current?.querySelector<HTMLElement>('textarea:not(:disabled)') ?? paneRef.current)?.focus();
     });
@@ -54,16 +54,17 @@ export function CreationDialog({ title, icon: Icon, description, closeLabel, onC
     return () => {
       cancelAnimationFrame(frame);
       document.body.style.overflow = previousOverflow;
-      background.forEach((element, index) => { element.inert = previousInert[index]; });
+      restoreBackground?.();
       document.removeEventListener('keydown', handleKeyDown);
       if (previousFocus?.isConnected) previousFocus.focus();
     };
   }, []);
 
-  return createPortal(<div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-3 sm:p-6"
+  // The pane fits the layer, which starts below the desktop titlebar.
+  return createPortal(<div className="app-modal-layer fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-3 sm:p-6"
     onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
     <div ref={paneRef} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={descriptionId} tabIndex={-1}
-      className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-2xl min-w-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl outline-none sm:max-h-[calc(100dvh-3rem)]">
+      className="flex max-h-full w-full max-w-2xl min-w-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl outline-none">
       <header className="flex flex-none items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 sm:px-7">
         <div><h2 id={titleId} className="flex items-center gap-2 text-lg font-semibold text-slate-900"><Icon aria-hidden="true" className="h-5 w-5 flex-none" />{title}</h2>
           <p id={descriptionId} className="mt-1 text-sm text-slate-500">{description}</p></div>

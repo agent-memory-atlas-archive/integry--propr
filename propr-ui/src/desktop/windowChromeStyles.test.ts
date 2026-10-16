@@ -95,4 +95,12 @@ describe('desktop window chrome styles', () => {
   it('keeps Linux window controls above application modal backdrops', () => {
     expect(zIndexFor('.desktop-window-controls')).toBeGreaterThan(zIndexFor('.desktop-modal-backdrop'));
   });
+
+  it('opens app dialogs below the titlebar and inside the restored Linux frame', () => {
+    expect(ruleFor('html:has(.desktop-app) .app-modal-layer')).toContain('top: max(var(--desktop-titlebar-height), env(titlebar-area-height, 0px))');
+    expect(ruleFor('html:has(.desktop-app.desktop-platform-linux)')).toContain('--desktop-titlebar-height: 44px');
+    const portaled = ruleFor('html[data-desktop-window="linux"] body > .app-modal-layer');
+    expect(portaled).toContain('bottom: var(--desktop-frame-inset)');
+    expect(portaled).toContain('left: var(--desktop-frame-inset)');
+  });
 });

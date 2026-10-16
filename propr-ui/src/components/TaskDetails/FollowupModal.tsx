@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useId, useRef } from 'react';
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import type { PostFollowupResponse } from '../../api/proprApi';
+import { inertOutside } from '../../utils/modalBackground';
 
 /** The server's receipt for a follow-up it did not confirm, kept verbatim for the dialog. */
 export type FollowupReceipt = Pick<PostFollowupResponse, 'state' | 'posted' | 'commentId' | 'jobId' | 'message'>;
@@ -123,6 +124,7 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const submittingRef = useRef(false);
   const feedbackRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const descriptionId = useId();
   const feedbackTitleId = useId();
@@ -147,6 +149,12 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose, submitting]);
+
+  // The task workspace behind the dialog is inert; desktop window controls stay usable.
+  useEffect(() => {
+    if (!isOpen || !dialogRef.current) return;
+    return inertOutside(dialogRef.current);
+  }, [isOpen]);
 
   // A new result takes focus, so it is both seen and announced wherever the user was.
   useEffect(() => {
@@ -191,8 +199,9 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
   // very short viewport (a zoomed window or a landscape phone) the whole
   // dialog scrolls instead, keeping each part reachable.
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4">
+    <div className="app-modal-layer fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4">
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}

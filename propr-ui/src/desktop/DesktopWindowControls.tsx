@@ -65,7 +65,7 @@ const ApplicationMenuButton: React.FC<{ show(request: DesktopApplicationMenuRequ
 export const DesktopWindowControls: React.FC<DesktopWindowControlsProps> = ({ actions }) => {
   if (!actions?.minimize || !actions.toggleMaximize || !actions.closeWindow) return null;
   return (
-    <div className="desktop-window-controls" role="group" aria-label="Window controls">
+    <div className="desktop-window-controls" role="group" aria-label="Window controls" data-window-chrome>
       {actions.showApplicationMenu && <ApplicationMenuButton show={actions.showApplicationMenu} />}
       <button type="button" onClick={() => invoke(actions.minimize)} aria-label="Minimize window">
         <Minus aria-hidden="true" />

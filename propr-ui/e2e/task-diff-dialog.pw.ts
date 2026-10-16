@@ -35,7 +35,10 @@ for (const width of [390, 880, 1390, 1920]) {
     await close.click();
     await expect(dialog).toHaveCount(0);
     await file.click();
+    // The desktop titlebar belongs to the window: a click there does not dismiss the dialog; the backdrop below does.
     await page.mouse.click(2, 2);
+    await expect(dialog).toBeVisible();
+    await page.mouse.click(2, 300);
     await expect(dialog).toHaveCount(0);
     expect(await page.locator('#root').evaluate(element => (element as HTMLElement).inert)).toBe(false);
   });

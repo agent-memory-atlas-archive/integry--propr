@@ -201,6 +201,25 @@ html[data-desktop-window="linux"] .desktop-sidebar-header {
 .desktop-window-controls .desktop-window-close:active { color: #fff; background: #b91c1c; }
 .desktop-window-controls svg { width: .9rem; height: .9rem; stroke-width: 1.75; }
 
+/* App dialogs (`.app-modal-layer`) open below the desktop titlebar, never over
+   it. The window controls, application menu and macOS traffic lights stay
+   visible and own every point of their row; the dialog, its close control and
+   its backdrop start beneath them. Ordinary web/mobile UI is unaffected. */
+html:has(.desktop-app.desktop-platform-linux) {
+  --desktop-titlebar-height: 44px;
+}
+
+html:has(.desktop-app) .app-modal-layer {
+  top: max(var(--desktop-titlebar-height), env(titlebar-area-height, 0px));
+}
+
+/* A dialog portaled to <body> sits outside the transformed #root, so it also
+   keeps inside the restored Linux frame's left and bottom allowance. */
+html[data-desktop-window="linux"] body > .app-modal-layer {
+  bottom: var(--desktop-frame-inset);
+  left: var(--desktop-frame-inset);
+}
+
 .desktop-app {
   height: 100vh;
   overflow: hidden;

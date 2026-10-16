@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Loader2 } from 'lucide-react';
+import { inertOutside } from '../../utils/modalBackground';
 
 interface AgentConfirmDialogProps {
   title: string;
@@ -22,8 +23,8 @@ const TONE_CLASSES = {
 
 /**
  * A centered confirmation for run actions; Escape cancels. While open it takes
- * focus, keeps Tab inside it and makes the page behind it inert, then hands
- * focus back to whatever opened it.
+ * focus, keeps Tab inside it and makes the page behind it inert (desktop
+ * window controls stay usable), then hands focus back to whatever opened it.
  */
 export const AgentConfirmDialog: React.FC<AgentConfirmDialogProps> = ({
   title, children, confirmLabel, cancelLabel = 'Cancel', tone = 'primary', busy = false, onConfirm, onCancel,
@@ -39,9 +40,8 @@ export const AgentConfirmDialog: React.FC<AgentConfirmDialogProps> = ({
 
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const background = Array.from(document.body.children).filter(element => !element.contains(dialogRef.current)) as HTMLElement[];
-    const previousInert = background.map(element => element.inert);
-    background.forEach(element => { element.inert = true; });
+    // Desktop window controls stay usable; the rest of the app is inert.
+    const restoreBackground = dialogRef.current ? inertOutside(dialogRef.current) : undefined;
     (dialogRef.current?.querySelector<HTMLElement>('button:not(:disabled)') ?? dialogRef.current)?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       const dialog = dialogRef.current;
@@ -63,14 +63,14 @@ export const AgentConfirmDialog: React.FC<AgentConfirmDialogProps> = ({
     document.addEventListener('keydown', onKeyDown);
     return () => {
       document.removeEventListener('keydown', onKeyDown);
-      background.forEach((element, index) => { element.inert = previousInert[index]; });
+      restoreBackground?.();
       if (previousFocus?.isConnected) previousFocus.focus();
     };
   }, []);
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="w-full max-w-md rounded-lg border border-slate-200 bg-white shadow-2xl outline-none">
+    <div className="app-modal-layer fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="max-h-full w-full max-w-md overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-2xl outline-none">
         <div className="px-5 py-4">
           <h2 id={titleId} className="text-base font-semibold text-slate-900">{title}</h2>
           <div className="mt-2 text-sm text-slate-600">{children}</div>
