@@ -38,9 +38,11 @@ const measureIdentity = (identity: Locator) => identity.evaluate(element => {
     .map(node => ({ label: node.getAttribute('aria-label') || node.textContent!.trim(), rect: box(node), action: !node.closest('[role="group"][aria-label="Git context"]') }));
   const overlaps = (a: DOMRect, b: DOMRect) => a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
   const header = element.closest<HTMLElement>('[data-testid="task-header-tiers"]')!;
+  const padding = getComputedStyle(header);
   return {
-    blockWidth: box(repository.parentElement!).width,
-    identityWidth: box(element).width,
+    linkWidth: box(repository).width,
+    // The header's content box: everything the repository may use.
+    availableWidth: header.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight),
     ownerAboveName: owner.bottom <= box(name).top + 0.5 && Math.abs(owner.left - box(name).left) < 1,
     nameLines: Math.round(box(name).height / parseFloat(getComputedStyle(name).lineHeight)),
     nameFits: name.scrollWidth <= name.clientWidth && box(name).right <= box(element).right + 0.5,
@@ -54,12 +56,15 @@ const measureIdentity = (identity: Locator) => identity.evaluate(element => {
   };
 });
 
-const expectIdentityLayout = async (identity: Locator, repository: Repository, maxNameLines: number) => {
+const expectIdentityLayout = async (identity: Locator, repository: Repository, maxNameLines: number, wraps = false) => {
   const link = identity.getByRole('link', { name: `${repository.repoOwner}/${repository.repoName}`, exact: true });
   await expect(link).toHaveAttribute('href', `https://github.com/${repository.repoOwner}/${repository.repoName}`);
   await expect(link).toHaveText(`${repository.repoOwner}/${repository.repoName}`);
   const layout = await measureIdentity(identity);
-  expect(layout.blockWidth).toBeCloseTo(layout.identityWidth, 0);
+  expect(layout.linkWidth).toBeLessThanOrEqual(layout.availableWidth + 0.5);
+  if (wraps) expect(layout.nameLines).toBeGreaterThan(1);
+  // A name wraps only once it has used the header's whole width.
+  if (layout.nameLines > 1) expect(layout.linkWidth).toBeCloseTo(layout.availableWidth, 0);
   expect(layout.ownerAboveName).toBe(true);
   expect(layout.nameLines).toBeLessThanOrEqual(maxNameLines);
   expect(layout.nameFits).toBe(true);
@@ -98,7 +103,7 @@ for (const [kind, repository] of Object.entries(repositories)) {
     for (let step = 0; step < 6; step++) await page.keyboard.press('ArrowRight');
     const identity = page.getByTestId('task-split-details').getByTestId('task-header-identity');
     await expect.poll(() => identity.evaluate(element => element.getBoundingClientRect().width)).toBeLessThan(400);
-    await expectIdentityLayout(identity, repository, kind === 'longest' ? 4 : 1);
+    await expectIdentityLayout(identity, repository, kind === 'longest' ? 4 : 1, kind === 'longest');
     if (kind !== 'short') await capture(page, `task-repository-docked-narrow-${kind}`);
   });
 }
@@ -120,7 +125,7 @@ for (const scale of [1.5, 2]) {
     await openTask(page, repositories.longest, '/tasks');
     await page.addStyleTag({ content: `html { font-size: ${scale * 100}% !important; }` });
     const identity = page.getByTestId('task-split-details').getByTestId('task-header-identity');
-    await expectIdentityLayout(identity, repositories.longest, 8);
+    await expectIdentityLayout(identity, repositories.longest, 8, true);
     if (scale === 2) await capture(page, 'task-repository-docked-text-200');
   });
 }
@@ -137,7 +142,7 @@ for (const width of [320, 390]) {
         const box = (node: Element) => node.getBoundingClientRect();
         const owner = box(element.querySelector('[data-testid="task-repository-owner"]')!);
         const name = element.querySelector<HTMLElement>('[data-testid="task-repository-name"]')!;
-        const status = box(element.closest('header')!.querySelector('h2')!.parentElement!.firstElementChild!);
+        const status = box(element.closest('header')!.querySelector('[data-testid="task-header-status"]')!);
         return {
           ownerAboveName: owner.bottom <= box(name).top + 0.5,
           nameLines: Math.round(box(name).height / parseFloat(getComputedStyle(name).lineHeight)),

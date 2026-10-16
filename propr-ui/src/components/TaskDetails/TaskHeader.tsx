@@ -143,7 +143,7 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({ taskInfo, currentStatus }) => {
       {/* The repository leads, owner above name, as in the desktop header. */}
       {taskInfo && <RepoIdentity taskInfo={taskInfo} />}
       {/* Status badge - inline pill */}
-      <div className="flex items-center gap-2">
+      <div data-testid="task-header-status" className="flex items-center gap-2">
         <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${statusInfo.bgColor} ${statusInfo.color}`}>
           {statusInfo.icon}
           {statusInfo.label}
