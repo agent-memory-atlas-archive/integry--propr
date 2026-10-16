@@ -47,8 +47,6 @@ export interface TaskWatcherInfo {
   /** Last broadcast buffered message and snapshot, so unchanged polls send nothing. */
   lastPendingSignature?: string;
   lastSnapshotSignature?: string;
-  /** Set once the finished task's persisted execution details were found; cleared while the task is live. */
-  persistedDetailsAvailable?: boolean;
 }
 
 /** Dependencies for task watching */
@@ -496,14 +494,14 @@ export class TaskWatcherManager {
     try {
       const update = await this.readRedisLiveEvents(taskId, watcherInfo, isInitial);
       if (!update || this.taskWatchers.get(taskId) !== watcherInfo) return;
-      // HTTP serves a finished task's persisted details; its live log must not replace them.
-      if (await this.servesPersistedDetails(taskId, watcherInfo) || this.taskWatchers.get(taskId) !== watcherInfo) return;
       const { events, omittedEventCount, historyTruncated } = update;
       const snapshot = update.projector.snapshot();
       const liveOutputPosition = update.projector.position();
       const snapshotSignature = JSON.stringify([snapshot.todos, snapshot.currentTask, snapshot.tokenUsage]);
       if (events.length === 0 && omittedEventCount === undefined && snapshotSignature === watcherInfo.lastSnapshotSignature) return;
       watcherInfo.lastSnapshotSignature = snapshotSignature;
+      // HTTP serves a finished task's persisted details; its live log must not replace them.
+      if (await this.servesPersistedDetails(taskId) || this.taskWatchers.get(taskId) !== watcherInfo) return;
 
       const payload: TaskLiveUpdatePayload = {
         eventType: TASK_LIVE_UPDATE,
@@ -527,23 +525,18 @@ export class TaskWatcherManager {
    * Whether live-details reads of this finished task serve its persisted
    * execution details (see completedExecutionDetails). The task's live log may
    * then hold a coarser or different execution, so broadcasting it would
-   * replace the complete history clients read. Rechecked whenever the task is
-   * live again, since a follow-up starts a new execution.
+   * replace the complete history clients read. Resolved for every update: a
+   * follow-up can start and finish another execution between polls, so an
+   * earlier answer says nothing about the execution this update belongs to.
    */
-  private async servesPersistedDetails(taskId: string, watcherInfo: TaskWatcherInfo): Promise<boolean> {
+  private async servesPersistedDetails(taskId: string): Promise<boolean> {
     if (!this.deps) return false;
     const { redisClient, db } = this.deps;
     const normalizedTaskId = this.normalizeTaskId(taskId);
-    if (await isLiveTask(redisClient, db, normalizedTaskId)) {
-      watcherInfo.persistedDetailsAvailable = undefined;
-      return false;
-    }
-    if (watcherInfo.persistedDetailsAvailable) return true;
+    if (await isLiveTask(redisClient, db, normalizedTaskId)) return false;
     // Resolved as live-details reads resolve it, so both serve the same execution.
-    // Only a positive answer is kept: a failed read must not disable this for good.
     const sessionId = await findSessionId(redisClient, db, normalizedTaskId).catch(() => null);
-    watcherInfo.persistedDetailsAvailable = Boolean(sessionId && await completedExecutionDetails(redisClient, db, normalizedTaskId, sessionId));
-    return watcherInfo.persistedDetailsAvailable;
+    return Boolean(sessionId && await completedExecutionDetails(redisClient, db, normalizedTaskId, sessionId));
   }
 
   /**

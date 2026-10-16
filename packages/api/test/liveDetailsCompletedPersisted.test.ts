@@ -315,3 +315,84 @@ test('the realtime watcher does not broadcast a completed task live log over its
     await database.destroy();
   }
 });
+
+const FOLLOWUP_SESSION = 'synthetic-session-attempt-3';
+const FOLLOWUP_LIVE_LOG = JSON.stringify({
+  type: 'assistant', message: { id: 'live-followup', content: [{ type: 'text', text: 'Follow-up finished without persisted records.' }] },
+});
+
+/** The completed task, then a follow-up execution in its own session that is live or finished. */
+function followupWorkerState(followupFinished: boolean): string {
+  const { history } = JSON.parse(workerState('completed')) as { history: unknown[] };
+  history.push({ state: 'claude_execution', timestamp: timestamp(50), metadata: { sessionId: FOLLOWUP_SESSION } });
+  if (followupFinished) history.push({ state: 'completed', timestamp: timestamp(60) });
+  return JSON.stringify({ history });
+}
+
+/** One watcher kept subscribed while the task's state and live log change between polls. */
+async function subscribedWatcher(database: Knex, state: { worker: string; output: string }) {
+  const emitted: Array<{ events: LiveEvent[] }> = [];
+  const io = {
+    to: () => ({ emit: (_event: string, payload: { events: LiveEvent[] }) => { emitted.push(payload); } }),
+    sockets: { adapter: { rooms: new Map() } },
+  } as unknown as SocketIOServer;
+  const redisClient = withLiveOutputReads({
+    get: async (key: string) => {
+      if (key === `worker:state:${TASK_ID}`) return state.worker;
+      if (key === `agent:output:${TASK_ID}`) return state.output;
+      return null;
+    },
+  }) as unknown as RedisClientType;
+  const manager = new TaskWatcherManager(io);
+  manager.setDeps({ redisClient, db: database });
+  await manager.startTaskWatcher(TASK_ID);
+  const poll = (manager as unknown as { sendRedisLiveUpdate: (id: string) => Promise<void> }).sendRedisLiveUpdate.bind(manager);
+  return { emitted, redisClient, poll: () => poll(TASK_ID), close: () => manager.closeAll() };
+}
+
+test('a follow-up finishing between polls without persisted details still broadcasts its live log', async () => {
+  const database = await createDatabase();
+  const state = { worker: workerState('completed'), output: THOUGHT_ONLY_LIVE_LOG };
+  const watcher = await subscribedWatcher(database, state);
+  try {
+    assert.equal(watcher.emitted.length, 0);
+    // The follow-up is live while the task's legacy log is still the earlier execution's.
+    state.worker = followupWorkerState(false);
+    await watcher.poll();
+    assert.equal(watcher.emitted.length, 0);
+    // It finishes and replaces the log before the next poll; it has no persisted details.
+    state.worker = followupWorkerState(true);
+    state.output = FOLLOWUP_LIVE_LOG;
+    await watcher.poll();
+    assert.equal(watcher.emitted.length, 1);
+    assert.deepEqual(watcher.emitted[0].events.map(event => event.content), ['Follow-up finished without persisted records.']);
+    // HTTP reads serve the same fallback.
+    const read = await readLiveDetails(watcher.redisClient, database);
+    assert.deepEqual(read.events.map(event => event.content), ['Follow-up finished without persisted records.']);
+  } finally {
+    await watcher.close();
+    await database.destroy();
+  }
+});
+
+test('a subscribed client of a task completing between polls gets its persisted details from the completion read', async () => {
+  const database = await createDatabase();
+  const state = { worker: workerState('claude_execution'), output: THOUGHT_ONLY_LIVE_LOG.split('\n')[0] };
+  const watcher = await subscribedWatcher(database, state);
+  try {
+    assert.equal(watcher.emitted.length, 1);
+    assert.deepEqual(watcher.emitted[0].events.map(event => event.content), [NARRATION[0]]);
+    // Final output and completion both land before the next poll.
+    state.output = THOUGHT_ONLY_LIVE_LOG;
+    state.worker = workerState('completed');
+    await watcher.poll();
+    assert.equal(watcher.emitted.length, 1);
+    // The client's read on completion replaces its live view with the canonical trace.
+    const read = await readLiveDetails(watcher.redisClient, database);
+    assert.equal(read.events.filter(event => event.type === 'tool_use').length, 4);
+    assert.ok(read.events.every(event => event.id.startsWith(`live:${TASK_ID}:database:${SESSION}:`)));
+  } finally {
+    await watcher.close();
+    await database.destroy();
+  }
+});
