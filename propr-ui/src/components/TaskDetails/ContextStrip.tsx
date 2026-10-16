@@ -62,20 +62,40 @@ const ContextGroup: React.FC<{ label: string; children: React.ReactNode }> = ({ 
   );
 };
 
-// Repository link component
-const RepoLink: React.FC<{ taskInfo: TaskInfo }> = ({ taskInfo }) => (
-  <>
+/** Lets a long repository name break after `-`, `_` or `.` before it breaks anywhere else. */
+const withNameBreaks = (name: string) =>
+  name.split(/(?<=[-_.])/).map((part, index) => <React.Fragment key={index}>{index > 0 && <wbr />}{part}</React.Fragment>);
+
+/**
+ * Where the task lives: its owner on one line, its repository's name on the
+ * next, rather than one `owner/name` string broken wherever it runs out of
+ * room. A name too long for its width still wraps inside it. A task without
+ * both (an automation report, say) has no repository to show or link to.
+ */
+export const RepoIdentity: React.FC<{ taskInfo: TaskInfo }> = ({ taskInfo }) => {
+  const { repoOwner, repoName } = taskInfo;
+  if (!repoOwner || !repoName) return null;
+  const repo = `${repoOwner}/${repoName}`;
+  return (
     <a
-      href={`https://github.com/${taskInfo.repoOwner}/${taskInfo.repoName}`}
+      href={`https://github.com/${repo}`}
       target="_blank"
       rel="noopener noreferrer"
-      className="inline-flex min-w-0 items-center gap-1 text-gray-700 hover:text-blue-600 transition-colors"
+      aria-label={repo}
+      title={repo}
+      data-testid="task-repository"
+      className="group flex w-fit min-w-0 max-w-full flex-col rounded text-gray-700 transition-colors hover:text-blue-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
     >
-      <GitHubIcon size={12} className="text-gray-500" />
-      <span className="font-medium break-all">{taskInfo.repoOwner}/{taskInfo.repoName}</span>
+      <span data-testid="task-repository-owner" className="flex min-w-0 items-center gap-1 text-xs leading-4 text-slate-500 group-hover:text-blue-600">
+        <GitHubIcon size={12} className="shrink-0" />
+        <span className="min-w-0 [overflow-wrap:anywhere]">{repoOwner}<span aria-hidden="true" className="text-slate-400">/</span></span>
+      </span>
+      <span data-testid="task-repository-name" className="min-w-0 text-sm font-semibold leading-5 text-gray-900 [overflow-wrap:anywhere] group-hover:text-blue-600">
+        {withNameBreaks(repoName)}
+      </span>
     </a>
-  </>
-);
+  );
+};
 
 // Issue/PR number chip component
 const IssuePRChip: React.FC<{ taskInfo: TaskInfo }> = ({ taskInfo }) => (
@@ -295,15 +315,17 @@ export const ConsumptionGroup: React.FC<Pick<ContextStripProps, 'tokenUsage' | '
   </ContextGroup>
 );
 
-/** Where the task lives: repository, pull request, issue, commit, then who it is assigned to. */
+/** Where the task lives: repository (unless shown on its own), pull request, issue, commit, then who it is assigned to. */
 const GitGroup: React.FC<{
   taskInfo: TaskInfo | null;
   prInfo?: { url?: string; number?: number };
   commitInfo?: { shortHash: string; url: string };
   assignment?: TaskAssignment;
-}> = ({ taskInfo, prInfo, commitInfo, assignment }) => (
+  /** Whether the repository leads the group; the desktop header gives it a block of its own instead. */
+  repository: boolean;
+}> = ({ taskInfo, prInfo, commitInfo, assignment, repository }) => (
   <ContextGroup label="Git context">
-    {taskInfo && <RepoLink taskInfo={taskInfo} />}
+    {repository && taskInfo && <RepoIdentity taskInfo={taskInfo} />}
     {prInfo?.url && <PRInfoChip prInfo={prInfo} />}
     {Boolean(taskInfo?.number) && <IssuePRChip taskInfo={taskInfo!} />}
     {taskInfo?.type === 'pr-comment' && Boolean(taskInfo.issueNumber) && <LinkedIssueChip taskInfo={taskInfo} />}
@@ -400,10 +422,11 @@ interface ContextStripProps {
   /** Mobile only: the collapsed header's one line, the pull request then the task's title, truncated. */
   mobileCompact?: boolean;
   /**
-   * One half of the strip: `git` is where the task lives (repo, PR, issue,
-   * commit), `telemetry` is how its run went (model, duration, consumption).
+   * One part of the strip: `repository` is the repository on its own,
+   * `git` is the rest of where the task lives (PR, issue, commit),
+   * `telemetry` is how its run went (model, duration, consumption).
    */
-  part?: 'git' | 'telemetry';
+  part?: 'repository' | 'git' | 'telemetry';
   /** Telemetry only: what leads the line, e.g. which run it describes. */
   lead?: React.ReactNode;
   /** Git only: the task's assignment; shown when it names the task it belongs to. */
@@ -426,13 +449,14 @@ const ContextStrip: React.FC<ContextStripProps> = ({
   assignment,
 }) => {
   if (mobileCompact) return <CompactTitleLine taskInfo={taskInfo} prInfo={prInfo} />;
+  if (part === 'repository') return taskInfo ? <RepoIdentity taskInfo={taskInfo} /> : null;
 
   const showGit = part !== 'telemetry';
   const showTelemetry = part !== 'git';
   return (
     <div className={`flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 text-sm text-gray-600${part === 'git' ? '' : ' flex-1'}`}>
       {showGit && (
-        <GitGroup taskInfo={taskInfo} prInfo={prInfo} commitInfo={commitInfo} assignment={assignment} />
+        <GitGroup taskInfo={taskInfo} prInfo={prInfo} commitInfo={commitInfo} assignment={assignment} repository={part !== 'git'} />
       )}
       {showTelemetry && (
         <TelemetryGroups
