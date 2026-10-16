@@ -55,3 +55,28 @@ describe('TaskHeader for an automation report', () => {
     expect(screen.getAllByTestId('task-status-badge')[0]).toHaveTextContent('Implementing');
   });
 });
+
+describe('TaskHeader repository identity', () => {
+  it('leads with the repository, owner above name, when both are known', () => {
+    render(<TaskHeader taskInfo={{ type: 'issue', number: 12, title: 'Fix it', repoOwner: 'integry', repoName: 'propr' } as TaskInfo} currentStatus="completed" />);
+    const link = screen.getByRole('link', { name: 'integry/propr' });
+    expect(link).toHaveAttribute('href', 'https://github.com/integry/propr');
+    expect(link).toHaveAttribute('title', 'integry/propr');
+    expect(screen.getByTestId('task-repository-owner')).toHaveTextContent('integry/');
+    expect(screen.getByTestId('task-repository-name')).toHaveTextContent(/^propr$/);
+  });
+
+  it.each([
+    ['an automation report', { type: 'agent-run', number: 0, taskKind: 'automation-report' }],
+    ['an owner only', { type: 'issue', number: 12, repoOwner: 'integry' }],
+    ['a name only', { type: 'issue', number: 12, repoName: 'propr' }],
+    ['empty owner and name', { type: 'issue', number: 12, repoOwner: '', repoName: '' }],
+  ])('shows no repository for %s, keeping status and title', (_, fields) => {
+    render(<TaskHeader taskInfo={{ ...fields, title: 'Agent: Desktop acceptance' } as TaskInfo} currentStatus="completed" />);
+    expect(screen.queryByTestId('task-repository')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    expect(document.body.innerHTML).not.toMatch(/undefined|github\.com/);
+    expect(screen.getByTestId('task-header-status')).toHaveTextContent('Completed');
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('Desktop acceptance');
+  });
+});

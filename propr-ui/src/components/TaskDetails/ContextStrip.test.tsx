@@ -1,6 +1,7 @@
 import { render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import ContextStrip, { ConsumptionGroup } from './ContextStrip';
+import type { TaskInfo } from './types';
 
 const props = {
   taskInfo: { repoOwner: 'integry', repoName: 'propr', type: 'issue', number: 2658 },
@@ -127,5 +128,27 @@ describe('Task details attempt lineage', () => {
   it('shows nothing for a task outside a lineage', () => {
     render(<ContextStrip {...props} taskInfo={{ ...props.taskInfo, attemptNumber: 1, replacesTaskId: null, replacedByTaskId: null }} />);
     expect(screen.queryByRole('group', { name: 'Attempt lineage' })).toBeNull();
+  });
+});
+
+describe('Task details repository identity', () => {
+  it('gives the repository its own part, owner above name', () => {
+    render(<ContextStrip {...props} part="repository" />);
+    expect(screen.getByRole('link', { name: 'integry/propr' })).toHaveAttribute('href', 'https://github.com/integry/propr');
+  });
+
+  it.each([
+    ['no repository', { type: 'agent-run', number: 0, taskKind: 'automation-report' }],
+    ['an owner only', { type: 'issue', number: 2658, repoOwner: 'integry' }],
+    ['a name only', { type: 'issue', number: 2658, repoName: 'propr' }],
+  ] as [string, TaskInfo][])('omits the repository for a task with %s', (_, taskInfo) => {
+    const { container, unmount } = render(<ContextStrip {...props} taskInfo={taskInfo} part="repository" />);
+    expect(container).toBeEmptyDOMElement();
+    unmount();
+    render(<ContextStrip {...props} taskInfo={taskInfo} />);
+    expect(screen.queryByTestId('task-repository')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /undefined/ })).not.toBeInTheDocument();
+    // The rest of the Git context stays.
+    expect(within(screen.getByRole('group', { name: 'Git context' })).getByRole('link', { name: /PR #2661/ })).toBeVisible();
   });
 });

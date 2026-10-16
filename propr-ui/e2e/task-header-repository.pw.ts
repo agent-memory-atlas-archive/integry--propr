@@ -7,7 +7,7 @@ const repositories = {
   // GitHub's longest owner (39) and repository (100) names.
   longest: { repoOwner: 'an-organisation-with-the-longest-handle', repoName: `a-repository-name-that-keeps-on-going-${'x'.repeat(62)}` },
 };
-type Repository = typeof repositories[keyof typeof repositories];
+type Repository = { repoOwner?: string; repoName?: string };
 
 const openTask = async (page: Page, repository: Repository, path: string) => {
   await fixture(page, 'linux');
@@ -160,6 +160,26 @@ for (const width of [320, 390]) {
       expect(layout.aboveStatus).toBe(true);
       expect(layout.overflow).toBe(false);
       if (kind === 'acceptance') await capture(page, `task-repository-mobile-${width}`);
+    });
+  }
+}
+
+// Automation reports carry no repository; partial metadata names none either.
+const missing: Record<string, Repository> = { 'repository-less': {}, 'owner-only': { repoOwner: 'integry' }, 'name-only': { repoName: 'propr' } };
+
+for (const [kind, repository] of Object.entries(missing)) {
+  for (const width of [390, 1280]) {
+    test(`a ${kind} task at ${width}px shows no repository link, keeping its status and title`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 820 });
+      await openTask(page, repository, `/tasks/${selectedRun}`);
+      const details = page.getByTestId('task-details');
+      await expect(details.getByRole('heading', { level: 2, name: 'Review the desktop acceptance task' }).filter({ visible: true })).toBeVisible();
+      await expect(details.locator('[data-testid="task-header-status"], [data-testid="task-status-badge"]').filter({ visible: true }).first()).toContainText('Completed');
+      // The identity link this header adds is omitted outright, not rendered as `undefined/undefined`.
+      await expect(page.getByTestId('task-repository')).toHaveCount(0);
+      await expect(page.locator('[aria-label*="undefined"]')).toHaveCount(0);
+      expect(await page.getByTestId('task-details').innerText()).not.toMatch(/undefined/);
+      if (kind === 'repository-less') await capture(page, `task-repository-none-${width}`);
     });
   }
 }

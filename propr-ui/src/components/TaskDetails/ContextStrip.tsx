@@ -69,10 +69,13 @@ const withNameBreaks = (name: string) =>
 /**
  * Where the task lives: its owner on one line, its repository's name on the
  * next, rather than one `owner/name` string broken wherever it runs out of
- * room. A name too long for its width still wraps inside it.
+ * room. A name too long for its width still wraps inside it. A task without
+ * both (an automation report, say) has no repository to show or link to.
  */
 export const RepoIdentity: React.FC<{ taskInfo: TaskInfo }> = ({ taskInfo }) => {
-  const repo = `${taskInfo.repoOwner}/${taskInfo.repoName}`;
+  const { repoOwner, repoName } = taskInfo;
+  if (!repoOwner || !repoName) return null;
+  const repo = `${repoOwner}/${repoName}`;
   return (
     <a
       href={`https://github.com/${repo}`}
@@ -85,10 +88,10 @@ export const RepoIdentity: React.FC<{ taskInfo: TaskInfo }> = ({ taskInfo }) => 
     >
       <span data-testid="task-repository-owner" className="flex min-w-0 items-center gap-1 text-xs leading-4 text-slate-500 group-hover:text-blue-600">
         <GitHubIcon size={12} className="shrink-0" />
-        <span className="min-w-0 [overflow-wrap:anywhere]">{taskInfo.repoOwner}<span aria-hidden="true" className="text-slate-400">/</span></span>
+        <span className="min-w-0 [overflow-wrap:anywhere]">{repoOwner}<span aria-hidden="true" className="text-slate-400">/</span></span>
       </span>
       <span data-testid="task-repository-name" className="min-w-0 text-sm font-semibold leading-5 text-gray-900 [overflow-wrap:anywhere] group-hover:text-blue-600">
-        {withNameBreaks(taskInfo.repoName ?? '')}
+        {withNameBreaks(repoName)}
       </span>
     </a>
   );
