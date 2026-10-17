@@ -10,7 +10,8 @@ export interface HistoryDerivedData {
 }
 
 export const getHistoryDerivedData = (history: HistoryItem[], taskInfo: TaskInfo | null): HistoryDerivedData => {
-  const historyItemWithPaths = history.find(item => item.promptPath || item.logsPath);
+  // History is oldest first; after an automatic retry the header opens the latest execution, while the timeline keeps each attempt's own.
+  const historyItemWithPaths = [...history].reverse().find(item => item.promptPath || item.logsPath);
   const currentStatus = history[history.length - 1]?.state?.toUpperCase() || '';
   const routedItem = [...history].reverse().find(item => item.metadata?.syntheticRouting?.virtualModel);
   const modelItem = [...history].reverse().find(item => item.metadata?.model);
