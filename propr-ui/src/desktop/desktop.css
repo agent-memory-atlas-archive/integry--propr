@@ -611,6 +611,11 @@ body:has(.desktop-platform-macos),
 .desktop-github-actions { display: flex; flex-wrap: wrap; gap: .45rem; margin: .75rem 0; }
 .desktop-github-actions button { font-size: .68rem; }
 .desktop-github-actions svg { width: .8rem; height: .8rem; }
+/* Touch and narrow (including zoomed) layouts get the app's 44px target; fine pointers keep the compact row. */
+@media (pointer: coarse), (max-width: 640px) {
+  .desktop-github-choice :is(.desktop-github-actions button, .desktop-primary-button) { min-height: 44px; }
+  .desktop-github-actions button { font-size: .76rem; }
+}
 .desktop-setup-hero-icon { width: 2.5rem; height: 2.5rem; margin-bottom: .8rem; color: #b46a2a; } .desktop-setup-error-icon { color: #b64334; }
 .desktop-setup-success { display: grid; place-items: center; width: 3.5rem; height: 3.5rem; margin-bottom: 1rem; border-radius: 1rem; color: white; background: #21956c; }
 
