@@ -87,9 +87,11 @@ test('a long repository name truncates instead of collapsing the result title', 
   const titleBox = (await row.getByText(title, { exact: true }).boundingBox())!;
   const meta = row.getByTestId('global-search-result-meta');
   const metaBox = (await meta.boundingBox())!;
-  // The title keeps most of the row and nothing spills past the list's right edge.
+  // The title keeps most of the row, the metadata sits on its own line below it in the same copy
+  // column, and nothing spills past the list's right edge.
   expect(titleBox.width).toBeGreaterThan(listBox.width * 0.45);
-  expect(metaBox.width).toBeLessThanOrEqual(listBox.width * 0.4 + 1);
+  expect(metaBox.y).toBeGreaterThanOrEqual(titleBox.y + titleBox.height - 1);
+  expect(Math.abs(metaBox.x - titleBox.x)).toBeLessThanOrEqual(1);
   expect(metaBox.x + metaBox.width).toBeLessThanOrEqual(listBox.x + listBox.width);
   expect(await list.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
   await expect(meta.getByTitle(repository)).toBeVisible();
