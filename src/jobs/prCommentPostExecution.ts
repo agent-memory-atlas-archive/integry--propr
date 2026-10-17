@@ -38,6 +38,9 @@ import {
     publishPullRequestCommentVisualPreviews,
 } from '../github/visualPreviewAttachments.js';
 import type { PullRequestPublication, PublicationSalvage } from './prPublication.js';
+import type { FollowupHandoffRecord } from './followupHandoffStore.js';
+import { normalCompletionHandoffMarkers } from './followupHandoffMarker.js';
+import { markExecutionHandoffCommitted, markExecutionHandoffCommentPublished, markExecutionHandoffPushed } from './prCommentHandoffIntegration.js';
 import { recordPushSalvageEvent } from './pushSalvageTimeline.js';
 import { savePublicationCheckpoint } from './prContinuation.js';
 import { buildWorkNotificationRecap, fullNotificationSummary } from './notificationRecap.js';
@@ -51,6 +54,8 @@ interface PostExecutionState {
     authorsText: string;
     unprocessedComments: UnprocessedComment[];
     startingWorkComment: { data: { id: number; html_url: string } } | null;
+    /** Durable publication handoff; advanced as commit, push and comment complete. */
+    followupHandoff?: FollowupHandoffRecord | null;
 }
 
 interface ReadyPostExecutionState extends PostExecutionState {
@@ -125,10 +130,14 @@ async function commitAndPush(
     const commitResult = await commitChanges(state.worktreeInfo.worktreePath, commitMessage, AI_COMMIT_AUTHOR, { issueNumber: context.pullRequestNumber, issueTitle: 'Follow-up changes' });
 
     if (commitResult) {
+        // Durable phase checkpoints around the push: restart recovery must know a
+        // clean, pushed worktree means completed publication, not missing work.
+        await markExecutionHandoffCommitted(state, commitResult.commitHash);
         const pushResult = await context.publication.push(state.worktreeInfo.worktreePath, { ...completionInputs, commitResult, changesSummary, commitMessage }, { salvage: context.salvage });
         if (pushResult.commitHash) {
             commitResult.commitHash = pushResult.commitHash;
         }
+        await markExecutionHandoffPushed(state, commitResult.commitHash);
     }
 
     return { commitResult, changesSummary, commitMessage };
@@ -228,7 +237,10 @@ async function publishCompletionComment(options: CompletionCommentPublicationOpt
         addressedFeedback,
         visualPreviewSection: hasVisualPreviewContent ? VISUAL_PREVIEW_SLOT : undefined
     }, state.claudeResult);
-    const prCommentTemplate = [context.publication.status, completionBody].filter(Boolean).join('\n\n');
+    // The handoff marker lets restart recovery recognize this completion if the
+    // worker dies before its durable checkpoint records the comment URL.
+    const prCommentTemplate = [normalCompletionHandoffMarkers(state.followupHandoff), context.publication.status, completionBody]
+        .filter(Boolean).join('\n\n');
     const prCommentBody = appendVisualPreviewSection(prCommentTemplate, visualPreviewSection);
 
     if (visualPreviewEvidence.assets.length === 0) {
@@ -353,6 +365,7 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
             unprocessedReviewComments,
             visualPreviewEvidence: preparedVisualPreview?.evidence
         });
+        await markExecutionHandoffCommentPublished(state, completionComment.data.html_url);
         correlatedLogger.info({ pullRequestNumber, commitHash: commitResult?.commitHash, commentUrl: completionComment.data.html_url, partial, terminationReason }, partial ? 'Published partial follow-up changes after interrupted execution' : 'Successfully applied follow-up changes');
 
         if (unprocessedReviewComments.length > 0) {

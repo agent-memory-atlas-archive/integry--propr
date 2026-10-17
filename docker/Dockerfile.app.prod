@@ -20,6 +20,8 @@ COPY packages/shared/package*.json ./packages/shared/
 COPY packages/local-setup/package*.json ./packages/local-setup/
 COPY packages/core/package*.json ./packages/core/
 COPY packages/api/package*.json ./packages/api/
+# Vendored braces tarball referenced by the root package.json overrides
+COPY vendor ./vendor
 
 # Install all deps (incl. dev) so we can compile TypeScript. Postinstall
 # scripts must run — better-sqlite3 rebuilds its native binding here.

@@ -55,6 +55,8 @@ import {
   createAutomationDefinitionRoutes,
   automationDefinitionAttachmentUpload,
   createVisualPreviewAuthRoutes,
+  createFollowupHandoffRoutes,
+  createDefaultFollowupHandoffDeps,
   createVoiceRoutes,
   createInstanceCatalogRoutes,
   createDesktopAuthRoutes,
@@ -97,6 +99,7 @@ import {
   configureApiProxyTrust,
   createApiRequestRateLimiter,
   createDiscoveryRequestRateLimiter,
+  createOperatorRequestRateLimiter,
   createWebhookRequestRateLimiter,
 } from './requestRateLimits.js';
 import { desktopAuthService } from './desktopAuthService.js';
@@ -423,6 +426,7 @@ export function setupRoutes(): void {
   });
   const voiceRoutes = createVoiceRoutes({ briefingService: voiceBriefingService });
   const adminRoutes = createAdminRoutes();
+  const followupHandoffRoutes = createFollowupHandoffRoutes(createDefaultFollowupHandoffDeps());
   const adminMcpRoutes = createAdminMcpRoutes({ database: db, redisClient });
   const visualPreviewAuthRoutes = createVisualPreviewAuthRoutes({
     managedStorage: createManagedPreviewStorageClient(() => redisClient.get(ROUTING_STATUS_REDIS_KEY)),
@@ -493,6 +497,8 @@ export function setupRoutes(): void {
       agentRuntimeRoutes,
       agentVersionRoutes,
       configRoutes,
+      followupHandoffRoutes,
+      operatorRateLimiter: createOperatorRequestRateLimiter(),
       visualPreviewAuthRoutes,
     }),
   ];

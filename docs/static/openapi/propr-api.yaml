@@ -29,8 +29,8 @@ info:
     name: Apache-2.0
     identifier: Apache-2.0
   x-route-coverage:
-    total: 299
-    documented: 64
+    total: 303
+    documented: 68
     undocumented: 235
 servers:
   - url: "{origin}"
@@ -142,6 +142,262 @@ paths:
           $ref: "#/components/responses/LegacyUnexpectedError"
       x-propr-auth: member
       x-undocumented: true
+      x-legacy-error: true
+  /api/admin/followup-handoffs:
+    get:
+      operationId: listFollowupHandoffs
+      summary: List durable follow-up publication handoffs awaiting recovery or an operator decision
+      description: |-
+        Each record names its recovery phase, predecessor/successor task lineage, retained worktree path and the next action. Responses are `Cache-Control: no-store`.
+
+        Requires the `instance.manage_runtime` instance permission.
+      tags:
+        - Administration
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Every recorded handoff, including operator-held ones.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FollowupHandoffList"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "429":
+          description: The operator recovery quota (`PROPR_OPERATOR_RATE_LIMIT_MAX` per `PROPR_OPERATOR_RATE_LIMIT_WINDOW_MS`, default 30 per minute) is exhausted; code `RATE_LIMIT_EXCEEDED`. Charged only after the admin guard passes, shared by every follow-up handoff route.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_runtime
+      x-legacy-error: true
+  /api/admin/followup-handoffs/{owner}/{repo}/{pr}:
+    get:
+      operationId: getFollowupHandoff
+      summary: Inspect one pull request's follow-up publication handoff
+      description: Requires the `instance.manage_runtime` instance permission.
+      tags:
+        - Administration
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          description: Repository owner (case-insensitive).
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          description: Repository name (case-insensitive).
+          schema:
+            type: string
+        - name: pr
+          in: path
+          required: true
+          description: Pull request number.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The handoff status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FollowupHandoffDetail"
+        "400":
+          description: The target is not a sane `owner/repo/pr` address.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          description: No handoff is recorded for the pull request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "429":
+          description: The operator recovery quota (`PROPR_OPERATOR_RATE_LIMIT_MAX` per `PROPR_OPERATOR_RATE_LIMIT_WINDOW_MS`, default 30 per minute) is exhausted; code `RATE_LIMIT_EXCEEDED`. Charged only after the admin guard passes, shared by every follow-up handoff route.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_runtime
+      x-legacy-error: true
+  /api/admin/followup-handoffs/{owner}/{repo}/{pr}/release:
+    post:
+      operationId: releaseFollowupHandoff
+      summary: Release the handoff's branch from its retained worktree and retire the record
+      description: |-
+        Detaches the retained worktree's HEAD (keeping every file) so the branch is usable again, then marks the record released. Refuses while the bound agent is live or unverifiable, while another writer holds the PR lease, or when unpublished work remains — pass `force: true` to release despite unpublished work. Releasing a `usage_limit_retry_unconfirmed` hold records that the usage-limit retry job exists and owns the request (settlement becomes `usage_limit_retry_scheduled`), so its comments are never suppressed as a cancellation; resume instead when no retry job exists. Worktree files are never deleted.
+
+        Requires the `instance.manage_runtime` instance permission.
+      tags:
+        - Administration
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          description: Repository owner (case-insensitive).
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          description: Repository name (case-insensitive).
+          schema:
+            type: string
+        - name: pr
+          in: path
+          required: true
+          description: Pull request number.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        description: Optional flags; `{}` performs a safe release.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FollowupHandoffReleaseRequest"
+      responses:
+        "200":
+          description: The branch is free and the record retired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FollowupHandoffReleaseResult"
+        "400":
+          description: Invalid target or non-boolean flag.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          description: No handoff is recorded for the pull request (code `not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "409":
+          description: "Refused; `reason` names why: `agent_still_running`, `liveness_unavailable`, `lease_held_by_live_writer`, `worktree_holds_unpublished_work`, `branch_still_registered`, `worktree_registrations_unavailable`, `cancelled_claims_withdrawal_failed` or `superseded` (the handoff changed concurrently, for example an operator re-armed it)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FollowupHandoffReleaseResult"
+        "429":
+          description: The operator recovery quota (`PROPR_OPERATOR_RATE_LIMIT_MAX` per `PROPR_OPERATOR_RATE_LIMIT_WINDOW_MS`, default 30 per minute) is exhausted; code `RATE_LIMIT_EXCEEDED`. Charged only after the admin guard passes, shared by every follow-up handoff route.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_runtime
+      x-legacy-error: true
+  /api/admin/followup-handoffs/{owner}/{repo}/{pr}/resume:
+    post:
+      operationId: resumeFollowupHandoff
+      summary: Re-arm an operator-held handoff and run a recovery pass keyed to this pull request
+      description: |-
+        Without flags, an `awaiting_operator` record returns to `active` and one strictly keyed recovery pass runs: it resumes the exact missing publication phase idempotently and then releases the branch. Work the user cancelled is refused with code `requires_cancellation_authorization` until the request carries `authorizeCancelled: true` (for example after fixing a `worktree_missing` hold: restore the worktree, then resume). Publication side effects are limited to the addressed pull request.
+
+        Requires the `instance.manage_runtime` instance permission.
+      tags:
+        - Administration
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          description: Repository owner (case-insensitive).
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          description: Repository name (case-insensitive).
+          schema:
+            type: string
+        - name: pr
+          in: path
+          required: true
+          description: Pull request number.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        description: Optional flags; `{}` resumes a non-cancelled operator hold.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FollowupHandoffResumeRequest"
+      responses:
+        "200":
+          description: The keyed pass ran; `summary` counts its outcome and `status` is the state afterwards.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FollowupHandoffResumeResult"
+        "400":
+          description: Invalid target or non-boolean flag.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          description: No handoff is recorded for the pull request (code `not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "409":
+          description: "The handoff cannot be resumed. `code` names why: `requires_cancellation_authorization`, `cancellation_authorization_unavailable` (also returned while another writer holds the PR lease), `lease_held_by_live_writer`, `released` or `superseded`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "429":
+          description: The operator recovery quota (`PROPR_OPERATOR_RATE_LIMIT_MAX` per `PROPR_OPERATOR_RATE_LIMIT_WINDOW_MS`, default 30 per minute) is exhausted; code `RATE_LIMIT_EXCEEDED`. Charged only after the admin guard passes, shared by every follow-up handoff route.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_runtime
       x-legacy-error: true
   /api/admin/mcp:
     get:
@@ -8785,6 +9041,217 @@ components:
         - profileId
         - revision
       additionalProperties: false
+    FollowupHandoffDetail:
+      type: object
+      properties:
+        status:
+          $ref: "#/components/schemas/FollowupHandoffStatus"
+      required:
+        - status
+      additionalProperties: false
+    FollowupHandoffList:
+      type: object
+      properties:
+        handoffs:
+          type: array
+          items:
+            $ref: "#/components/schemas/FollowupHandoffStatus"
+      required:
+        - handoffs
+      additionalProperties: false
+    FollowupHandoffRecoverySummary:
+      type: object
+      properties:
+        inspected:
+          type: integer
+          minimum: 0
+        published:
+          type: integer
+          minimum: 0
+          description: Interrupted work recovered and published exactly once.
+        noChanges:
+          type: integer
+          minimum: 0
+          description: Interrupted runs that produced nothing; their requests were returned to the queue (settlement `returned_to_queue`).
+        settled:
+          type: integer
+          minimum: 0
+          description: Runs whose no-change completion, failure or usage-limit retry the normal path had already delivered or scheduled; recorded without republishing or requeueing.
+        cleanupPending:
+          type: integer
+          minimum: 0
+          description: Publication settled but branch release still owed; retried on the next pass.
+        skippedLiveAgent:
+          type: integer
+          minimum: 0
+        failedClosed:
+          type: integer
+          minimum: 0
+          description: Records whose container evidence was unavailable or ambiguous; left untouched.
+        awaitingOperator:
+          type: integer
+          minimum: 0
+        lockedByOtherWriter:
+          type: integer
+          minimum: 0
+        errors:
+          type: integer
+          minimum: 0
+          description: Records whose recovery failed (for example unreachable remote evidence); retained for the next pass.
+      required:
+        - inspected
+        - published
+        - noChanges
+        - settled
+        - cleanupPending
+        - skippedLiveAgent
+        - failedClosed
+        - awaitingOperator
+        - lockedByOtherWriter
+        - errors
+      additionalProperties: false
+      description: Counts of one recovery pass. Keyed passes inspect at most the addressed pull request.
+    FollowupHandoffReleaseRequest:
+      type: object
+      properties:
+        force:
+          description: Also release a branch whose retained worktree still holds unpublished work. Never deletes worktree files, and never overrides a live or unverifiable agent.
+          type: boolean
+      additionalProperties: false
+    FollowupHandoffReleaseResult:
+      type: object
+      properties:
+        released:
+          type: boolean
+        reason:
+          description: Refusal code when `released` is false, for example `agent_still_running`, `liveness_unavailable`, `lease_held_by_live_writer`, `worktree_holds_unpublished_work`, `branch_still_registered` (a Git worktree registration still holds the branch, even after a forced detach), `worktree_registrations_unavailable` or `cancelled_claims_withdrawal_failed` (the claimed comments of a cancelled request could not be withdrawn from the pending list, so releasing could let them run).
+          type: string
+      required:
+        - released
+      additionalProperties: false
+      description: "Outcome of a release request; refusals answer `409` with `released: false`."
+    FollowupHandoffResumeRequest:
+      type: object
+      properties:
+        authorizeCancelled:
+          description: Set `true` to explicitly authorize publishing work the user cancelled. Without it, resume re-arms the operator-held record and refuses cancelled work with code `requires_cancellation_authorization`.
+          type: boolean
+      additionalProperties: false
+    FollowupHandoffResumeResult:
+      type: object
+      properties:
+        summary:
+          $ref: "#/components/schemas/FollowupHandoffRecoverySummary"
+        status:
+          anyOf:
+            - $ref: "#/components/schemas/FollowupHandoffStatus"
+            - type: "null"
+          description: State after the keyed recovery pass; `null` once the handoff retired completely.
+      required:
+        - summary
+        - status
+      additionalProperties: false
+    FollowupHandoffStatus:
+      type: object
+      properties:
+        repository:
+          type: string
+          description: Lowercase `owner/repo` of the pull request the handoff belongs to.
+        pullRequest:
+          type: integer
+          exclusiveMinimum: 0
+        taskId:
+          type: string
+          description: Task whose interrupted follow-up publication the handoff records.
+        predecessorTaskIds:
+          type: array
+          items:
+            type: string
+          description: Source task lineage recorded when the agent launched.
+        successorTaskId:
+          description: Task that adopted the handoff during recovery, when any.
+          type:
+            - string
+            - "null"
+        phase:
+          type: string
+          enum:
+            - agent_running
+            - agent_exited
+            - committed
+            - pushed
+            - comment_published
+            - cleanup_pending
+          description: Exact publication step recovery resumes from. `cleanup_pending` means everything is published and only branch release is owed.
+        status:
+          type: string
+          enum:
+            - active
+            - awaiting_operator
+            - released
+          description: "`active` records are recovered automatically; `awaiting_operator` records never publish without an explicit operator decision."
+        statusReason:
+          description: Why the handoff is held or failed closed, for example `cancelled_by_user`, `worktree_missing`, `head_advanced_externally`, `usage_limit_retry_unconfirmed`, `liveness_unavailable`. A mutable diagnostic; see `settlement` for the durable outcome.
+          type:
+            - string
+            - "null"
+        settlement:
+          anyOf:
+            - type: string
+              enum:
+                - returned_to_queue
+                - usage_limit_retry_scheduling
+                - usage_limit_retry_scheduled
+            - type: "null"
+          description: "Durable owner of the claimed comments once the attempt settles without publishing: `returned_to_queue` (recovery returned them to the pending list), `usage_limit_retry_scheduled` (a scheduled usage-limit retry job owns them; recovery never requeues them) or `usage_limit_retry_scheduling` (the worker stopped around the queue add; held for an operator as `usage_limit_retry_unconfirmed`). Unlike `statusReason`, later diagnostics never overwrite it, so the `noChanges`/`settled` counters stay correct."
+        operatorAuthorized:
+          type: boolean
+          description: Whether an operator explicitly authorized publishing user-cancelled work.
+        liveness:
+          type: string
+          description: Agent container liveness evidence, for example `running`, `stopped`, `not_found` or `unavailable` (recovery fails closed on the latter).
+        branchName:
+          type: string
+          description: PR head branch still attached to the retained worktree until cleanup releases it.
+        commitHash:
+          description: Commit recovery is bound to publish, once recorded.
+          type:
+            - string
+            - "null"
+        completionCommentUrl:
+          description: Delivered completion comment; recovery never overwrites it.
+          type:
+            - string
+            - "null"
+        nextAction:
+          type: string
+          description: Operator guidance for the current state.
+        retainedWorktreePath:
+          type: string
+          description: Host path of the retained worktree. Deliberately admin-only; never shown on member routes.
+        updatedAt:
+          type: number
+          description: Unix milliseconds of the last durable update.
+      required:
+        - repository
+        - pullRequest
+        - taskId
+        - predecessorTaskIds
+        - successorTaskId
+        - phase
+        - status
+        - statusReason
+        - settlement
+        - operatorAuthorized
+        - liveness
+        - branchName
+        - commitHash
+        - completionCommentUrl
+        - nextAction
+        - retainedWorktreePath
+        - updatedAt
+      additionalProperties: false
+      description: Operator-facing status of one durable follow-up publication handoff.
     Health:
       type: object
       properties:

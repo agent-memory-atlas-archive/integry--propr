@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- admission, execution, failure settlement and handoff ownership share one PR lease lifecycle */
 import { formatTaskTerminalReason } from '@propr/shared';
 import { prepareRepositoryWorkflow, resolveAttemptRepositoryWorkflow, persistRepositoryWorkflowDeferral, repositoryWorkflowHistoryMetadata,
     withRepositoryWorkflowAdmission, reconcileRepositoryWorkflowAdmission, deferRepositoryWorkflowJob, RepositoryWorkflowCapacityError, nonRetryableRepositoryWorkflowError } from './repositoryWorkflow.js';
@@ -34,15 +35,17 @@ import {
 import { shouldDeferUltrafixReview, ultrafixReviewDeferralUpdate } from './ultrafixReviewExecutionGate.js';
 import { handleNoAuthorizedFindings } from './prCommentNoAuthorizedFindings.js';
 import { handlePostExecution } from './prCommentPostExecution.js';
+import { noChangeAnalysisSummary } from './prCompletionComment.js';
 import {
     buildDeterministicPrTaskSubtitle, buildPrTaskTitle, buildPrTaskTitleContext,
     buildPrTaskTitleContextHistoryMetadata, getPrTaskWorkflowLabel, resolvePrTaskWorkflow,
 } from './prTaskTitleHelpers.js';
 import type { GitHubToken } from './githubTypes.js';
 import {
-    acquirePRProcessingLock, ensurePRProcessingLockToken, releasePRProcessingLock, startPRProcessingLockHeartbeat,
+    acquireCurrentPRProcessingLock, ensurePRProcessingLockToken, releasePRProcessingLock, startPRProcessingLockHeartbeat,
 } from './prProcessingLock.js';
 import { createPRCommentTaskStateIfMissing, evaluatePRCommentPreExecutionRecovery, handlePRCommentLockContention } from './prCommentCollisionRecovery.js';
+import { checkpointExecutionHandoffUsageLimitRetry, FollowupHandoffOwnershipLostError, gatePredecessorHandoff, markExecutionHandoffAgentExited, markExecutionHandoffCleanupPending, markExecutionHandoffContainer, recordExecutionHandoff, retireExecutionHandoffAfterCleanup, settleExecutionHandoffAfterError, stopAfterHandoffOwnershipLoss, writerOwnedWorktree } from './prCommentHandoffIntegration.js';
 import { stopOriginalPRReviewCycle } from './prContinuationReview.js';
 import { loadOriginalContributionDiscussion } from './prContributionDiscussion.js';
 import { PullRequestPublication } from './prPublication.js';
@@ -69,12 +72,6 @@ interface ValidationResult {
     unprocessedComments?: UnprocessedComment[];
     llm?: string | null;
     prCommentsForValidation?: PRComment[];
-}
-
-interface LockParams {
-    lockKey: string;
-    lockToken: string;
-    correlatedLogger: Logger;
 }
 
 async function getPrimaryLabels(): Promise<string[]> {
@@ -256,6 +253,15 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
         const githubToken = await octokit.auth({ type: 'installation' }) as GitHubToken;
         correlatedLogger.info({ worktreePath: state.worktreeInfo.worktreePath, gitTarget: publication.target, destination: publication.status }, 'Prepared PR publication destination');
 
+        // Durable handoff before the agent launches: a worker restart from here on
+        // leaves a record that recovery can adopt to finish the owed publication.
+        // It is bound to the PR's head/base at launch so recovery fails closed on a
+        // retargeted or externally advanced pull request.
+        await recordExecutionHandoff({
+            state, job, ref: { repoOwner, repoName, pullRequestNumber }, taskId, correlationId, publication, llm, lockKey, lockToken,
+            binding: { headRef: prData!.data.head?.ref, baseRef: baseBranch }, correlatedLogger,
+        });
+
         // Implementation is authorized and the publication destination is resolved, so
         // the validation of the head this task is about to replace is now obsolete.
         // Opt-in per repository; a failure there never stops the implementation.
@@ -307,8 +313,12 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
             llm, worktreePath: state.worktreeInfo.worktreePath, branchName: state.worktreeInfo.branchName, prompt,
             pullRequestNumber, repoOwner, repoName, stateManager, correlatedLogger, githubToken: githubToken.token, taskId, redisClient,
             reasoningLevel: job.data.reasoningLevel, repositoryWorkflow, applyRepositoryWorkflow: true,
+            // Bind the launched container's immutable identity to the handoff, so
+            // recovery never trusts a different container's evidence for this task.
+            onContainerInfo: containerId => markExecutionHandoffContainer(state, containerId),
         });
         state.claudeResult = claudeResult;
+        await markExecutionHandoffAgentExited(state, claudeResult.success === true, claudeResult.success === true ? noChangeAnalysisSummary(claudeResult) : null);
 
         checkTerminalStateAfterExecution(await stateManager.getTaskState(taskId), taskId, correlatedLogger);
 
@@ -336,6 +346,9 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
         });
         if (!stopped) await handleUltrafixContinuation('fix', { job, stateManager, taskId, redisClient, repoOwner, repoName, pullRequestNumber, correlatedLogger, correlationId });
         await publication.finishCompletion();
+        // The owed commit, push and completion comment are published; the handoff
+        // is retained at cleanup_pending until worktree cleanup frees the branch.
+        await markExecutionHandoffCleanupPending(state, correlatedLogger);
 
         return { status: postResult.partial ? 'partial' : 'complete', commit: postResult.commitHash, pullRequestNumber, claudeResult: { success: state.claudeResult.success } };
     });
@@ -345,31 +358,23 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
 export const processPullRequestCommentJob = (job: Job<CommentJobData>): Promise<JobResult> =>
     deferRepositoryWorkflowJob(job, () => withRunCostCap(pullRequestRunCostCapTarget(job), () => processAdmittedPRCommentJob(job)));
 
-async function acquireCurrentPRLock(
-    { lockKey, lockToken, correlatedLogger }: LockParams,
-    resolveLockKey: () => Promise<string>,
-): Promise<string | null> {
-    for (;;) {
-        if (!await acquirePRProcessingLock(redisClient, lockKey, lockToken)) {
-            correlatedLogger.info({ lockKey }, 'PR is currently being processed by another execution. Rescheduling...');
-            return null;
-        }
-        correlatedLogger.debug({ lockKey }, 'PR lock acquired');
-        let resolvedLockKey: string;
-        try {
-            resolvedLockKey = await resolveLockKey();
-        } catch (error) {
-            await releasePRProcessingLock(redisClient, lockKey, lockToken);
-            throw error;
-        }
-        if (resolvedLockKey === lockKey) return lockKey;
-        // Adoption may have become visible while acquiring the lease. Do no work
-        // under the continuation's own lease; acquire and revalidate the source.
-        await releasePRProcessingLock(redisClient, lockKey, lockToken);
-        lockKey = resolvedLockKey;
+/** Read-only review mode: deferral checks, then analysis without commits or pushes. */
+async function runReviewCommandMode(
+    params: ExecuteProcessingParams & { context: Awaited<ReturnType<typeof initializePRJobContext>> },
+    executionSignal: AbortSignal,
+): Promise<JobResult> {
+    const { job, context, taskId, stateManager, llm, state, lockToken } = params;
+    // Recovery can advance the continuation HEAD; gate its checks only after publication completes.
+    const ultrafixDeferral = await shouldDeferUltrafixReview(job, redisClient, context.correlatedLogger);
+    if (ultrafixDeferral) {
+        await restorePendingComments(context.pickedUpComments, { ...context, redisClient });
+        await stateManager.updateTaskState(taskId, TaskStates.COMPLETED, ultrafixReviewDeferralUpdate(ultrafixDeferral));
+        return { status: 'deferred', reason: 'ultrafix_waiting_for_exact_head_checks' };
     }
+    return runWithExecutionAbortSignal(executionSignal, () => executeReviewProcessing({ job, context, llm, taskId, stateManager, state, redisClient, validatePRAndComments }), hashTaskAttemptToken(lockToken));
 }
 
+// eslint-disable-next-line complexity -- admission, execution, failure settlement and handoff ownership share one lease lifecycle
 async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<JobResult> {
     const context = await initializePRJobContext(job);
     const { pullRequestNumber, repoOwner, repoName, correlationId, correlatedLogger, isBatchJob, commentsToProcess, jobBranchName, llm } = context;
@@ -390,7 +395,10 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
     const initialLockKey = await resolveLockKey();
     const lockToken = await ensurePRProcessingLockToken(job.data, correlationId, () => job.updateData(job.data));
 
-    const lockKey = await acquireCurrentPRLock({ lockKey: initialLockKey, lockToken, correlatedLogger }, resolveLockKey);
+    const lockKey = await acquireCurrentPRProcessingLock(redisClient, {
+        lockKey: initialLockKey, lockToken,
+        onContended: contendedKey => correlatedLogger.info({ lockKey: contendedKey }, 'PR is currently being processed by another execution. Rescheduling...'),
+    }, resolveLockKey);
     if (!lockKey) return handlePRCommentLockContention({ job, taskId, stateManager, redisClient, pickedUpComments: context.pickedUpComments, correlatedLogger });
 
     const recovery = await evaluatePRCommentPreExecutionRecovery({
@@ -399,6 +407,15 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
     });
     if (recovery.result) return recovery.result;
     const { preexistingState } = recovery;
+
+    // A recoverable predecessor's interrupted publication is finished under this
+    // same PR lease before any new worktree is prepared; a still-live or
+    // unverifiable predecessor reschedules this writer instead of racing it.
+    const predecessorGate = await gatePredecessorHandoff({
+        job, ref: { repoOwner, repoName, pullRequestNumber }, taskId, stateManager, redisClient,
+        pickedUpComments: context.pickedUpComments, commentsToProcess, lockKey, lockToken, correlatedLogger,
+    });
+    if (predecessorGate) return predecessorGate;
 
     const executionController = new AbortController();
     const stopLockHeartbeat = startPRProcessingLockHeartbeat({
@@ -434,19 +451,16 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
         }
         // Branch early for review mode — read-only analysis, no commits or pushes
         if (job.data.commandMode === 'review') {
-            // Recovery can advance the continuation HEAD; gate its checks only after publication completes.
-            const ultrafixDeferral = await shouldDeferUltrafixReview(job, redisClient, correlatedLogger);
-            if (ultrafixDeferral) {
-                await restorePendingComments(context.pickedUpComments, { ...context, redisClient });
-                await stateManager.updateTaskState(taskId, TaskStates.COMPLETED, ultrafixReviewDeferralUpdate(ultrafixDeferral));
-                return { status: 'deferred', reason: 'ultrafix_waiting_for_exact_head_checks' };
-            }
-            return await runWithExecutionAbortSignal(executionController.signal, () => executeReviewProcessing({ job, context, llm, taskId, stateManager, state, redisClient, validatePRAndComments }), hashTaskAttemptToken(lockToken));
+            return await runReviewCommandMode({ job, context, llm, taskId, stateManager, state, lockKey, lockToken }, executionController.signal);
         }
         return await runWithExecutionAbortSignal(executionController.signal, () => executeProcessing({ job, context, llm, taskId, stateManager, state, lockKey, lockToken }), hashTaskAttemptToken(lockToken));
     } catch (error) {
         executionFailed = true;
-        const failJob = (failure: Error) => handleJobError(failure, job, { pullRequestNumber, repoOwner, repoName, authorsText: state.authorsText, unprocessedComments: state.unprocessedComments, octokit: state.octokit, startingWorkComment: state.startingWorkComment, claudeResult: state.claudeResult, correlationId, correlatedLogger, stateManager, taskId, retryComments: context.commentsToProcess, publicationStatus: state.publication?.status });
+        // A recovery adopted this handoff: the successor now owns the starting
+        // comment, the task's terminal state and the handoff settlement, so
+        // neither failure publication nor settlement may run for this writer.
+        if (state.followupHandoffOwnershipLost) return stopAfterHandoffOwnershipLoss(error as Error, correlatedLogger);
+        const failJob = (failure: Error) => handleJobError(failure, job, { pullRequestNumber, repoOwner, repoName, authorsText: state.authorsText, unprocessedComments: state.unprocessedComments, octokit: state.octokit, startingWorkComment: state.startingWorkComment, claudeResult: state.claudeResult, correlationId, correlatedLogger, stateManager, taskId, retryComments: context.commentsToProcess, publicationStatus: state.publication?.status, followupHandoff: state.followupHandoff, checkpointUsageLimitRetry: stage => checkpointExecutionHandoffUsageLimitRetry(state, stage, correlatedLogger) });
         if (error instanceof RepositoryWorkflowCapacityError) {
             capacityRefused = true;
             // The delayed job keeps the claimed comments, command context and policy; store them before releasing
@@ -456,15 +470,34 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
                 onPersistFailure: async persistError => { await restorePendingComments(context.pickedUpComments, { ...context, redisClient }); await failJob(persistError); } });
             throw error;
         }
-        await failJob(error as Error);
+        try {
+            await failJob(error as Error);
+        } catch (failError) {
+            // A takeover observed inside the error handler (the usage-limit
+            // retry's confirmation) stops publication and settlement alike.
+            if (failError instanceof FollowupHandoffOwnershipLostError) return stopAfterHandoffOwnershipLoss(failError, correlatedLogger);
+            throw failError;
+        }
+        if (state.followupHandoffOwnershipLost) return stopAfterHandoffOwnershipLoss(error as Error, correlatedLogger);
         // Don't re-throw for user cancellations (not an error, just cancelled)
         const cancelledState = await stateManager.getTaskState(taskId);
+        // The handled failure delivered the owed comment and terminal state, so the
+        // handoff retires; a cancellation instead holds it for an operator decision.
+        // A usage-limit retry whose ownership checkpoint failed throws above and
+        // never reaches this settlement: the handoff keeps the claim for recovery.
+        await settleExecutionHandoffAfterError({
+            ref: { repoOwner, repoName, pullRequestNumber }, taskId, error: error as Error,
+            cancelledState, cancelledStateName: TaskStates.CANCELLED, correlatedLogger,
+        });
         if (cancelledState?.state === TaskStates.CANCELLED) return { status: 'cancelled', reason: cancelledState.terminalReason };
         if ((error as Error).message?.includes('aborted by user')) return { status: 'cancelled', reason: 'cancelled_by_user' };
         if (!(error instanceof UsageLimitError)) throw nonRetryableRepositoryWorkflowError(error);
         return { status: 'requeued', reason: 'usage_limit' };
     } finally {
         await stopLockHeartbeat();
-        await cleanupJob({ stateManager, lockKey, lockToken, taskId, octokit: state.octokit ?? undefined, localRepoPath: state.localRepoPath, worktreeInfo: state.worktreeInfo, repoOwner, repoName, pullRequestNumber, jobBranchName: context.jobBranchName, jobLlm: context.llm, jobUserId: job.data.userId, jobReasoningLevel: job.data.reasoningLevel, correlatedLogger, redisClient, skipPendingCommentFollowup: capacityRefused, success: !executionFailed });
+        await cleanupJob({ stateManager, lockKey, lockToken, taskId, octokit: state.octokit ?? undefined, localRepoPath: state.localRepoPath, worktreeInfo: writerOwnedWorktree(state), repoOwner, repoName, pullRequestNumber, jobBranchName: context.jobBranchName, jobLlm: context.llm, jobUserId: job.data.userId, jobReasoningLevel: job.data.reasoningLevel, correlatedLogger, redisClient, skipPendingCommentFollowup: capacityRefused, success: !executionFailed });
+        // Only now is branch release provable; the handoff retires against that
+        // evidence, or stays at cleanup_pending for recovery to release it.
+        await retireExecutionHandoffAfterCleanup(state, correlatedLogger);
     }
 }

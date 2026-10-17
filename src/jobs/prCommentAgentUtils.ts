@@ -282,6 +282,8 @@ export interface AgentExecutionParams {
     repositoryWorkflow?: ResolvedRepositoryWorkflow;
     /** Only implementation follow-ups participate in repository workflow policy. */
     applyRepositoryWorkflow?: boolean;
+    /** Extra durable sink for the started container's identity, beyond task state. */
+    onContainerInfo?: (containerId: string, containerName: string) => Promise<void>;
 }
 
 export async function resolveAndExecuteAgent(params: AgentExecutionParams): Promise<{ claudeResult: ClaudeCodeResponse; agentType: string }> {
@@ -333,7 +335,10 @@ export async function resolveAndExecuteAgent(params: AgentExecutionParams): Prom
             githubToken,
             branchName,
             onSessionId: createSessionIdCallbackForPR(taskId, { pullRequestNumber, repoOwner, repoName }, { llm: modelToUse, stateManager, correlatedLogger, redisClient }),
-            onContainerId: createContainerIdCallbackForPR(taskId, stateManager),
+            onContainerId: async (containerId: string, containerName: string) => {
+                await createContainerIdCallbackForPR(taskId, stateManager)(containerId, containerName);
+                await params.onContainerInfo?.(containerId, containerName);
+            },
             taskId,
             prNumber: pullRequestNumber,
             reasoningLevel,

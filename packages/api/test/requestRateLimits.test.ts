@@ -262,6 +262,7 @@ test('resolves secure defaults and explicit positive-integer overrides', () => {
   assert.deepEqual(defaults.api, { identifier: 'api', limit: 600, windowMs: 60_000 });
   assert.deepEqual(defaults.auth, { identifier: 'auth', limit: 30, windowMs: 900_000 });
   assert.deepEqual(defaults.discovery, { identifier: 'desktop-discovery', limit: 60, windowMs: 60_000 });
+  assert.deepEqual(defaults.operator, { identifier: 'operator-recovery', limit: 30, windowMs: 60_000 });
   assert.deepEqual(defaults.pairingStart, { identifier: 'desktop-pairing-start', limit: 10, windowMs: 900_000 });
   assert.deepEqual(defaults.pairingPoll, { identifier: 'desktop-pairing-poll', limit: 180, windowMs: 900_000 });
   assert.deepEqual(defaults.webhook, { identifier: 'webhook', limit: 300, windowMs: 60_000 });
@@ -269,15 +270,22 @@ test('resolves secure defaults and explicit positive-integer overrides', () => {
   const configured = resolveRequestRateLimitPolicies({
     PROPR_API_RATE_LIMIT_MAX: '42',
     PROPR_AUTH_RATE_LIMIT_WINDOW_MS: '120000',
+    PROPR_OPERATOR_RATE_LIMIT_MAX: '5',
+    PROPR_OPERATOR_RATE_LIMIT_WINDOW_MS: '30000',
   });
   assert.equal(configured.api.limit, 42);
   assert.equal(configured.auth.windowMs, 120_000);
+  assert.deepEqual(configured.operator, { identifier: 'operator-recovery', limit: 5, windowMs: 30_000 });
 });
 
 test('rejects invalid overrides instead of silently disabling protection', () => {
   assert.throws(
     () => resolveRequestRateLimitPolicies({ PROPR_WEBHOOK_RATE_LIMIT_MAX: '0' }),
     /must be a positive integer/,
+  );
+  assert.throws(
+    () => resolveRequestRateLimitPolicies({ PROPR_OPERATOR_RATE_LIMIT_MAX: '0' }),
+    /PROPR_OPERATOR_RATE_LIMIT_MAX must be a positive integer/,
   );
   assert.throws(
     () => resolveRequestRateLimitPolicies({ PROPR_API_RATE_LIMIT_WINDOW_MS: '1.5' }),

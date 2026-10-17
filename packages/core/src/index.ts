@@ -104,12 +104,12 @@ export type { SqliteRetryOptions } from './db/sqliteRetry.js';
 export { getRepoConfigKey, detectDefaultBranch, listRepositoryBranchConfigurations } from './git/branchConfig.js';
 export type { BranchConfiguration } from './git/branchConfig.js';
 export { createHooklessGit, DISABLED_GIT_HOOKS_PATH } from './git/hooklessGit.js';
-export { AI_COMMIT_AUTHOR, InvalidCheckpointScopeError, commitChanges } from './git/commitOperations.js';
+export { AI_COMMIT_AUTHOR, InvalidCheckpointScopeError, commitChanges, isGeneratedRuntimePath } from './git/commitOperations.js';
 export type { CommitResult } from './git/commitOperations.js';
 export { configureGitAuthentication, setupAuthenticatedRemote, ensureBranchAndPush, pushBranch } from './git/repoBranching.js';
 export { ensureRepoCloned, createWorktreeForIssue, getRepoUrl, fetchLatestChanges } from './git/repoManager.js';
 export type { WorktreeResult, WorktreeInfo, FetchLatestChangesOptions, FetchLatestChangesResult } from './git/repoManager.js';
-export { cleanupExistingBranch, createWorktreeFromExistingBranch, releaseLostAttemptBranch } from './git/worktreeCreation.js';
+export { cleanupExistingBranch, createWorktreeFromExistingBranch, releaseBranchFromSettledWorktree, releaseLostAttemptBranch, worktreeHoldingBranch } from './git/worktreeCreation.js';
 export { classifyPushError, classifyPushRejectionText, extractUnblockUrls, formatPushRejectionClass, type PushRejectionClass, type PushRejectionDiagnosis } from './git/pushRejection.js';
 export {
     salvageFailedPush, createWorktreePushSalvageOperations, PushFailedError, getPushFailure, pushFailureHistoryMetadata,

@@ -167,6 +167,25 @@ function buildRepositoryValidationSection(report: string | undefined): string {
     return report ? `${redactSecrets(report)}\n\n` : '';
 }
 
+function cleanCompletionReport(text: string): string {
+    return sanitizeAgentReport(redactVisualPreviewPaths(text)
+        .replace(/^(PR|Comment by|Model):.*/gm, '')
+        .split('\n')
+        .filter(line => !line.replaceAll('\\', '/').includes(`${VISUAL_PREVIEW_DIRECTORY}/`))
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim());
+}
+
+/**
+ * The analysis a no-change completion reports, cleaned exactly as its comment
+ * renders it. Persisted at the agent-exit checkpoint so restart recovery can
+ * deliver the same answer when the worker dies before the completion comment.
+ */
+export function noChangeAnalysisSummary(claudeResult: Pick<ClaudeCodeResponse, 'summary' | 'finalResult'>): string {
+    return cleanCompletionReport(sanitizeAgentReport(claudeResult.summary || claudeResult.finalResult?.result || ''));
+}
+
 export async function buildCompletionComment(
     commitResult: CommitResult | null,
     unprocessedComments: UnprocessedComment[],
@@ -178,15 +197,7 @@ export async function buildCompletionComment(
     const terminationReason = resolveAgentTerminationReason(claudeResult);
     const partial = !claudeResult.success && terminationReason !== undefined;
 
-    const cleanBody = (text: string) => {
-        return sanitizeAgentReport(redactVisualPreviewPaths(text)
-            .replace(/^(PR|Comment by|Model):.*/gm, '')
-            .split('\n')
-            .filter(line => !line.replaceAll('\\', '/').includes(`${VISUAL_PREVIEW_DIRECTORY}/`))
-            .join('\n')
-            .replace(/\n{3,}/g, '\n\n')
-            .trim());
-    };
+    const cleanBody = cleanCompletionReport;
 
     if (commitResult) {
         let prCommentBody = partial

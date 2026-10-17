@@ -106,6 +106,7 @@ const modules: Record<string, Record<string, unknown>> = {
     },
     prProcessingLock: {
         acquirePRProcessingLock: async () => true, ensurePRProcessingLockToken: async () => 'lease-token',
+        acquireCurrentPRProcessingLock: async (_redis: unknown, { lockKey }: { lockKey: string }) => lockKey,
         releasePRProcessingLock: async () => true, startPRProcessingLockHeartbeat: () => noOp,
     },
     prContinuation: { findPRContinuation: async () => null, continuationStatus: () => '' },

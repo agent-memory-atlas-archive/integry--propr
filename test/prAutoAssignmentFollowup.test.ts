@@ -40,6 +40,7 @@ const refreshTaskAssignees = mock.fn(async () => []);
 // Each test sets the commit the follow-up produces; null means no changes.
 let nextCommit: { commitHash: string; filesChanged: string[] } | null = null;
 const noOp = async () => undefined;
+const unreachableCoreExport = (name: string) => () => { throw new Error(`${name} is not used by these follow-up tests`); };
 
 await mock.module('@propr/core', {
     namedExports: {
@@ -61,6 +62,21 @@ await mock.module('@propr/core', {
         TaskStates: { PROCESSING: 'processing', COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled' },
         VISUAL_PREVIEW_SLOT: '<!-- slot -->',
         AI_COMMIT_AUTHOR: { name: 'ProPR AI', email: 'ai@propr.dev' },
+        // Reachable through the durable follow-up handoff checkpoints the post
+        // execution imports; these suites never record a handoff.
+        cleanupWorktree: unreachableCoreExport('cleanupWorktree'),
+        createHooklessGit: unreachableCoreExport('createHooklessGit'),
+        issueQueue: { add: unreachableCoreExport('issueQueue.add') },
+        inspectLegacyDockerContainerLivenessForTask: unreachableCoreExport('inspectLegacyDockerContainerLivenessForTask'),
+        logger: { debug() {}, info() {}, warn() {}, error() {} },
+        inspectTaskContainerLivenessForTask: unreachableCoreExport('inspectTaskContainerLivenessForTask'),
+        getStateManager: unreachableCoreExport('getStateManager'),
+        getPendingPrCommentsKey: unreachableCoreExport('getPendingPrCommentsKey'),
+        releaseBranchFromSettledWorktree: unreachableCoreExport('releaseBranchFromSettledWorktree'),
+        pushBranch: unreachableCoreExport('pushBranch'),
+        getRepoUrl: unreachableCoreExport('getRepoUrl'),
+        ensureRepoCloned: unreachableCoreExport('ensureRepoCloned'),
+        createWorktreeFromExistingBranch: unreachableCoreExport('createWorktreeFromExistingBranch'),
     },
 });
 for (const [name, namedExports] of Object.entries({

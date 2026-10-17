@@ -27,6 +27,9 @@ interface ManagementRouteDeps {
   agentRuntimeRoutes: ReturnType<typeof routes.createAgentRuntimeRoutes>;
   agentVersionRoutes: ReturnType<typeof routes.createAgentVersionRoutes>;
   configRoutes: ReturnType<typeof routes.createConfigRoutes>;
+  followupHandoffRoutes: ReturnType<typeof routes.createFollowupHandoffRoutes>;
+  /** Shared operator recovery budget; runs after the admin guard (see createOperatorRequestRateLimiter). */
+  operatorRateLimiter: RequestHandler;
   visualPreviewAuthRoutes: ReturnType<typeof routes.createVisualPreviewAuthRoutes>;
 }
 
@@ -80,6 +83,8 @@ export function createManagementRouteEntries({
   agentRuntimeRoutes,
   agentVersionRoutes,
   configRoutes,
+  followupHandoffRoutes,
+  operatorRateLimiter,
   visualPreviewAuthRoutes,
 }: ManagementRouteDeps): RouteEntry[] {
   return [
@@ -125,6 +130,12 @@ export function createManagementRouteEntries({
     ['post', '/api/admin/members', requireManageMembers, adminRoutes.addMember],
     ['patch', '/api/admin/members/:githubUserId', requireManageMembers, adminRoutes.updateMemberRole],
     ['delete', '/api/admin/members/:githubUserId', requireManageMembers, adminRoutes.removeMember],
+
+    // The limiter follows the guard so unauthorized callers cannot drain the operator budget.
+    ['get', '/api/admin/followup-handoffs', requireManageRuntime, operatorRateLimiter, followupHandoffRoutes.list],
+    ['get', '/api/admin/followup-handoffs/:owner/:repo/:pr', requireManageRuntime, operatorRateLimiter, followupHandoffRoutes.get],
+    ['post', '/api/admin/followup-handoffs/:owner/:repo/:pr/resume', requireManageRuntime, operatorRateLimiter, followupHandoffRoutes.resume],
+    ['post', '/api/admin/followup-handoffs/:owner/:repo/:pr/release', requireManageRuntime, operatorRateLimiter, followupHandoffRoutes.release],
 
     ['get', '/api/admin/mcp', requireManageSettings, adminMcpRoutes.getSettings],
     ['put', '/api/admin/mcp', requireManageSettings, adminMcpRoutes.putSettings],
