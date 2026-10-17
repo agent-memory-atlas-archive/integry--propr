@@ -8,7 +8,7 @@ import ExecutionEventLog from './ExecutionEventLog';
 import ResultOverview from './ResultOverview';
 import PromptModal from './PromptModal';
 import LogFilesModal from './LogFilesModal';
-import FollowupModal, { FollowupReceiptError } from './FollowupModal';
+import FollowupModal from './FollowupModal';
 import ContextStrip, { ConsumptionGroup, MobileGitContext, MobilePeopleRuntime } from './ContextStrip';
 import ActionBar from './ActionBar';
 import TaskHeader, { ReturnToRunButton } from './TaskHeader';
@@ -21,7 +21,6 @@ import { useThinkingLog } from './useThinkingLog';
 import { getHistoryDerivedData } from './useHistoryData';
 import { getCleanDocumentTitle } from '../TaskList/utils.tsx';
 import { useToast } from '../ui/useToast';
-import { postTaskFollowup } from '../../api/proprApi';
 import { useConsumedReviewCommentIds, useTokenUsage } from './useDerivedTaskData';
 import { useClickOutsideCollapse } from './useClickOutsideCollapse';
 import type { TaskRunEntry } from '../TaskList/rowModel';
@@ -32,6 +31,8 @@ import { useTaskAssignment } from './useTaskAssignment';
 import LatestRunCommands from './LatestRunCommands';
 import { useTaskPullRequestScores } from './pullRequestScores';
 import { followupTargetFor, hasFollowupTarget, taskLabelMode } from './taskKind';
+import { useTaskFollowup } from './useTaskFollowup';
+import FollowupHandoffBanner from './FollowupHandoffBanner';
 
 const CenteredStatus: React.FC<{ className: string; children: React.ReactNode }> = ({ className, children }) => (
   <div className="h-full bg-white flex items-center justify-center">
@@ -256,17 +257,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
   const assignment = useTaskAssignment(taskId);
   const assignedStripProps = useMemo(() => ({ ...contextStripProps, assignment }), [contextStripProps, assignment]);
 
-  const handleFollowupSubmit = useCallback(async (body: string) => {
-    if (!taskId) {
-      throw new Error('Task ID is required');
-    }
-    const result = await postTaskFollowup(taskId, body);
-    if (!result.success) throw new FollowupReceiptError(result);
-    addToast({
-      type: 'success',
-      message: result.state === 'batched' ? 'Follow-up added to the pending batch' : result.state === 'handled' ? 'Command handled successfully' : 'Follow-up queued successfully'
-    });
-  }, [taskId, addToast]);
+  const followup = useTaskFollowup(taskId);
 
   const handleOpenFollowup = useCallback(() => setFollowupModalOpen(true), []);
 
@@ -360,6 +351,8 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
         actionBarProps={actionBarProps}
         todos={taskData.liveDetails.todos}
       />
+
+      <FollowupHandoffBanner handoff={followup.handoff} onSelectRun={onSelectRun} onDismiss={followup.dismiss} />
 
       {/* Split only when the 576px timeline and at least 384px of output fit.
           A grid row grows to the taller pane so both columns share the full scrollable height. */}
@@ -472,7 +465,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
       <FollowupModal
         isOpen={followupModalOpen}
         onClose={() => setFollowupModalOpen(false)}
-        onSubmit={handleFollowupSubmit}
+        onSubmit={followup.submit}
         initialContent={'Please address the following based on the previous task execution:\n\n'}
         target={followupTargetFor(taskData.taskInfo, taskId)}
       />

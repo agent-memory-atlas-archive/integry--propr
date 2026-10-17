@@ -256,6 +256,15 @@ export const TaskFollowupResult = component('TaskFollowupResult', z.object({
   message: z.string().optional().describe('Explains a refusal, failure, or uncertain submission.'),
 }), 'Result of posting a follow-up comment. `state: unknown` means inspect the job before retrying.');
 
+export const TaskFollowupRuns = component('TaskFollowupRuns', z.object({
+  sourceTaskId: z.string(),
+  commentId: z.number().int(),
+  runs: z.array(z.object({
+    taskId: z.string(),
+    status: z.string().describe('The run\'s latest state, lowercased; `queued` until it records one.'),
+  })).describe('Empty until the run the follow-up requested has started.'),
+}), 'The runs an issue follow-up started, for the signed-in user who posted it.');
+
 export const TaskReviewResult = component('TaskReviewResult', TaskFollowupResult.extend({
   commandMode: z.literal('review'),
   posted: z.boolean().optional(),
@@ -330,6 +339,10 @@ export const TaskAssigneesQuery = querySet('TaskAssigneesQuery', z.object({
 
 export const DeleteTaskQuery = querySet('DeleteTaskQuery', z.object({
   force: z.enum(['true', 'false']).optional().describe('Delete even when the task is still active.'),
+}));
+
+export const TaskFollowupRunsQuery = querySet('TaskFollowupRunsQuery', z.object({
+  commentId: z.string().regex(/^[1-9]\d{0,15}$/).describe('The `commentId` the follow-up\'s receipt returned.'),
 }));
 
 const storageCategory = z.enum(['database_config', 'repository_caches', 'worktrees', 'salvage', 'logs_artifacts', 'provider_credentials', 'task_history']);
