@@ -62,7 +62,8 @@ export const UltrafixSettingsControls: React.FC<UltrafixSettingsControlsProps> =
   const shownMaxCycles = (maxCycles ?? defaultMaxCycles)?.toString() ?? '';
   const [maxCyclesInput, setMaxCyclesInput] = useState(shownMaxCycles);
   const [maxCyclesError, setMaxCyclesError] = useState<string | null>(null);
-  useEffect(() => { setMaxCyclesInput(shownMaxCycles); setMaxCyclesError(null); }, [shownMaxCycles]);
+  // Also resync on maxCycles: clearing an explicit value equal to the instance value leaves shownMaxCycles unchanged.
+  useEffect(() => { setMaxCyclesInput(shownMaxCycles); setMaxCyclesError(null); }, [shownMaxCycles, maxCycles]);
   useEffect(() => { if (!enabled) setMaxCyclesError(null); }, [enabled]);
   const shownGoal = goal ?? defaultGoal;
   const goalOptions = shownGoal != null && !isUltrafixGoalOption(shownGoal)

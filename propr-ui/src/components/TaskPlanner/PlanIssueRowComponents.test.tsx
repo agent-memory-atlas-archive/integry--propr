@@ -147,6 +147,23 @@ describe('UltrafixSettingsControls', () => {
     fireEvent.blur(max);
     expect(onMaxCyclesChange).toHaveBeenCalledWith(6);
   });
+
+  it('shows the inherited instance value again after clearing an explicit value equal to it', () => {
+    const props = {
+      enabled: true, goal: null, onGoalChange: vi.fn(), defaultMaxCycles: 5,
+      goalPlaceholder: 'Instance setting', maxPlaceholder: '—', inputClassName: '', goalInputWidthClassName: '', maxInputWidthClassName: '',
+    };
+    const onMaxCyclesChange = vi.fn();
+    const { rerender } = render(<UltrafixSettingsControls {...props} maxCycles={5} onMaxCyclesChange={onMaxCyclesChange} />);
+
+    const max = screen.getByLabelText('Max Loops');
+    expect(max).toHaveValue(5);
+    fireEvent.change(max, { target: { value: '' } });
+    fireEvent.blur(max);
+    expect(onMaxCyclesChange).toHaveBeenCalledWith(null);
+    rerender(<UltrafixSettingsControls {...props} maxCycles={null} onMaxCyclesChange={onMaxCyclesChange} />);
+    expect(max).toHaveValue(5);
+  });
 });
 
 describe('RowActions', () => {
