@@ -15,6 +15,8 @@ import { up } from '../packages/core/src/db/migrations/20261017000000_add_pr_fol
  * - F28: a cancellation that lands while the standalone recovery queues the
  *   restored-comment follow-up withdraws the restored claims and keeps the
  *   handoff operator-held, so the already-queued job cannot execute them.
+ * - F31: the same holds for a cancellation the state manager reports from
+ *   inside the finalizer's own (unapplied) task transition.
  * - F29: a retained worktree holding only generated runtime output (which
  *   commits unstage) takes the no-change path and frees the branch instead of
  *   checkpointing an impossible `committed` phase without a commit.
@@ -227,6 +229,39 @@ test('F28: a cancellation while the restored-comment follow-up is queued withdra
     assert.equal(branchOf(h.fx.wt), BRANCH, 'the branch is not released behind an operator hold');
 
     // The queued job's admission gate meets the hold instead of executing the claims.
+    const adoption = await adoptPredecessorFollowupHandoff(
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog },
+        h.deps,
+    );
+    assert.deepEqual(adoption, { blocked: 'predecessor_awaiting_operator' });
+});
+
+test('F31: a cancellation inside the final task transition withdraws the claims and keeps the handoff held', async () => {
+    const h = await createHarness();
+    await seedHandoff(h);
+    // The finalizer reads the task as nonterminal; the user cancels while its
+    // transition is awaited, and the state manager's CAS re-read returns the
+    // cancelled state without applying the requested transition.
+    const transitions: string[] = [];
+    h.stateManager.updateTaskState = async (_taskId: string, state: string) => {
+        transitions.push(state);
+        h.stateManager.states.set('task-1', 'cancelled');
+        return { state: 'cancelled' };
+    };
+
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.deepEqual(transitions, ['failed'], 'the cancellation landed inside the final transition');
+    assert.equal(h.scheduled.length, 1, 'the follow-up job was already queued');
+    assert.equal(summary.awaitingOperator, 1);
+    assert.equal(summary.noChanges + summary.settled, 0);
+    assert.deepEqual(h.withdrawn, [11], 'the restored claims are withdrawn from the pending list again');
+    assert.equal(h.stateManager.states.get('task-1'), 'cancelled');
+    const held = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(held?.status, HANDOFF_AWAITING_OPERATOR);
+    assert.equal(held?.status_reason, 'cancelled_by_user');
+    assert.equal(held?.phase, 'agent_exited', 'no cleanup_pending checkpoint is recorded');
+    assert.equal(branchOf(h.fx.wt), BRANCH, 'the branch is not released behind an operator hold');
+
     const adoption = await adoptPredecessorFollowupHandoff(
         { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog },
         h.deps,

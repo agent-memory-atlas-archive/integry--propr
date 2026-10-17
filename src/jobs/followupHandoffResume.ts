@@ -41,7 +41,8 @@ export interface HandoffOctokit {
 
 export interface HandoffStateManager {
     getTaskState(taskId: string): Promise<{ state: string } | null>;
-    updateTaskState(taskId: string, state: string, metadata?: Record<string, unknown>): Promise<unknown>;
+    /** Resolves to the resulting state; a concurrent cancellation is returned unapplied. */
+    updateTaskState(taskId: string, state: string, metadata?: Record<string, unknown>): Promise<{ state?: string } | null | void>;
     updateHistoryMetadata(taskId: string, historyState: string, metadata?: Record<string, unknown>): Promise<unknown>;
 }
 
@@ -251,7 +252,9 @@ const terminalStates = (taskStates: HandoffTaskStates): Set<string> =>
  * outcome — whose claimed comments were just returned to the queue — a
  * cancellation found here (the last read before cleanup) reports 'cancelled'
  * so the caller withdraws them, instead of treating the cancelled task as
- * already final and letting the queued follow-up execute them.
+ * already final and letting the queued follow-up execute them. The same holds
+ * for a cancellation that lands while the final transition is awaited, which
+ * the state manager reports by returning the cancelled state.
  */
 async function finalizeRecoveredTask(
     params: ResumeFollowupHandoffParams,
@@ -274,11 +277,15 @@ async function finalizeRecoveredTask(
         await reportHandoffOnTaskTimeline(params, record, 'publication recovered; task already final');
         return 'finalized';
     }
-    await stateManager.updateTaskState(record.task_id, failedOutcomes.has(outcome) ? taskStates.FAILED : taskStates.COMPLETED, {
+    const updated = await stateManager.updateTaskState(record.task_id, failedOutcomes.has(outcome) ? taskStates.FAILED : taskStates.COMPLETED, {
         reason: recoveredTaskReasons[outcome],
         ...(outcome === 'published' && record.commit_hash ? { commitHash: record.commit_hash } : {}),
         historyMetadata,
     });
+    // The state manager re-reads inside its CAS loop and returns a concurrent
+    // cancellation unchanged instead of applying the transition: honor it.
+    if (outcome === 'no_changes' && !record.operator_authorized
+        && updated?.state === taskStates.CANCELLED) return 'cancelled';
     return 'finalized';
 }
 
