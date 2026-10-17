@@ -80,6 +80,7 @@ async function markState(database: Knex, taskId: string, state: string, terminal
 
 function harness(database: Knex, overrides: {
     maxProvider?: number; infraEnabled?: boolean; issueState?: string; enqueue?: (entry: Enqueued) => Promise<void>; now?: Date;
+    releaseLostAttemptBranch?: (owner: string, repo: string, branch: string) => Promise<void>;
 } = {}) {
     const enqueued: Enqueued[] = [];
     const comments: string[] = [];
@@ -96,6 +97,7 @@ function harness(database: Knex, overrides: {
         readIssueState: async () => ({ state: overrides.issueState ?? 'open' }),
         publishTaskUpdate: async payload => { published.push(payload); return true; },
         postIssueComment: async (_owner, _repo, _number, body) => { comments.push(body); },
+        ...(overrides.releaseLostAttemptBranch ? { releaseLostAttemptBranch: overrides.releaseLostAttemptBranch } : {}),
         frontendUrl: 'https://propr.example',
         randomId: () => `replacement-correlation-${++ids}`,
         now: () => overrides.now ?? new Date('2026-10-06T09:00:00.000Z'),
@@ -160,6 +162,26 @@ test('an orphaned task gets exactly one replacement that reuses its selection an
     const latest = await database('task_history').where({ task_id: 'task-1' }).orderBy('history_id', 'desc').first();
     assert.equal(latest.state, 'failed', 'timeline events never change the task state');
     assert.deepEqual(published.map(({ taskId, state }) => ({ taskId, state })), [{ taskId: outcome.replacementTaskId, state: 'pending' }]);
+});
+
+test('dispatching a replacement first frees the failed attempt\'s work branch, and a failure to free it does not block the replacement', async () => {
+    for (const fails of [false, true]) {
+        const database = await createDatabase();
+        await seedTask(database, 'task-1', { branch: '2739/claude-opus-5-5-replacement-runs' });
+        const released: string[] = [];
+        const { service, enqueued } = harness(database, {
+            releaseLostAttemptBranch: async (owner, repo, branch) => {
+                released.push(`${owner}/${repo}:${branch}:${enqueued.length}`);
+                if (fails) throw new Error('git unavailable');
+            },
+        });
+        await service.prepare({ taskId: 'task-1', cause: 'infra_lost' });
+        await markState(database, 'task-1', 'failed');
+        assert.equal((await service.complete({ taskId: 'task-1', cause: 'infra_lost' })).action, 'dispatched');
+        assert.deepEqual(released, ['integry/propr:2739/claude-opus-5-5-replacement-runs:0'], 'freed before the replacement is queued');
+        assert.equal(enqueued.length, 1);
+        await database.destroy();
+    }
 });
 
 test('a second orphaning of the same lineage is final and lists every attempt', async () => {

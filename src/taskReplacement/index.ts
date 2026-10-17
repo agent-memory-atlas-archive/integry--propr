@@ -5,6 +5,7 @@ import {
     issueQueue,
     loadSettings,
     logger,
+    releaseLostAttemptBranch,
     retryConfigs,
     withRetry,
 } from '@propr/core';
@@ -66,6 +67,10 @@ export function getTaskReplacementService(): TaskReplacementService {
                 owner, repo, issue_number: issueNumber, per_page: 100,
             }) as Array<{ body?: string | null }>;
             return comments.some(comment => comment.body?.includes(marker));
+        },
+        async releaseLostAttemptBranch(owner, repo, branchName) {
+            const released = await releaseLostAttemptBranch(owner, repo, branchName);
+            if (released) logger.warn({ branchName, worktreePath: released }, 'Freed the replaced attempt\'s work branch from its retained worktree');
         },
         publishTaskUpdate: payload => getEventPublisher().publishTaskUpdate(payload),
         logger,
