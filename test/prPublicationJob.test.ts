@@ -32,6 +32,10 @@ let policyLoads = 0;
 let agentError: Error | undefined;
 let agentResult: unknown;
 let onAgentExitedCheckpoint: ((state: { followupHandoffOwnershipLost?: boolean }) => Promise<void>) | undefined;
+let onUsageLimitCheckpoint: ((state: { followupHandoffOwnershipLost?: boolean }, stage: string) => Promise<void>) | undefined;
+let onHandleJobError: ((context: { checkpointUsageLimitRetry?(stage: string): Promise<void> }) => Promise<void>) | undefined;
+/** Stands in for the real ownership-loss error class of the mocked handoff integration. */
+class OwnershipLostError extends Error {}
 let postExecutionParams: { visualPreviewSettings?: unknown } | undefined;
 const processingMetadata: Array<Record<string, unknown>> = [];
 const cancellations: Array<Record<string, unknown>> = [];
@@ -150,7 +154,8 @@ const modules: Record<string, Record<string, unknown>> = {
     prCommentJobUtils: {
         buildCombinedComment: (comments: unknown[]) => { combinedComments.push(comments); return { combinedCommentBody: 'Implement', commentAuthors: ['contributor'] }; },
         extractModelFromLabels: () => 'model', fetchAllComments: async () => [], buildPrompt: () => '',
-        handleJobError: async (_error: Error, _job: unknown, context: { startingWorkComment: unknown; taskId: string }) => {
+        handleJobError: async (_error: Error, _job: unknown, context: { startingWorkComment: unknown; taskId: string; checkpointUsageLimitRetry?(stage: string): Promise<void> }) => {
+            await onHandleJobError?.(context);
             handledStartingComment = context.startingWorkComment;
             handledTaskIds.push(context.taskId);
             await stateManager.updateTaskState(context.taskId, 'failed');
@@ -212,7 +217,9 @@ const modules: Record<string, Record<string, unknown>> = {
         markExecutionHandoffAgentExited: async (state: { followupHandoffOwnershipLost?: boolean }) => { await onAgentExitedCheckpoint?.(state); },
         markExecutionHandoffCommitted: noOp, markExecutionHandoffPushed: noOp, markExecutionHandoffCommentPublished: noOp,
         markExecutionHandoffCleanupPending: noOp, retireExecutionHandoffAfterCleanup: noOp,
-        gatePredecessorHandoff: async () => undefined, checkpointExecutionHandoffUsageLimitRetry: noOp,
+        gatePredecessorHandoff: async () => undefined,
+        checkpointExecutionHandoffUsageLimitRetry: async (state: { followupHandoffOwnershipLost?: boolean }, stage: string) => { await onUsageLimitCheckpoint?.(state, stage); },
+        FollowupHandoffOwnershipLostError: OwnershipLostError,
         settleExecutionHandoffAfterError: async () => { events.push('settle-handoff'); },
         // Mirrors of the real helpers (covered by test/followupHandoffCancelledClaims.test.ts).
         stopAfterHandoffOwnershipLoss: () => ({ status: 'skipped', reason: 'followup_handoff_ownership_lost' }),
@@ -263,7 +270,7 @@ const job = (commandMode = 'default', pullRequestNumber = 42) => ({
     data: { repoOwner: 'upstream', repoName: 'project', pullRequestNumber, commandMode, correlationId: 'correlation', commentId: 5, commentBody: 'Implement', commentAuthor: 'contributor' },
 });
 beforeEach(() => {
-    refuseCapacity = false; otherRuns = 0; reconciledLimits.length = 0; nothingSelected = false; persistError = undefined; resolvedWorkflow = undefined; policyLoads = 0; processingMetadata.length = 0; agentError = undefined; agentResult = undefined; postExecutionParams = undefined; onAgentExitedCheckpoint = undefined;
+    refuseCapacity = false; otherRuns = 0; reconciledLimits.length = 0; nothingSelected = false; persistError = undefined; resolvedWorkflow = undefined; policyLoads = 0; processingMetadata.length = 0; agentError = undefined; agentResult = undefined; postExecutionParams = undefined; onAgentExitedCheckpoint = undefined; onUsageLimitCheckpoint = undefined; onHandleJobError = undefined;
     onLockAcquired = undefined; blockedLock = undefined; resolutionError = undefined; taskStates.clear();
     cancellations.length = 0; deferralHistory.length = 0;
     events = []; continuation = undefined; preparationError = undefined; handledStartingComment = undefined;
@@ -611,6 +618,31 @@ test('a detected handoff ownership loss publishes no failure, settles nothing an
     assert.equal(handledStartingComment, undefined);
     assert.ok(!events.includes('settle-handoff'), "the successor's handoff obligation is not settled by this writer");
     assert.deepEqual(githubRoutes.filter(route => route.startsWith('PATCH')), []);
+    assert.notEqual(taskStates.get('task-1'), 'failed');
+    assert.ok(events.includes('cleanup'), 'the lease is still released');
+    assert.ok(!events.includes('cleanup-worktree'), "the successor's retained worktree is not detached");
+});
+
+// Review 6230432423 F35: a takeover discovered by the usage-limit retry's
+// confirmation, inside the error handler, stops the delay comment and the
+// error settlement exactly as a loss discovered before the handler does.
+test('ownership loss observed while confirming the usage-limit retry stops publication and settlement', async () => {
+    agentError = Object.assign(new Error('Claude usage limit reached'), { name: 'UsageLimitError' });
+    onHandleJobError = async context => {
+        // As the real handler: the retry is scheduled, then confirmed, then announced.
+        await context.checkpointUsageLimitRetry?.('scheduled');
+        events.push('delay-comment');
+    };
+    onUsageLimitCheckpoint = async (state, stage) => {
+        if (stage !== 'scheduled') return;
+        // As the real checkpoint does when a recovery installed its own owner token.
+        state.followupHandoffOwnershipLost = true;
+        throw new OwnershipLostError('Follow-up publication handoff ownership was lost (handoff_record_changed); stopping before further publication');
+    };
+    const result = await processPullRequestCommentJob(job() as never);
+    assert.deepEqual({ status: result.status, reason: result.reason }, { status: 'skipped', reason: 'followup_handoff_ownership_lost' });
+    assert.ok(!events.includes('delay-comment'), 'no delay comment is posted by the obsolete writer');
+    assert.ok(!events.includes('settle-handoff'), "the successor's handoff obligation is not settled by this writer");
     assert.notEqual(taskStates.get('task-1'), 'failed');
     assert.ok(events.includes('cleanup'), 'the lease is still released');
     assert.ok(!events.includes('cleanup-worktree'), "the successor's retained worktree is not detached");

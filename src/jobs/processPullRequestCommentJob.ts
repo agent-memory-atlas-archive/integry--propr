@@ -44,7 +44,7 @@ import {
     acquireCurrentPRProcessingLock, ensurePRProcessingLockToken, releasePRProcessingLock, startPRProcessingLockHeartbeat,
 } from './prProcessingLock.js';
 import { createPRCommentTaskStateIfMissing, evaluatePRCommentPreExecutionRecovery, handlePRCommentLockContention } from './prCommentCollisionRecovery.js';
-import { checkpointExecutionHandoffUsageLimitRetry, gatePredecessorHandoff, markExecutionHandoffAgentExited, markExecutionHandoffCleanupPending, markExecutionHandoffContainer, recordExecutionHandoff, retireExecutionHandoffAfterCleanup, settleExecutionHandoffAfterError, stopAfterHandoffOwnershipLoss, writerOwnedWorktree } from './prCommentHandoffIntegration.js';
+import { checkpointExecutionHandoffUsageLimitRetry, FollowupHandoffOwnershipLostError, gatePredecessorHandoff, markExecutionHandoffAgentExited, markExecutionHandoffCleanupPending, markExecutionHandoffContainer, recordExecutionHandoff, retireExecutionHandoffAfterCleanup, settleExecutionHandoffAfterError, stopAfterHandoffOwnershipLoss, writerOwnedWorktree } from './prCommentHandoffIntegration.js';
 import { stopOriginalPRReviewCycle } from './prContinuationReview.js';
 import { loadOriginalContributionDiscussion } from './prContributionDiscussion.js';
 import { PullRequestPublication } from './prPublication.js';
@@ -469,7 +469,15 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
                 onPersistFailure: async persistError => { await restorePendingComments(context.pickedUpComments, { ...context, redisClient }); await failJob(persistError); } });
             throw error;
         }
-        await failJob(error as Error);
+        try {
+            await failJob(error as Error);
+        } catch (failError) {
+            // A takeover observed inside the error handler (the usage-limit
+            // retry's confirmation) stops publication and settlement alike.
+            if (failError instanceof FollowupHandoffOwnershipLostError) return stopAfterHandoffOwnershipLoss(failError, correlatedLogger);
+            throw failError;
+        }
+        if (state.followupHandoffOwnershipLost) return stopAfterHandoffOwnershipLoss(error as Error, correlatedLogger);
         // Don't re-throw for user cancellations (not an error, just cancelled)
         const cancelledState = await stateManager.getTaskState(taskId);
         // The handled failure delivered the owed comment and terminal state, so the

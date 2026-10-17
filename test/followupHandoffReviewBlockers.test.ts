@@ -448,6 +448,7 @@ test('F10: a cleanup_pending predecessor defers the successor instead of racing 
     const retained = await loadFollowupHandoff({ database }, KEY);
     assert.equal(retained?.phase, 'cleanup_pending');
     assert.equal(retained?.status, HANDOFF_ACTIVE);
+    assert.equal(retained?.lock_token, 'task-2-token', "the admission gate installed the adopting writer's lease token as the durable owner");
     assert.equal(git(h.fx.wt, 'branch', '--show-current'), BRANCH, 'the branch is still attached');
 
     // Branch release recovers; the next gate pass finishes cleanup and admits.

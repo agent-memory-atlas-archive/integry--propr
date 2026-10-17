@@ -436,7 +436,7 @@ test('S7: in-line predecessor adoption leaves the pending follow-up to the adopt
     await seedHandoff(h);
     queuedFollowupJobs.length = 0;
     const adoption = await adoptPredecessorFollowupHandoff(
-        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog },
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog, lockToken: 'task-2-token' },
         h.deps,
     );
     assert.equal('resumed' in adoption && adoption.resumed?.outcome, 'no_changes');
@@ -502,7 +502,7 @@ test('a redelivered follow-up adopts the recoverable predecessor under the share
     await seedHandoff(h, { taskId: 'task-1' });
     await agentEdit(h);
     const adoption = await adoptPredecessorFollowupHandoff(
-        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog },
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog, lockToken: 'task-2-token' },
         h.deps,
     );
     assert.ok('resumed' in adoption && adoption.resumed?.outcome === 'published');
@@ -510,7 +510,7 @@ test('a redelivered follow-up adopts the recoverable predecessor under the share
     assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
     // Nothing left to adopt: the new follow-up proceeds to prepare its own worktree.
     const again = await adoptPredecessorFollowupHandoff(
-        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog },
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog, lockToken: 'task-2-token' },
         h.deps,
     );
     assert.ok(!('blocked' in again) || !again.blocked);
@@ -520,12 +520,12 @@ test('a live predecessor blocks a new follow-up instead of racing its retained w
     const h = await createHarness({ liveness: 'running' });
     await seedHandoff(h);
     const adoption = await adoptPredecessorFollowupHandoff(
-        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog },
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog, lockToken: 'task-2-token' },
         h.deps,
     );
     assert.ok('blocked' in adoption && adoption.blocked === 'predecessor_agent_still_running');
     const unavailable = await adoptPredecessorFollowupHandoff(
-        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog },
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog, lockToken: 'task-2-token' },
         { ...h.deps, inspectLiveness: async () => ({ liveness: 'unavailable' }) },
     );
     assert.ok('blocked' in unavailable && unavailable.blocked === 'predecessor_liveness_unavailable');

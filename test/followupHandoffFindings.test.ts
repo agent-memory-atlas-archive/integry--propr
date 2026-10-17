@@ -435,7 +435,7 @@ test('F3: an operator-held predecessor blocks a new follow-up and its row surviv
     assert.ok(held);
 
     const adoption = await adoptPredecessorFollowupHandoff(
-        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog },
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog, lockToken: 'task-2-token' },
         h.deps,
     );
     assert.ok('blocked' in adoption && adoption.blocked === 'predecessor_awaiting_operator');
@@ -813,7 +813,7 @@ test('F11: a mismatched agent container identity fails closed everywhere', async
     assert.equal(held?.status_reason, 'container_identity_mismatch');
 
     const adoption = await adoptPredecessorFollowupHandoff(
-        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog },
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog, lockToken: 'task-2-token' },
         mismatched,
     );
     assert.ok('blocked' in adoption && adoption.blocked === 'predecessor_container_identity_mismatch');

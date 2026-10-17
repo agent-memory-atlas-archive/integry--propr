@@ -173,6 +173,8 @@ export interface PredecessorAdoptionParams {
     pullRequestNumber: number;
     currentTaskId: string;
     log: LoggerLike;
+    /** The caller's current PR processing lease token, installed as the handoff's durable owner before any recovery mutation. */
+    lockToken: string;
     /** Caller's own lease heartbeat signal; adoption stops mutating when it reports loss. */
     isOwnershipLost?: () => boolean;
 }
@@ -218,13 +220,19 @@ export async function adoptPredecessorFollowupHandoff(
             return { blocked: 'predecessor_liveness_unavailable' };
         }
         const recoveredBy = record.task_id === params.currentTaskId ? undefined : params.currentTaskId;
-        let adopted = record;
-        if (recoveredBy && record.successor_task_id !== recoveredBy) {
+        // Durable successor ownership, installed before any recovery mutation:
+        // a suspended predecessor's normal-path checkpoint treats an unchanged
+        // owner token as proof it still owns the row, so the token must change
+        // here. A same-task redelivery shares the job's persisted lease token
+        // with the stale attempt, so its adoption installs a distinct
+        // adoption-scoped token instead.
+        const ownerToken = recoveredBy ? params.lockToken : `${params.lockToken}#redelivery:${randomUUID()}`;
+        const adopted = await advanceFollowupHandoff(resolved.store, record, {
+            lock_token: ownerToken,
             // Durable successor lineage, readable from operator status surfaces.
-            const linked = await advanceFollowupHandoff(resolved.store, record, { successor_task_id: recoveredBy });
-            if (!linked) return { resumed: { outcome: 'superseded' } };
-            adopted = linked;
-        }
+            ...(recoveredBy && record.successor_task_id !== recoveredBy ? { successor_task_id: recoveredBy } : {}),
+        });
+        if (!adopted) return { resumed: { outcome: 'superseded' } };
         // No scheduleRestoredComments: comments restored here are drained by
         // the adopting job's own cleanup, which queues the pending follow-up.
         const resumed = await resumeFollowupHandoff({

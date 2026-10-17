@@ -230,7 +230,7 @@ test('F28: a cancellation while the restored-comment follow-up is queued withdra
 
     // The queued job's admission gate meets the hold instead of executing the claims.
     const adoption = await adoptPredecessorFollowupHandoff(
-        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog },
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog, lockToken: 'task-2-token' },
         h.deps,
     );
     assert.deepEqual(adoption, { blocked: 'predecessor_awaiting_operator' });
@@ -263,7 +263,7 @@ test('F31: a cancellation inside the final task transition withdraws the claims 
     assert.equal(branchOf(h.fx.wt), BRANCH, 'the branch is not released behind an operator hold');
 
     const adoption = await adoptPredecessorFollowupHandoff(
-        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog },
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog, lockToken: 'task-2-token' },
         h.deps,
     );
     assert.deepEqual(adoption, { blocked: 'predecessor_awaiting_operator' });

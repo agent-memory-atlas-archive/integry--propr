@@ -304,6 +304,38 @@ test('a failed retry confirmation after a durable scheduling checkpoint is held 
     assert.equal(held?.status_reason, 'usage_limit_retry_unconfirmed');
 });
 
+// Review 6230432423 F35: a recovery that adopts the handoff while the retry is
+// being scheduled owns everything after; the obsolete writer's confirmation
+// propagates the loss instead of announcing a delay it no longer owns.
+test('a takeover during retry scheduling propagates ownership loss past the delay comment', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const state: HandoffState = { followupHandoff: record };
+    let successor: HandoffRecord | null = null;
+    // The source worker stalls while the retry job is persisted; its lease
+    // expires and a recovery pass installs its own durable owner token.
+    const realAdd = issueQueue.add;
+    issueQueue.add = async (...args: Parameters<typeof realAdd>) => {
+        const job = await realAdd(...args);
+        const scheduling = await loadFollowupHandoff({ database }, KEY);
+        successor = await advanceFollowupHandoff({ database }, scheduling!, { lock_token: 'handoff-recovery:successor' });
+        return job;
+    };
+    try {
+        await assert.rejects(hitUsageLimit(h, state), FollowupHandoffOwnershipLostError);
+    } finally {
+        issueQueue.add = realAdd;
+    }
+    assert.ok(successor, 'the successor took the row over');
+    assert.equal(state.followupHandoffOwnershipLost, true);
+    assert.equal(state.followupHandoff, null);
+    assert.equal(queued.size, 1, 'the retry was already persisted before the takeover was observed');
+    assert.deepEqual(delayComments(h), [], 'the obsolete writer posts no delay comment');
+    const row = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(row?.lock_token, 'handoff-recovery:successor');
+    assert.equal(row?.settlement, SETTLEMENT_RETRY_SCHEDULING, "the successor's view of the uncertain retry is not overwritten");
+});
+
 test('real retry persistence reconciles a terminal duplicate and hands the claim to the queued fallback job', async () => {
     const h = await createHarness();
     const record = await seedHandoff(h);
@@ -327,7 +359,7 @@ test('real retry persistence reconciles a terminal duplicate and hands the claim
 
     // That job adopts its predecessor in-line before preparing a worktree.
     const adoption = await adoptPredecessorFollowupHandoff(
-        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: owner.id, log: silentLog },
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: owner.id, log: silentLog, lockToken: `${owner.id}-token` },
         h.deps as never,
     );
     assert.deepEqual(adoption, { resumed: { outcome: 'settled' } });

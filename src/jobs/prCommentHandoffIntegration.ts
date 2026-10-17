@@ -103,11 +103,15 @@ async function advanceExecutionHandoff(state: HandoffCarrier, changes: Parameter
     }
     // A bare generation conflict can come from a benign concurrent write; it is
     // retried once from a re-read that proves this writer still owns the row.
-    // Anything else is lost ownership, and the publication fails closed rather
-    // than continuing without durable tracking.
+    // Every adoption (standalone or in-line, including a same-task
+    // redelivery's) installs a new owner token, so an unchanged token and
+    // successor lineage are that proof. Anything else is lost ownership, and
+    // the publication fails closed rather than continuing without durable
+    // tracking.
     const fresh = await loadFollowupHandoff({}, record);
     if (fresh && fresh.task_id === record.task_id && fresh.incarnation === record.incarnation
-        && fresh.status === HANDOFF_ACTIVE && fresh.lock_token === record.lock_token) {
+        && fresh.status === HANDOFF_ACTIVE && fresh.lock_token === record.lock_token
+        && fresh.successor_task_id === record.successor_task_id) {
         const retried = await advanceFollowupHandoff({}, fresh, changes);
         if (retried) {
             state.followupHandoff = retried;
@@ -176,9 +180,10 @@ export async function markExecutionHandoffCommentPublished(state: HandoffCarrier
  *
  * `scheduling` fails closed: a failed write or lost ownership throws, so no
  * retry is added and the claim stays with the handoff, whose recovery returns
- * it exactly once. A failed `scheduled` confirmation is only logged — the
- * retry already exists, and the durable `scheduling` state makes recovery
- * hold the handoff for an operator instead of requeueing.
+ * it exactly once. A failed `scheduled` confirmation write is only logged —
+ * the retry already exists, and the durable `scheduling` state makes recovery
+ * hold the handoff for an operator instead of requeueing. Lost ownership at
+ * `scheduled` still throws: the adopting successor owns what follows.
  */
 export async function checkpointExecutionHandoffUsageLimitRetry(
     state: HandoffCarrier,
@@ -193,6 +198,10 @@ export async function checkpointExecutionHandoffUsageLimitRetry(
     try {
         await advanceExecutionHandoff(state, { settlement: SETTLEMENT_RETRY_SCHEDULED });
     } catch (error) {
+        // A successor adopted the handoff while the retry was being scheduled:
+        // it now owns the claim's settlement, so this writer must stop before
+        // the delay comment and its own error settlement.
+        if (error instanceof FollowupHandoffOwnershipLostError) throw error;
         correlatedLogger.warn({ stage, error: (error as Error).message },
             'Could not confirm the scheduled usage-limit retry on the follow-up handoff; recovery holds it as unconfirmed');
     }
@@ -302,7 +311,7 @@ export async function gatePredecessorHandoff(params: PredecessorHandoffGateParam
         // state. Persistent supersession falls through as a blocking reason.
         for (let attempt = 0; ; attempt += 1) {
             adoption = await adoptPredecessorFollowupHandoff(
-                { ...ref, currentTaskId: taskId, log: correlatedLogger, isOwnershipLost: () => leaseLost },
+                { ...ref, currentTaskId: taskId, log: correlatedLogger, lockToken: params.lockToken, isOwnershipLost: () => leaseLost },
                 { redis: redisClient, stateManager },
             );
             if (attempt >= 2 || !('resumed' in adoption) || adoption.resumed?.outcome !== 'superseded') break;

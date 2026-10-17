@@ -273,7 +273,7 @@ test('usage-limit crash window: the retry job adopting its predecessor in-line d
     await hitUsageLimit(h, record);
 
     const adoption = await adoptPredecessorFollowupHandoff(
-        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'retry-job-1', log: silentLog },
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'retry-job-1', log: silentLog, lockToken: 'retry-job-1-token' },
         h.deps,
     );
     assert.deepEqual(adoption, { resumed: { outcome: 'settled' } });
