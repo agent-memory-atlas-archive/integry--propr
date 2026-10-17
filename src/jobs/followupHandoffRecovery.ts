@@ -300,10 +300,12 @@ export async function settleFollowupHandoffAfterFailure(
         throw new Error('Publication evidence inspection needs no push token');
     });
     let unpublished: boolean;
+    let branchHeld = true;
     try {
         const attachment = await git.worktreeAttachment(record.worktree_path, record.branch_name);
         if (attachment === 'missing') {
             unpublished = false;
+            branchHeld = false;
         } else if (attachment === 'not_on_branch' || record.phase === 'committed' || record.phase === 'pushed') {
             unpublished = true;
         } else {
@@ -316,6 +318,14 @@ export async function settleFollowupHandoffAfterFailure(
         unpublished = true;
     }
     if (!unpublished) {
+        // Nothing is owed to GitHub, but a branch still attached to the retained
+        // worktree is an outstanding obligation: the row is kept at
+        // cleanup_pending until recovery proves branch release, so a worker
+        // death before worktree cleanup never strands the branch undiscoverably.
+        if (branchHeld) {
+            await advanceFollowupHandoff(store, record, { phase: 'cleanup_pending', status_reason: 'publication_settled' });
+            return;
+        }
         await finalizeFollowupHandoff(store, record);
         return;
     }

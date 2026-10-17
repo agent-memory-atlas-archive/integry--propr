@@ -2,6 +2,7 @@ import type { Job } from 'bullmq';
 import type { Logger } from 'pino';
 import type { Redis } from 'ioredis';
 import { createHooklessGit } from '@propr/core';
+import { createFollowupHandoffGitOps } from './followupHandoffGitOps.js';
 import type { CommentJobData, JobResult, UnprocessedComment, WorkerStateManager } from '@propr/core';
 import { advanceFollowupHandoff, finalizeFollowupHandoff, loadFollowupHandoff, recordFollowupHandoff, HANDOFF_ACTIVE, type FollowupHandoffRecord } from './followupHandoffStore.js';
 import { adoptPredecessorFollowupHandoff, settleFollowupHandoffAfterFailure } from './followupHandoffRecovery.js';
@@ -127,11 +128,52 @@ export async function markExecutionHandoffCommentPublished(state: HandoffCarrier
     await advanceExecutionHandoff(state, { phase: 'comment_published', completion_comment_url: commentUrl ?? null });
 }
 
-/** Retires the handoff once commit, push and the completion comment are published. */
-export async function finalizeExecutionHandoff(state: HandoffCarrier): Promise<void> {
-    if (!state.followupHandoff) return;
-    await finalizeFollowupHandoff({}, state.followupHandoff);
+/**
+ * Marks the owed publication fully delivered. The row is retained at
+ * cleanup_pending rather than deleted, because the branch stays attached to the
+ * worktree until the job's cleanup runs: a worker death in that window leaves a
+ * discoverable record whose recovery releases the branch without republishing.
+ */
+export async function markExecutionHandoffCleanupPending(state: HandoffCarrier, correlatedLogger: Logger): Promise<void> {
+    try {
+        await advanceExecutionHandoff(state, { phase: 'cleanup_pending' });
+    } catch (error) {
+        if (!(error instanceof FollowupHandoffOwnershipLostError)) throw error;
+        // Publication is already complete; the row moved on to another owner,
+        // who now carries the branch-cleanup obligation durably instead.
+        correlatedLogger.warn({ error: error.message }, 'Could not record the follow-up handoff cleanup checkpoint after publication');
+    }
+}
+
+/**
+ * Retires the handoff only once the worktree cleanup proved branch release
+ * (the worktree is gone or detached). A still-attached branch keeps the row at
+ * cleanup_pending, blocking successors until recovery releases it durably.
+ */
+export async function retireExecutionHandoffAfterCleanup(state: HandoffCarrier, correlatedLogger: Logger): Promise<void> {
+    const record = state.followupHandoff;
+    if (!record) return;
     state.followupHandoff = null;
+    try {
+        // Re-read: an error settlement may have advanced the row (or held it
+        // for an operator) after this writer's copy; only this task's own
+        // active cleanup_pending row may retire here.
+        const fresh = await loadFollowupHandoff({}, record);
+        if (!fresh || fresh.task_id !== record.task_id || fresh.incarnation !== record.incarnation
+            || fresh.status !== HANDOFF_ACTIVE || fresh.phase !== 'cleanup_pending') return;
+        const git = createFollowupHandoffGitOps(async () => {
+            throw new Error('Branch-release evidence needs no push token');
+        });
+        if (await git.worktreeAttachment(fresh.worktree_path, fresh.branch_name) === 'attached') {
+            correlatedLogger.warn({ worktreePath: fresh.worktree_path, branchName: fresh.branch_name },
+                'The follow-up branch is still attached after cleanup; the handoff is retained for recovery to release it');
+            return;
+        }
+        await finalizeFollowupHandoff({}, fresh);
+    } catch (error) {
+        correlatedLogger.warn({ error: (error as Error).message },
+            'Could not retire the follow-up handoff after cleanup; it stays recoverable');
+    }
 }
 
 export interface PredecessorHandoffGateParams {
@@ -178,7 +220,8 @@ export async function gatePredecessorHandoff(params: PredecessorHandoffGateParam
         onLockLost: () => { leaseLost = true; },
         onError: error => correlatedLogger.warn({ lockKey: params.lockKey, error: (error as Error).message }, 'Failed to renew PR processing lock during predecessor handoff adoption'),
     });
-    let adoption: Awaited<ReturnType<typeof adoptPredecessorFollowupHandoff>>;
+    let adoption: Awaited<ReturnType<typeof adoptPredecessorFollowupHandoff>> = {};
+    let blocked: string | undefined;
     try {
         // A superseded outcome means the row moved on mid-adoption; re-read and
         // resolve it before admitting this writer instead of racing an unknown
@@ -190,10 +233,17 @@ export async function gatePredecessorHandoff(params: PredecessorHandoffGateParam
             );
             if (attempt >= 2 || !('resumed' in adoption) || adoption.resumed?.outcome !== 'superseded') break;
         }
+    } catch (error) {
+        // Fail closed: an adoption this writer could not verify or finish (for
+        // example unavailable remote evidence) leaves the predecessor's
+        // obligation standing, so the successor reschedules instead of racing
+        // the retained worktree with a fresh one.
+        correlatedLogger.warn({ error: (error as Error).message }, 'Predecessor follow-up handoff adoption failed; rescheduling this writer');
+        blocked = 'predecessor_recovery_failed';
     } finally {
         await stopHeartbeat();
     }
-    const blocked = predecessorBlockReason(adoption);
+    blocked ??= predecessorBlockReason(adoption);
     if (!blocked) return undefined;
     const replacementTaskId = await schedulePRCommentRecovery({
         job, taskId, stateManager, redisClient, pickedUpComments: params.pickedUpComments,

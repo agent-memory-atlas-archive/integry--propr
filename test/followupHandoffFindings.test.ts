@@ -478,9 +478,29 @@ test('F4: a handled failure with retained unpublished work keeps the handoff ado
     assert.equal(recoveredComments(h).length, 1);
 });
 
-test('F4: a handled failure with no unpublished work retires the handoff', async () => {
+test('F4/F15: a handled failure with no unpublished work keeps the row until branch release is proven', async () => {
     const h = await createHarness();
     await seedHandoff(h);
+    await settleFollowupHandoffAfterFailure(
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, taskId: 'task-1', cancelled: false },
+        { store: { database }, git: h.gitOps as never, log: silentLog },
+    );
+    // The branch is still attached to the retained worktree, so the settled row
+    // survives at cleanup_pending instead of being deleted with the branch held.
+    const pending = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(pending?.status, HANDOFF_ACTIVE);
+    assert.equal(pending?.phase, 'cleanup_pending');
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.noChanges, 1, 'recovery releases the branch without republishing');
+    assert.equal(h.counters.released, 1);
+    assert.equal(h.counters.pushes + h.octokit.comments.length, 0, 'nothing publishes during cleanup');
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined, 'the row retires once the branch is free');
+});
+
+test('F4/F15: a handled failure whose worktree is already gone retires the handoff', async () => {
+    const h = await createHarness();
+    await seedHandoff(h);
+    await rm(h.fx.wt, { recursive: true, force: true });
     await settleFollowupHandoffAfterFailure(
         { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, taskId: 'task-1', cancelled: false },
         { store: { database }, git: h.gitOps as never, log: silentLog },

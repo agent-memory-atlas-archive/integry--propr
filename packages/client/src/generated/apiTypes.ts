@@ -211,6 +211,90 @@ export interface ExtensionSelection {
   revision: number;
 }
 
+export interface FollowupHandoffDetail {
+  status: FollowupHandoffStatus;
+}
+
+export interface FollowupHandoffList {
+  handoffs: FollowupHandoffStatus[];
+}
+
+/** Counts of one recovery pass. Keyed passes inspect at most the addressed pull request. */
+export interface FollowupHandoffRecoverySummary {
+  inspected: number;
+  /** Interrupted work recovered and published exactly once. */
+  published: number;
+  /** Interrupted runs that produced nothing; their requests were returned to the queue. */
+  noChanges: number;
+  /** Publication settled but branch release still owed; retried on the next pass. */
+  cleanupPending: number;
+  skippedLiveAgent: number;
+  /** Records whose container evidence was unavailable or ambiguous; left untouched. */
+  failedClosed: number;
+  awaitingOperator: number;
+  lockedByOtherWriter: number;
+  /** Records whose recovery failed (for example unreachable remote evidence); retained for the next pass. */
+  errors: number;
+}
+
+export interface FollowupHandoffReleaseRequest {
+  /** Also release a branch whose retained worktree still holds unpublished work. Never deletes worktree files, and never overrides a live or unverifiable agent. */
+  force?: boolean;
+}
+
+/** Outcome of a release request; refusals answer `409` with `released: false`. */
+export interface FollowupHandoffReleaseResult {
+  released: boolean;
+  /** Refusal code when `released` is false, for example `agent_still_running`, `liveness_unavailable`, `lease_held_by_live_writer` or `worktree_holds_unpublished_work`. */
+  reason?: string;
+}
+
+export interface FollowupHandoffResumeRequest {
+  /** Set `true` to explicitly authorize publishing work the user cancelled. Without it, resume re-arms the operator-held record and refuses cancelled work with code `requires_cancellation_authorization`. */
+  authorizeCancelled?: boolean;
+}
+
+export interface FollowupHandoffResumeResult {
+  summary: FollowupHandoffRecoverySummary;
+  /** State after the keyed recovery pass; `null` once the handoff retired completely. */
+  status: FollowupHandoffStatus | null;
+}
+
+/** Operator-facing status of one durable follow-up publication handoff. */
+export interface FollowupHandoffStatus {
+  /** Lowercase `owner/repo` of the pull request the handoff belongs to. */
+  repository: string;
+  pullRequest: number;
+  /** Task whose interrupted follow-up publication the handoff records. */
+  taskId: string;
+  /** Source task lineage recorded when the agent launched. */
+  predecessorTaskIds: string[];
+  /** Task that adopted the handoff during recovery, when any. */
+  successorTaskId: string | null;
+  /** Exact publication step recovery resumes from. `cleanup_pending` means everything is published and only branch release is owed. */
+  phase: "agent_running" | "agent_exited" | "committed" | "pushed" | "comment_published" | "cleanup_pending";
+  /** `active` records are recovered automatically; `awaiting_operator` records never publish without an explicit operator decision. */
+  status: "active" | "awaiting_operator" | "released";
+  /** Why the handoff is held or failed closed, for example `cancelled_by_user`, `worktree_missing`, `head_advanced_externally`, `liveness_unavailable`. */
+  statusReason: string | null;
+  /** Whether an operator explicitly authorized publishing user-cancelled work. */
+  operatorAuthorized: boolean;
+  /** Agent container liveness evidence, for example `running`, `stopped`, `not_found` or `unavailable` (recovery fails closed on the latter). */
+  liveness: string;
+  /** PR head branch still attached to the retained worktree until cleanup releases it. */
+  branchName: string;
+  /** Commit recovery is bound to publish, once recorded. */
+  commitHash: string | null;
+  /** Delivered completion comment; recovery never overwrites it. */
+  completionCommentUrl: string | null;
+  /** Operator guidance for the current state. */
+  nextAction: string;
+  /** Host path of the retained worktree. Deliberately admin-only; never shown on member routes. */
+  retainedWorktreePath: string;
+  /** Unix milliseconds of the last durable update. */
+  updatedAt: number;
+}
+
 /** Liveness probe result. */
 export interface Health {
   status: "ok";

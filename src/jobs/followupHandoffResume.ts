@@ -193,17 +193,28 @@ function interruptedWithoutChangesBody(record: FollowupHandoffRecord): string {
     ].filter(Boolean).join('\n\n');
 }
 
-/** Publishes the owed comment exactly once, keyed by the handoff's durable marker. */
-async function publishOwedComment(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord, body: string): Promise<string | null> {
-    if (record.completion_comment_url) return record.completion_comment_url;
+/**
+ * Publishes the owed comment exactly once, keyed by the handoff's durable
+ * marker. The lease can be lost while any of these GitHub requests is awaited,
+ * so ownership is re-checked immediately before each mutation — the
+ * starting-comment PATCH and the fallback POST after pagination (which also
+ * covers a PATCH that found its comment deleted).
+ */
+async function publishOwedComment(
+    params: ResumeFollowupHandoffParams,
+    record: FollowupHandoffRecord,
+    body: string,
+): Promise<{ url: string | null } | { lost: true }> {
+    if (record.completion_comment_url) return { url: record.completion_comment_url };
     const { owner, repo } = splitHandoffRepository(record.repository);
     const marker = handoffCommentMarker(record);
     if (record.starting_comment_id) {
+        if (ownershipLost(params, record)) return { lost: true };
         try {
             const { data } = await params.octokit.request('PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}', {
                 owner, repo, comment_id: record.starting_comment_id, body,
             });
-            return (data as IssueComment).html_url ?? null;
+            return { url: (data as IssueComment).html_url ?? null };
         } catch (error) {
             if ((error as { status?: number }).status !== 404) throw error;
         }
@@ -212,11 +223,12 @@ async function publishOwedComment(params: ResumeFollowupHandoffParams, record: F
         owner, repo, issue_number: record.pull_request, per_page: 100,
     }) as IssueComment[];
     const existing = comments.find(comment => comment.body?.includes(marker));
-    if (existing) return existing.html_url ?? null;
+    if (existing) return { url: existing.html_url ?? null };
+    if (ownershipLost(params, record)) return { lost: true };
     const { data } = await params.octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
         owner, repo, issue_number: record.pull_request, body,
     });
-    return (data as IssueComment).html_url ?? null;
+    return { url: (data as IssueComment).html_url ?? null };
 }
 
 const terminalStates = (taskStates: HandoffTaskStates): Set<string> =>
@@ -257,7 +269,11 @@ async function attemptHandoffCleanup(params: ResumeFollowupHandoffParams, record
     if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
     let released = false;
     try {
-        released = await params.git.releaseSettledWorktree(record.local_repo_path, record.branch_name, record.worktree_path);
+        // A worktree that normal cleanup already removed or detached before the
+        // row could retire no longer holds the branch — that is the release
+        // proof this phase owes, so the row must not stay pending forever.
+        released = await params.git.worktreeAttachment(record.worktree_path, record.branch_name) !== 'attached'
+            || await params.git.releaseSettledWorktree(record.local_repo_path, record.branch_name, record.worktree_path);
     } catch (error) {
         params.log.warn({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, error: (error as Error).message },
             'Branch release from the settled worktree failed; the handoff is retained to retry cleanup');
@@ -281,7 +297,8 @@ async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record:
     const hold = await cancellationHold(params, record);
     if (hold) return hold;
     if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
-    await publishOwedComment(params, record, interruptedWithoutChangesBody(record));
+    const notice = await publishOwedComment(params, record, interruptedWithoutChangesBody(record));
+    if ('lost' in notice) return { outcome: 'ownership_lost' };
     await params.restoreComments(record, parseClaimedComments(record));
     await finalizeRecoveredTask(params, record, false);
     const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'cleanup_pending' });
@@ -335,6 +352,10 @@ async function pushCommittedWork(params: ResumeFollowupHandoffParams, record: Fo
     if (!record.commit_hash || await git.head(record.worktree_path) !== record.commit_hash) {
         return { done: await holdForOperator(params, record, 'recorded_commit_mismatch') };
     }
+    // Binding validation and the worktree evidence above are lengthy awaits; a
+    // cancellation or lease loss that landed during them must stop the push.
+    const lateHold = await cancellationHold(params, record);
+    if (lateHold) return { done: lateHold };
     if (ownershipLost(params, record)) return { done: { outcome: 'ownership_lost' } };
     const { owner, repo } = splitHandoffRepository(record.target_repository);
     let pushed: Awaited<ReturnType<typeof git.push>>;
@@ -358,8 +379,9 @@ async function publishPushedCompletion(params: ResumeFollowupHandoffParams, reco
     const hold = await cancellationHold(params, record);
     if (hold) return { done: hold };
     if (ownershipLost(params, record)) return { done: { outcome: 'ownership_lost' } };
-    const commentUrl = await publishOwedComment(params, record, recoveredCompletionBody(record));
-    const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'comment_published', completion_comment_url: commentUrl });
+    const published = await publishOwedComment(params, record, recoveredCompletionBody(record));
+    if ('lost' in published) return { done: { outcome: 'ownership_lost' } };
+    const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'comment_published', completion_comment_url: published.url });
     return advanced ? { record: advanced } : { done: { outcome: 'superseded' } };
 }
 

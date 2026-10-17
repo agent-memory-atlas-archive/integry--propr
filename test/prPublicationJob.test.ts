@@ -209,7 +209,8 @@ const modules: Record<string, Record<string, unknown>> = {
     prCommentHandoffIntegration: {
         recordExecutionHandoff: noOp, markExecutionHandoffAgentExited: noOp, markExecutionHandoffContainer: noOp,
         markExecutionHandoffCommitted: noOp, markExecutionHandoffPushed: noOp, markExecutionHandoffCommentPublished: noOp,
-        finalizeExecutionHandoff: noOp, gatePredecessorHandoff: async () => undefined, settleExecutionHandoffAfterError: noOp,
+        markExecutionHandoffCleanupPending: noOp, retireExecutionHandoffAfterCleanup: noOp,
+        gatePredecessorHandoff: async () => undefined, settleExecutionHandoffAfterError: noOp,
     },
     prCommentCollisionRecovery: {
         createPRCommentTaskStateIfMissing: async (params: Parameters<typeof realRecovery.createPRCommentTaskStateIfMissing>[0]) => { if (realReentryHelpers) await realRecovery.createPRCommentTaskStateIfMissing(params); },

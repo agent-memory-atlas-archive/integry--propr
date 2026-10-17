@@ -3,7 +3,7 @@ import { after, beforeEach, mock, test } from 'node:test';
 import knex from 'knex';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { up } from '../packages/core/src/db/migrations/20261017000000_add_pr_followup_handoffs.js';
@@ -16,6 +16,13 @@ import { up } from '../packages/core/src/db/migrations/20261017000000_add_pr_fol
  * (F11), recovery never rebases over an externally advanced head (F12),
  * no-change recovery re-checks cancellation (F13), and self-provisioned Redis
  * uses the shared runtime configuration (F14).
+ *
+ * Also regressions for review 6228446060 (F15–F20): normal success and settled
+ * failures retain the row at cleanup_pending until branch release is proven
+ * (F15), cancellation is re-checked after binding validation (F17), owed-comment
+ * publication re-checks the lease before every PATCH/POST including the
+ * pagination fallback (F18), and unavailable remote evidence fails closed in
+ * the default git ops, the recovery pass and the admission gate (F20).
  */
 
 const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
@@ -119,9 +126,11 @@ const { recordFailedClosed, resolveRecoveryDeps } = await import('../src/jobs/fo
 const { recoverInterruptedFollowupHandoffs } = await import('../src/jobs/followupHandoffRecovery.js');
 const {
     FollowupHandoffOwnershipLostError, gatePredecessorHandoff,
-    markExecutionHandoffCommitted, markExecutionHandoffPushed, recordExecutionHandoff,
+    markExecutionHandoffCleanupPending, markExecutionHandoffCommitted, markExecutionHandoffPushed,
+    recordExecutionHandoff, retireExecutionHandoffAfterCleanup,
 } = await import('../src/jobs/prCommentHandoffIntegration.js');
 const { createFollowupHandoffGitOps } = await import('../src/jobs/followupHandoffGitOps.js');
+const { resumeFollowupHandoff } = await import('../src/jobs/followupHandoffResume.js');
 
 let fixtureIndex = 0;
 interface Fixture { dir: string; origin: string; local: string; wt: string }
@@ -590,4 +599,174 @@ test('F14: recovery builds its Redis client from the shared runtime configuratio
     });
     assert.equal(injected.ownRedis, false);
     assert.equal(FakeRuntimeRedis.constructed.length, 2);
+});
+
+// --- F15: durable cleanup for normal success; the row survives until branch release.
+
+test('F15: a published follow-up retains the handoff at cleanup_pending until the branch is free', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    // The normal path delivered commit, push and completion comment.
+    await agentEdit(h.fx);
+    const head = commitInWorktree(h.fx);
+    git(h.fx.wt, 'push', 'origin', `HEAD:refs/heads/${BRANCH}`);
+    const published = await advanceFollowupHandoff({ database }, record, {
+        phase: 'comment_published', commit_hash: head, completion_comment_url: 'https://example.test/comment/1',
+    });
+    assert.ok(published);
+    const state = { followupHandoff: published };
+    await markExecutionHandoffCleanupPending(state, silentLog as never);
+    const pending = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(pending?.phase, 'cleanup_pending');
+    assert.equal(pending?.status, HANDOFF_ACTIVE);
+    assert.equal(git(h.fx.wt, 'branch', '--show-current'), BRANCH, 'the branch is still attached before cleanup');
+
+    // A worker death in this window leaves a discoverable row: recovery frees
+    // the branch without republishing anything.
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.published, 1);
+    assert.equal(h.counters.pushes, 0, 'cleanup never pushes again');
+    assert.equal(h.octokit.comments.length, 0, 'cleanup never comments again');
+    assert.equal(git(h.fx.wt, 'branch', '--show-current'), '', 'the branch is released');
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined, 'the row retires once release is proven');
+});
+
+test('F15: the handoff retires only once worktree cleanup proves branch release', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const pending = await advanceFollowupHandoff({ database }, record, { phase: 'cleanup_pending' });
+    assert.ok(pending);
+
+    // Worktree cleanup has not freed the branch yet: the row must survive.
+    await retireExecutionHandoffAfterCleanup({ followupHandoff: pending }, silentLog as never);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.phase, 'cleanup_pending');
+
+    // Cleanup detached the worktree; retirement is now provable.
+    git(h.fx.wt, 'checkout', '--detach');
+    const freed = await loadFollowupHandoff({ database }, KEY);
+    await retireExecutionHandoffAfterCleanup({ followupHandoff: freed! }, silentLog as never);
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+});
+
+// --- F17: cancellation observed during binding validation stops the push.
+
+test('F17: cancellation during binding validation stops the recovery push', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h, { binding: { headRef: BRANCH, baseRef: 'main', headSha: originHead(h.fx) } });
+    await agentEdit(h.fx);
+    const recorded = commitInWorktree(h.fx);
+    await advanceFollowupHandoff({ database }, record, { phase: 'committed', commit_hash: recorded });
+    const realRequest = h.octokit.request.bind(h.octokit);
+    h.octokit.request = async (route: string, params?: Record<string, unknown>) => {
+        // The user cancels while recovery awaits the PR binding lookup.
+        if (route.startsWith('GET ')) h.stateManager.states.set('task-1', 'cancelled');
+        return realRequest(route, params);
+    };
+    const before = originHead(h.fx);
+
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.awaitingOperator, 1);
+    assert.equal(h.counters.pushes, 0, 'the cancelled work is never pushed');
+    assert.equal(originHead(h.fx), before);
+    const held = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(held?.status, HANDOFF_AWAITING_OPERATOR);
+    assert.equal(held?.status_reason, 'cancelled_by_user');
+});
+
+// --- F18: owed-comment publication re-checks the lease before each mutation.
+
+function resumeParams(h: Harness, record: NonNullable<Awaited<ReturnType<typeof loadFollowupHandoff>>>, isOwnershipLost: () => boolean) {
+    return {
+        record, octokit: h.octokit as never, git: h.gitOps as never,
+        stateManager: h.stateManager as never, restoreComments: async () => undefined,
+        store: { database }, log: silentLog,
+        taskStates: { COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled' },
+        isOwnershipLost,
+    };
+}
+
+test('F18: lease loss during comment pagination stops the fallback POST and retains the obligation', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    await agentEdit(h.fx);
+    const head = commitInWorktree(h.fx);
+    git(h.fx.wt, 'push', 'origin', `HEAD:refs/heads/${BRANCH}`);
+    const pushed = await advanceFollowupHandoff({ database }, record, { phase: 'pushed', commit_hash: head });
+    assert.ok(pushed);
+    let lost = false;
+    h.octokit.paginate = async () => { lost = true; return []; };
+
+    const outcome = await resumeFollowupHandoff(resumeParams(h, pushed, () => lost));
+    assert.equal(outcome.outcome, 'ownership_lost');
+    assert.equal(h.octokit.comments.length, 0, 'no comment is created after the observed loss');
+    const retained = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(retained?.phase, 'pushed');
+    assert.equal(retained?.status, HANDOFF_ACTIVE, 'the obligation stays recorded for the next owner');
+});
+
+test('F18: lease loss after a 404 starting-comment PATCH stops the fallback creation', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    await agentEdit(h.fx);
+    const head = commitInWorktree(h.fx);
+    git(h.fx.wt, 'push', 'origin', `HEAD:refs/heads/${BRANCH}`);
+    // The recorded starting comment was deleted meanwhile: the PATCH 404s and
+    // execution falls through to the pagination + creation fallback.
+    const pushed = await advanceFollowupHandoff({ database }, record, {
+        phase: 'pushed', commit_hash: head, starting_comment_id: 555,
+    });
+    assert.ok(pushed);
+    let lost = false;
+    h.octokit.paginate = async () => { lost = true; return []; };
+
+    const outcome = await resumeFollowupHandoff(resumeParams(h, pushed, () => lost));
+    assert.equal(outcome.outcome, 'ownership_lost');
+    assert.equal(h.octokit.comments.length, 0);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_ACTIVE);
+});
+
+// --- F20: unavailable remote evidence fails closed instead of trusting the cache.
+
+test('F20: the default git ops refuse cached remote evidence when the remote is unreachable', async () => {
+    const fx = await createFixture();
+    const ops = createFollowupHandoffGitOps(async () => 'token');
+    assert.ok(await ops.remoteBranchHead(fx.wt, BRANCH), 'a reachable remote answers (and caches the ref)');
+    await rename(fx.origin, `${fx.origin}.gone`);
+    await assert.rejects(ops.remoteBranchHead(fx.wt, BRANCH), /remote publication evidence is unavailable/);
+    // The unpushed-work overestimate stays tolerant offline; it gates nothing by itself.
+    assert.equal(await ops.hasUnpushedCommits(fx.wt, BRANCH), false);
+});
+
+test('F20: unavailable remote evidence retains the committed handoff and pushes nothing', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h, { binding: { headSha: originHead(h.fx) } });
+    await agentEdit(h.fx);
+    const recorded = commitInWorktree(h.fx);
+    await advanceFollowupHandoff({ database }, record, { phase: 'committed', commit_hash: recorded });
+    h.gitOps.remoteBranchHead = async () => { throw new Error('current remote publication evidence is unavailable'); };
+
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.errors, 1, 'the pass fails closed and retries later');
+    assert.equal(h.counters.pushes, 0, 'nothing publishes against stale evidence');
+    const retained = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(retained?.status, HANDOFF_ACTIVE);
+    assert.equal(retained?.phase, 'committed');
+});
+
+test('F20: a gate that cannot verify the predecessor reschedules the successor instead of racing it', async () => {
+    const h = await createHarness();
+    octokitForDefaults = h.octokit;
+    const record = await seedHandoff(h, { binding: { headSha: originHead(h.fx) } });
+    await agentEdit(h.fx);
+    const recorded = commitInWorktree(h.fx);
+    await advanceFollowupHandoff({ database }, record, { phase: 'committed', commit_hash: recorded });
+    // The gate's inline resume needs current remote evidence; take the remote away.
+    await rename(h.fx.origin, `${h.fx.origin}.gone`);
+
+    const result = await gatePredecessorHandoff(gateParams(h, 'task-2'));
+    assert.ok(result, 'the successor is not admitted');
+    assert.equal(result!.status, 'rescheduled');
+    assert.equal((result as { reason?: string }).reason, 'predecessor_recovery_failed');
+    assert.equal(queuedRecoveryJobs.length, 1, 'a delayed replacement job was queued');
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_ACTIVE, 'the predecessor obligation is untouched');
 });

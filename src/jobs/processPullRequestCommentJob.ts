@@ -43,7 +43,7 @@ import {
     acquireCurrentPRProcessingLock, ensurePRProcessingLockToken, releasePRProcessingLock, startPRProcessingLockHeartbeat,
 } from './prProcessingLock.js';
 import { createPRCommentTaskStateIfMissing, evaluatePRCommentPreExecutionRecovery, handlePRCommentLockContention } from './prCommentCollisionRecovery.js';
-import { finalizeExecutionHandoff, gatePredecessorHandoff, markExecutionHandoffAgentExited, markExecutionHandoffContainer, recordExecutionHandoff, settleExecutionHandoffAfterError } from './prCommentHandoffIntegration.js';
+import { gatePredecessorHandoff, markExecutionHandoffAgentExited, markExecutionHandoffCleanupPending, markExecutionHandoffContainer, recordExecutionHandoff, retireExecutionHandoffAfterCleanup, settleExecutionHandoffAfterError } from './prCommentHandoffIntegration.js';
 import { stopOriginalPRReviewCycle } from './prContinuationReview.js';
 import { loadOriginalContributionDiscussion } from './prContributionDiscussion.js';
 import { PullRequestPublication } from './prPublication.js';
@@ -344,8 +344,9 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
         });
         if (!stopped) await handleUltrafixContinuation('fix', { job, stateManager, taskId, redisClient, repoOwner, repoName, pullRequestNumber, correlatedLogger, correlationId });
         await publication.finishCompletion();
-        // The owed commit, push and completion comment are published; retire the handoff.
-        await finalizeExecutionHandoff(state);
+        // The owed commit, push and completion comment are published; the handoff
+        // is retained at cleanup_pending until worktree cleanup frees the branch.
+        await markExecutionHandoffCleanupPending(state, correlatedLogger);
 
         return { status: postResult.partial ? 'partial' : 'complete', commit: postResult.commitHash, pullRequestNumber, claudeResult: { success: state.claudeResult.success } };
     });
@@ -478,5 +479,8 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
     } finally {
         await stopLockHeartbeat();
         await cleanupJob({ stateManager, lockKey, lockToken, taskId, octokit: state.octokit ?? undefined, localRepoPath: state.localRepoPath, worktreeInfo: state.worktreeInfo, repoOwner, repoName, pullRequestNumber, jobBranchName: context.jobBranchName, jobLlm: context.llm, jobUserId: job.data.userId, jobReasoningLevel: job.data.reasoningLevel, correlatedLogger, redisClient, skipPendingCommentFollowup: capacityRefused, success: !executionFailed });
+        // Only now is branch release provable; the handoff retires against that
+        // evidence, or stays at cleanup_pending for recovery to release it.
+        await retireExecutionHandoffAfterCleanup(state, correlatedLogger);
     }
 }

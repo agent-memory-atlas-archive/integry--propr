@@ -375,3 +375,62 @@ export const InstanceDatabaseExport = component('InstanceDatabaseExport', z.obje
   state: z.enum(['running', 'ready', 'failed', 'redeemed']), expiresAt: isoDateTime, scope: z.literal('customer_database'),
   sizeBytes: z.number().nonnegative().optional(), sha256: z.string().optional(), schemaVersion: z.number().int().optional(), migration: z.string().nullable().optional(),
 }));
+
+export const FollowupHandoffStatus = component('FollowupHandoffStatus', z.object({
+  repository: z.string().describe('Lowercase `owner/repo` of the pull request the handoff belongs to.'),
+  pullRequest: z.number().int().positive(),
+  taskId: z.string().describe('Task whose interrupted follow-up publication the handoff records.'),
+  predecessorTaskIds: z.array(z.string()).describe('Source task lineage recorded when the agent launched.'),
+  successorTaskId: z.string().nullable().describe('Task that adopted the handoff during recovery, when any.'),
+  phase: z.enum(['agent_running', 'agent_exited', 'committed', 'pushed', 'comment_published', 'cleanup_pending'])
+    .describe('Exact publication step recovery resumes from. `cleanup_pending` means everything is published and only branch release is owed.'),
+  status: z.enum(['active', 'awaiting_operator', 'released'])
+    .describe('`active` records are recovered automatically; `awaiting_operator` records never publish without an explicit operator decision.'),
+  statusReason: z.string().nullable().describe('Why the handoff is held or failed closed, for example `cancelled_by_user`, `worktree_missing`, `head_advanced_externally`, `liveness_unavailable`.'),
+  operatorAuthorized: z.boolean().describe('Whether an operator explicitly authorized publishing user-cancelled work.'),
+  liveness: z.string().describe('Agent container liveness evidence, for example `running`, `stopped`, `not_found` or `unavailable` (recovery fails closed on the latter).'),
+  branchName: z.string().describe('PR head branch still attached to the retained worktree until cleanup releases it.'),
+  commitHash: z.string().nullable().describe('Commit recovery is bound to publish, once recorded.'),
+  completionCommentUrl: z.string().nullable().describe('Delivered completion comment; recovery never overwrites it.'),
+  nextAction: z.string().describe('Operator guidance for the current state.'),
+  retainedWorktreePath: z.string().describe('Host path of the retained worktree. Deliberately admin-only; never shown on member routes.'),
+  updatedAt: z.number().describe('Unix milliseconds of the last durable update.'),
+}), 'Operator-facing status of one durable follow-up publication handoff.');
+
+export const FollowupHandoffList = component('FollowupHandoffList', z.object({
+  handoffs: z.array(FollowupHandoffStatus),
+}));
+
+export const FollowupHandoffDetail = component('FollowupHandoffDetail', z.object({
+  status: FollowupHandoffStatus,
+}));
+
+export const FollowupHandoffRecoverySummary = component('FollowupHandoffRecoverySummary', z.object({
+  inspected: z.number().int().nonnegative(),
+  published: z.number().int().nonnegative().describe('Interrupted work recovered and published exactly once.'),
+  noChanges: z.number().int().nonnegative().describe('Interrupted runs that produced nothing; their requests were returned to the queue.'),
+  cleanupPending: z.number().int().nonnegative().describe('Publication settled but branch release still owed; retried on the next pass.'),
+  skippedLiveAgent: z.number().int().nonnegative(),
+  failedClosed: z.number().int().nonnegative().describe('Records whose container evidence was unavailable or ambiguous; left untouched.'),
+  awaitingOperator: z.number().int().nonnegative(),
+  lockedByOtherWriter: z.number().int().nonnegative(),
+  errors: z.number().int().nonnegative().describe('Records whose recovery failed (for example unreachable remote evidence); retained for the next pass.'),
+}), 'Counts of one recovery pass. Keyed passes inspect at most the addressed pull request.');
+
+export const FollowupHandoffResumeRequest = component('FollowupHandoffResumeRequest', z.object({
+  authorizeCancelled: z.boolean().optional().describe('Set `true` to explicitly authorize publishing work the user cancelled. Without it, resume re-arms the operator-held record and refuses cancelled work with code `requires_cancellation_authorization`.'),
+}));
+
+export const FollowupHandoffResumeResult = component('FollowupHandoffResumeResult', z.object({
+  summary: FollowupHandoffRecoverySummary,
+  status: FollowupHandoffStatus.nullable().describe('State after the keyed recovery pass; `null` once the handoff retired completely.'),
+}));
+
+export const FollowupHandoffReleaseRequest = component('FollowupHandoffReleaseRequest', z.object({
+  force: z.boolean().optional().describe('Also release a branch whose retained worktree still holds unpublished work. Never deletes worktree files, and never overrides a live or unverifiable agent.'),
+}));
+
+export const FollowupHandoffReleaseResult = component('FollowupHandoffReleaseResult', z.object({
+  released: z.boolean(),
+  reason: z.string().optional().describe('Refusal code when `released` is false, for example `agent_still_running`, `liveness_unavailable`, `lease_held_by_live_writer` or `worktree_holds_unpublished_work`.'),
+}), 'Outcome of a release request; refusals answer `409` with `released: false`.');

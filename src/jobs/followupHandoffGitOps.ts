@@ -27,7 +27,7 @@ export interface FollowupHandoffGitOps {
     commitWork(worktreePath: string, message: string, pullRequestNumber: number): Promise<{ commitHash: string } | null>;
     hasUnpushedCommits(worktreePath: string, branchName: string): Promise<boolean>;
     head(worktreePath: string): Promise<string>;
-    /** Last known remote head of the branch (fetched when reachable), or null when the remote ref is unknown. */
+    /** Freshly fetched remote head of the branch, null when no remote ref exists; rejects when the remote is unreachable. */
     remoteBranchHead(worktreePath: string, branchName: string): Promise<string | null>;
     /** Whether the given commit is the worktree HEAD or one of its ancestors. */
     isAncestorOfHead(worktreePath: string, sha: string): Promise<boolean>;
@@ -38,12 +38,12 @@ export interface FollowupHandoffGitOps {
     detachWorktreeHead(worktreePath: string): Promise<void>;
 }
 
-async function fetchRemoteBranch(worktreePath: string, branchName: string): Promise<void> {
+async function fetchRemoteBranch(worktreePath: string, branchName: string): Promise<boolean> {
     try {
         await createHooklessGit(worktreePath).raw(['fetch', 'origin', `+refs/heads/${branchName}:refs/remotes/origin/${branchName}`]);
+        return true;
     } catch {
-        // Offline comparison against the last known remote ref is still safe:
-        // it can only overestimate the unpushed work, and the push is idempotent.
+        return false;
     }
 }
 
@@ -67,6 +67,9 @@ export function createFollowupHandoffGitOps(getToken: () => Promise<string>): Fo
             return commitChanges(worktreePath, message, AI_COMMIT_AUTHOR, { issueNumber: pullRequestNumber, issueTitle: 'Recovered follow-up changes' });
         },
         async hasUnpushedCommits(worktreePath, branchName) {
+            // Offline comparison against the last known remote ref is still safe
+            // here: it can only overestimate the unpushed work, and the push that
+            // publishes it revalidates against freshly fetched remote evidence.
             await fetchRemoteBranch(worktreePath, branchName);
             try {
                 const unpushed = await createHooklessGit(worktreePath).raw(['rev-list', '--count', 'HEAD', '--not', `refs/remotes/origin/${branchName}`]);
@@ -80,7 +83,12 @@ export function createFollowupHandoffGitOps(getToken: () => Promise<string>): Fo
             return (await createHooklessGit(worktreePath).raw(['rev-parse', 'HEAD'])).trim();
         },
         async remoteBranchHead(worktreePath, branchName) {
-            await fetchRemoteBranch(worktreePath, branchName);
+            // Publication-binding validation treats this as current authority, so
+            // an unreachable remote fails closed instead of answering with a
+            // cached ref another contributor may have advanced past.
+            if (!await fetchRemoteBranch(worktreePath, branchName)) {
+                throw new Error(`Could not fetch refs/heads/${branchName} from origin; current remote publication evidence is unavailable`);
+            }
             try {
                 return (await createHooklessGit(worktreePath).raw(['rev-parse', `refs/remotes/origin/${branchName}`])).trim();
             } catch {
