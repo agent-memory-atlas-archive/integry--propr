@@ -12,7 +12,7 @@ import {
     getWorktreePath
 } from './worktreeOperations.js';
 import { createHooklessGit } from './hooklessGit.js';
-import { assertRepositoryClonePath } from './repositoryPaths.js';
+import { assertRepositoryClonePath, resolveRepositoryClonePath } from './repositoryPaths.js';
 import { configureGitRemoteAuthentication, redactAuthenticatedGitUrl } from './repoBranching.js';
 import { isRescueRef } from './rescueRefs.js';
 
@@ -115,6 +115,47 @@ export async function releaseBranchFromSettledWorktree(git: SimpleGit, branchNam
         logger.warn({ branchName, holderPath, error: redactAuthenticatedGitUrl((error as Error).message) }, 'Could not check whether the worktree holding the branch is settled');
         return false;
     }
+}
+
+/**
+ * Detaches a failed attempt's worktree from its branch, as failure cleanup
+ * would have: the worktree is kept with every file, uncommitted changes
+ * included, and only its HEAD is detached. Callers must know the attempt is
+ * over. Returns false, changing nothing, unless the holder exists and is on
+ * that branch.
+ */
+export async function releaseBranchFromLostAttemptWorktree(branchName: string, holderPath: string): Promise<boolean> {
+    if (!await fs.pathExists(holderPath)) return false;
+    const holderGit = createHooklessGit(holderPath);
+    const holder = (args: string[]) => holderGit.raw(['-c', `safe.directory=${holderPath}`, ...args]);
+    try {
+        if ((await holder(['branch', '--show-current'])).trim() !== branchName) return false;
+        const changes = (await holder(['status', '--porcelain', '--untracked-files=all'])).trim();
+        await holder(['checkout', '--detach']);
+        logger.warn({ branchName, holderPath, retainedChanges: changes ? changes.split('\n').length : 0 },
+            'Released the replaced attempt\'s branch from its retained worktree; the worktree keeps its files with a detached HEAD');
+        return true;
+    } catch (error) {
+        logger.warn({ branchName, holderPath, error: redactAuthenticatedGitUrl((error as Error).message) }, 'Could not release the replaced attempt\'s branch from its worktree');
+        return false;
+    }
+}
+
+/**
+ * Frees a failed attempt's work branch for its replacement. An attempt killed
+ * before its cleanup (a worker restart) leaves its worktree on the branch, and
+ * the replacement, which continues that branch, could never check it out.
+ * Returns the released worktree's path, or null when no worktree holds it.
+ */
+export async function releaseLostAttemptBranch(owner: string, repoName: string, branchName: string, clonesRoot = CLONES_BASE_PATH): Promise<string | null> {
+    const localRepoPath = resolveRepositoryClonePath(clonesRoot, owner, repoName);
+    if (!await fs.pathExists(path.join(localRepoPath, '.git'))) return null;
+    const listing = await createHooklessGit(localRepoPath).raw(['worktree', 'list', '--porcelain']);
+    const holder = listing.split('\n\n').map(entry => entry.split('\n'))
+        .find(lines => lines.includes(`branch refs/heads/${branchName}`))
+        ?.find(line => line.startsWith('worktree '))?.slice('worktree '.length);
+    if (!holder || holder === localRepoPath) return null;
+    return await releaseBranchFromLostAttemptWorktree(branchName, holder) ? holder : null;
 }
 
 async function handleImproperWorktree(_worktreePath: string, _branchName: string, error: Error): Promise<void> {

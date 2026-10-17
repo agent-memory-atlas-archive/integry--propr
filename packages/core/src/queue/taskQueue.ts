@@ -3,6 +3,8 @@ import { repositoryStorageLifecycle, protectStorageQueue } from '../storage/life
 import { Queue, Worker, Job, QueueOptions, WorkerOptions } from 'bullmq';
 import { Redis, RedisOptions } from 'ioredis';
 import logger from '../utils/logger.js';
+import { resolveMaxStalledCount } from './stallPolicy.js';
+import { stopStalledAttemptContainers } from '../claude/docker/stalledAttemptContainers.js';
 import 'dotenv/config';
 
 // Re-export types for backward compatibility
@@ -221,13 +223,21 @@ export async function createWorker<T extends JobData = JobData, R extends JobRes
         connection: redisConnection!,
         concurrency: concurrency,
         autorun: options.autorun ?? true,
+        maxStalledCount: resolveMaxStalledCount(),
     };
 
-    const worker = new Worker<T, R>(queueName, job => repositoryStorageLifecycle.use(() => processorFunction(job), {
-        filesystem: process.env.GIT_WORKTREES_BASE_PATH || '/tmp/git-processor/worktrees',
-        reserveBytes: Number(process.env.WORKTREE_ADMISSION_RESERVE_BYTES || 2 * 1024 ** 3),
-        taskBytes: Number(process.env.WORKTREE_TASK_BUDGET_BYTES || 1024 ** 3),
-    }), workerOptions);
+    const worker = new Worker<T, R>(queueName, async job => {
+        if ((job?.stalledCounter ?? 0) > 0) {
+            // A redelivered attempt must not run beside the earlier attempt's agent.
+            await stopStalledAttemptContainers({ jobId: job.id, correlationId: (job.data as { correlationId?: string })?.correlationId })
+                .catch(error => logger.warn({ jobId: job.id, error: (error as Error).message }, 'Could not stop containers of a stalled job attempt'));
+        }
+        return repositoryStorageLifecycle.use(() => processorFunction(job), {
+            filesystem: process.env.GIT_WORKTREES_BASE_PATH || '/tmp/git-processor/worktrees',
+            reserveBytes: Number(process.env.WORKTREE_ADMISSION_RESERVE_BYTES || 2 * 1024 ** 3),
+            taskBytes: Number(process.env.WORKTREE_TASK_BUDGET_BYTES || 1024 ** 3),
+        });
+    }, workerOptions);
 
     worker.on('completed', async (job: Job<T>, result: R) => {
         // BullMQ emits this after moving the job out of active work.

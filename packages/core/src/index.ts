@@ -109,7 +109,7 @@ export type { CommitResult } from './git/commitOperations.js';
 export { configureGitAuthentication, setupAuthenticatedRemote, ensureBranchAndPush, pushBranch } from './git/repoBranching.js';
 export { ensureRepoCloned, createWorktreeForIssue, getRepoUrl, fetchLatestChanges } from './git/repoManager.js';
 export type { WorktreeResult, WorktreeInfo, FetchLatestChangesOptions, FetchLatestChangesResult } from './git/repoManager.js';
-export { cleanupExistingBranch, createWorktreeFromExistingBranch } from './git/worktreeCreation.js';
+export { cleanupExistingBranch, createWorktreeFromExistingBranch, releaseLostAttemptBranch } from './git/worktreeCreation.js';
 export { classifyPushError, classifyPushRejectionText, extractUnblockUrls, formatPushRejectionClass, type PushRejectionClass, type PushRejectionDiagnosis } from './git/pushRejection.js';
 export {
     salvageFailedPush, createWorktreePushSalvageOperations, PushFailedError, getPushFailure, pushFailureHistoryMetadata,

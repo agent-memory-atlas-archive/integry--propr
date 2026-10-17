@@ -98,6 +98,11 @@ export interface TaskReplacementDependencies {
     postIssueComment?(repoOwner: string, repoName: string, issueNumber: number, body: string): Promise<void>;
     /** Whether a comment containing `marker` is on the issue. */
     findIssueComment?(repoOwner: string, repoName: string, issueNumber: number, marker: string): Promise<boolean>;
+    /**
+     * Frees the failed attempt's work branch from the worktree it left (an attempt
+     * killed by a worker restart never ran its cleanup), so the replacement can continue it.
+     */
+    releaseLostAttemptBranch?(repoOwner: string, repoName: string, branchName: string): Promise<void>;
     frontendUrl?: string;
     now?: () => Date;
     randomId?: () => string;
@@ -358,6 +363,12 @@ export function createTaskReplacementService(deps: TaskReplacementDependencies):
             ...(failure ? { failure } : {}),
         });
         if (!claimed) return { action: 'none' };
+        if (task.branchName && deps.releaseLostAttemptBranch) {
+            await deps.releaseLostAttemptBranch(replay.repoOwner, replay.repoName, task.branchName).catch(error => {
+                deps.logger?.warn({ taskId: task.taskId, branchName: task.branchName, error: (error as Error).message },
+                    'Could not free the replaced attempt\'s work branch; the replacement may not be able to check it out');
+            });
+        }
         const dispatchRecord = {
             replacementTaskId, jobId, jobData, attemptNumber, maxReplacements: evaluation.maxReplacements,
             ...(remainingBudgetUsd === undefined ? {} : { remainingBudgetUsd }),
