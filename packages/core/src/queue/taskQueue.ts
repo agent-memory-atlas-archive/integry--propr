@@ -229,7 +229,7 @@ export async function createWorker<T extends JobData = JobData, R extends JobRes
     const worker = new Worker<T, R>(queueName, async job => {
         if ((job?.stalledCounter ?? 0) > 0) {
             // A redelivered attempt must not run beside the earlier attempt's agent.
-            await stopStalledAttemptContainers({ jobId: job.id, correlationId: (job.data as { correlationId?: string })?.correlationId })
+            await stopStalledAttemptContainers({ jobId: job.id, correlationId: (job.data as { correlationId?: string })?.correlationId, jobName: job.name })
                 .catch(error => logger.warn({ jobId: job.id, error: (error as Error).message }, 'Could not stop containers of a stalled job attempt'));
         }
         return repositoryStorageLifecycle.use(() => processorFunction(job), {

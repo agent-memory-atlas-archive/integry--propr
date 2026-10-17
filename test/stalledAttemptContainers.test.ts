@@ -37,6 +37,13 @@ test('matches a queue-job task ID exactly, never by prefix', async () => {
     assert.deepEqual(h.stopped, ['c1']);
 });
 
+test('leaves a follow-up comment job\'s agent alone for its handoff recovery to adopt', async () => {
+    const h = harness();
+    assert.deepEqual(await stopStalledAttemptContainers({ jobId: '27709', jobName: 'processPullRequestComment' }, h.deps), []);
+    assert.deepEqual(h.commands, [], 'the reaper never even lists containers for a follow-up job');
+    assert.deepEqual(h.stopped, []);
+});
+
 test('stops nothing without an identity, for a short correlation ID, or when Docker fails', async () => {
     for (const job of [{}, { correlationId: '3191' }]) {
         const h = harness();

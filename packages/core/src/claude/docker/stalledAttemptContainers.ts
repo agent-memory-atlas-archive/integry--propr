@@ -11,13 +11,19 @@ export interface StalledAttemptContainer { id: string; name: string; }
  * runs a duplicate agent beside them. A container belongs to the job when its
  * exact task label is the job ID (PR comment and merge tasks) or contains the
  * job's correlation ID (issue tasks embed it in their task ID).
+ *
+ * Follow-up comment jobs are exempt: their handoff recovery serializes the
+ * redelivered attempt behind the earlier attempt's agent and adopts its
+ * worktree, and it reads an exited agent as finished — stopping a still-live
+ * agent here would publish its half-finished output as a completed follow-up.
  */
 export async function stopStalledAttemptContainers(
-    job: { jobId?: string; correlationId?: string },
+    job: { jobId?: string; correlationId?: string; jobName?: string },
     deps: { list?: (args: string[], timeout: number) => Promise<string>; stop?: typeof stopDockerContainer } = {},
 ): Promise<StalledAttemptContainer[]> {
-    const { jobId, correlationId } = job;
+    const { jobId, correlationId, jobName } = job;
     const { list = runDocker, stop = stopDockerContainer } = deps;
+    if (jobName === 'processPullRequestComment') return [];
     const ownsCorrelation = !!correlationId && correlationId.length >= 16;
     if (!jobId && !ownsCorrelation) return [];
     let listing: string;
