@@ -378,14 +378,12 @@ test('the access log endpoints require the same instance permission as the other
     next();
   });
   const terminal: RequestHandler = (_req, res) => { res.json({ ok: true }); };
+  const collection = new Proxy({}, { get: () => terminal }) as never;
   const routes = createManagementRouteEntries({
-    adminRoutes: new Proxy({}, { get: () => terminal }) as never,
-    adminMcpRoutes: new Proxy({}, { get: () => terminal }) as never,
-    agentLoginRoutes: new Proxy({}, { get: () => terminal }) as never,
-    agentRuntimeRoutes: new Proxy({}, { get: () => terminal }) as never,
-    agentVersionRoutes: new Proxy({}, { get: () => terminal }) as never,
-    configRoutes: new Proxy({}, { get: () => terminal }) as never,
-    visualPreviewAuthRoutes: new Proxy({}, { get: () => terminal }) as never,
+    adminRoutes: collection, adminMcpRoutes: collection, agentLoginRoutes: collection, agentRuntimeRoutes: collection,
+    agentVersionRoutes: collection, configRoutes: collection, followupHandoffRoutes: collection,
+    operatorRateLimiter: (_req, _res, next) => next(),
+    visualPreviewAuthRoutes: collection,
   });
   assertNoDuplicateRoutes(routes);
   registerRouteEntries(app, routes);

@@ -4,6 +4,10 @@ import {
 } from './schemas.js';
 import type { RouteDoc } from './types.js';
 
+const OPERATOR_RATE_LIMITED = {
+  description: 'The operator recovery quota (`PROPR_OPERATOR_RATE_LIMIT_MAX` per `PROPR_OPERATOR_RATE_LIMIT_WINDOW_MS`, default 30 per minute) is exhausted; code `RATE_LIMIT_EXCEEDED`. Charged only after the admin guard passes, shared by every follow-up handoff route.',
+};
+
 const FOLLOWUP_HANDOFF_PATH_PARAMS = {
   owner: 'Repository owner (case-insensitive).',
   repo: 'Repository name (case-insensitive).',
@@ -17,7 +21,10 @@ export const ADMIN_ROUTE_DOCS: Record<string, RouteDoc> = {
     summary: 'List durable follow-up publication handoffs awaiting recovery or an operator decision',
     description: 'Each record names its recovery phase, predecessor/successor task lineage, retained worktree path and the next action. Responses are `Cache-Control: no-store`.',
     tags: ['Administration'],
-    responses: { 200: { description: 'Every recorded handoff, including operator-held ones.', schema: FollowupHandoffList } },
+    responses: {
+      200: { description: 'Every recorded handoff, including operator-held ones.', schema: FollowupHandoffList },
+      429: OPERATOR_RATE_LIMITED,
+    },
   },
   'GET /api/admin/followup-handoffs/:owner/:repo/:pr': {
     operationId: 'getFollowupHandoff',
@@ -28,6 +35,7 @@ export const ADMIN_ROUTE_DOCS: Record<string, RouteDoc> = {
       200: { description: 'The handoff status.', schema: FollowupHandoffDetail },
       400: { description: 'The target is not a sane `owner/repo/pr` address.' },
       404: { description: 'No handoff is recorded for the pull request.' },
+      429: OPERATOR_RATE_LIMITED,
     },
   },
   'POST /api/admin/followup-handoffs/:owner/:repo/:pr/resume': {
@@ -42,6 +50,7 @@ export const ADMIN_ROUTE_DOCS: Record<string, RouteDoc> = {
       400: { description: 'Invalid target or non-boolean flag.' },
       404: { description: 'No handoff is recorded for the pull request (code `not_found`).' },
       409: { description: 'The handoff cannot be resumed. `code` names why: `requires_cancellation_authorization`, `cancellation_authorization_unavailable` (also returned while another writer holds the PR lease), `lease_held_by_live_writer`, `released` or `superseded`.' },
+      429: OPERATOR_RATE_LIMITED,
     },
   },
   'POST /api/admin/followup-handoffs/:owner/:repo/:pr/release': {
@@ -56,6 +65,7 @@ export const ADMIN_ROUTE_DOCS: Record<string, RouteDoc> = {
       400: { description: 'Invalid target or non-boolean flag.' },
       404: { description: 'No handoff is recorded for the pull request (code `not_found`).' },
       409: { description: 'Refused; `reason` names why: `agent_still_running`, `liveness_unavailable`, `lease_held_by_live_writer`, `worktree_holds_unpublished_work`, `branch_still_registered`, `worktree_registrations_unavailable`, `cancelled_claims_withdrawal_failed` or `superseded` (the handoff changed concurrently, for example an operator re-armed it).', schema: FollowupHandoffReleaseResult },
+      429: OPERATOR_RATE_LIMITED,
     },
   },
 };

@@ -142,6 +142,7 @@ export const SETTINGS_CATALOG: SettingEntry[] = [
   environment('web_push.insecure_local', 'Insecure local Web Push', ['PROPR_ALLOW_INSECURE_LOCAL_WEB_PUSH'], ['local push enrollment']),
   environment('rate_limits.api', 'API rate limit', ['PROPR_API_RATE_LIMIT_MAX', 'PROPR_API_RATE_LIMIT_WINDOW_MS'], ['API quota']),
   environment('rate_limits.auth', 'Authentication rate limit', ['PROPR_AUTH_RATE_LIMIT_MAX', 'PROPR_AUTH_RATE_LIMIT_WINDOW_MS'], ['OAuth quota']),
+  environment('rate_limits.operator', 'Operator recovery rate limit', ['PROPR_OPERATOR_RATE_LIMIT_MAX', 'PROPR_OPERATOR_RATE_LIMIT_WINDOW_MS'], ['follow-up handoff admin quota']),
   environment('rate_limits.webhook', 'Webhook rate limit', ['PROPR_WEBHOOK_RATE_LIMIT_MAX', 'PROPR_WEBHOOK_RATE_LIMIT_WINDOW_MS'], ['webhook quota']),
   environment('network.trusted_proxies', 'Trusted proxy peers', ['PROPR_TRUSTED_PROXY_PEERS'], ['forwarded headers']),
   environment('logging.level', 'Log level', ['LOG_LEVEL'], ['log verbosity']),

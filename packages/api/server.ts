@@ -99,6 +99,7 @@ import {
   configureApiProxyTrust,
   createApiRequestRateLimiter,
   createDiscoveryRequestRateLimiter,
+  createOperatorRequestRateLimiter,
   createWebhookRequestRateLimiter,
 } from './requestRateLimits.js';
 import { desktopAuthService } from './desktopAuthService.js';
@@ -497,6 +498,7 @@ export function setupRoutes(): void {
       agentVersionRoutes,
       configRoutes,
       followupHandoffRoutes,
+      operatorRateLimiter: createOperatorRequestRateLimiter(),
       visualPreviewAuthRoutes,
     }),
   ];

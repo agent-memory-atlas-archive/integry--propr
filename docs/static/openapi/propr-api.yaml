@@ -167,6 +167,12 @@ paths:
           $ref: "#/components/responses/LegacyUnauthorized"
         "403":
           $ref: "#/components/responses/LegacyForbidden"
+        "429":
+          description: The operator recovery quota (`PROPR_OPERATOR_RATE_LIMIT_MAX` per `PROPR_OPERATOR_RATE_LIMIT_WINDOW_MS`, default 30 per minute) is exhausted; code `RATE_LIMIT_EXCEEDED`. Charged only after the admin guard passes, shared by every follow-up handoff route.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
         default:
           $ref: "#/components/responses/LegacyUnexpectedError"
       x-propr-auth: member
@@ -220,6 +226,12 @@ paths:
           $ref: "#/components/responses/LegacyForbidden"
         "404":
           description: No handoff is recorded for the pull request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "429":
+          description: The operator recovery quota (`PROPR_OPERATOR_RATE_LIMIT_MAX` per `PROPR_OPERATOR_RATE_LIMIT_WINDOW_MS`, default 30 per minute) is exhausted; code `RATE_LIMIT_EXCEEDED`. Charged only after the admin guard passes, shared by every follow-up handoff route.
           content:
             application/json:
               schema:
@@ -297,6 +309,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/FollowupHandoffReleaseResult"
+        "429":
+          description: The operator recovery quota (`PROPR_OPERATOR_RATE_LIMIT_MAX` per `PROPR_OPERATOR_RATE_LIMIT_WINDOW_MS`, default 30 per minute) is exhausted; code `RATE_LIMIT_EXCEEDED`. Charged only after the admin guard passes, shared by every follow-up handoff route.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
         default:
           $ref: "#/components/responses/LegacyUnexpectedError"
       x-propr-auth: member
@@ -366,6 +384,12 @@ paths:
                 $ref: "#/components/schemas/LegacyError"
         "409":
           description: "The handoff cannot be resumed. `code` names why: `requires_cancellation_authorization`, `cancellation_authorization_unavailable` (also returned while another writer holds the PR lease), `lease_held_by_live_writer`, `released` or `superseded`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "429":
+          description: The operator recovery quota (`PROPR_OPERATOR_RATE_LIMIT_MAX` per `PROPR_OPERATOR_RATE_LIMIT_WINDOW_MS`, default 30 per minute) is exhausted; code `RATE_LIMIT_EXCEEDED`. Charged only after the admin guard passes, shared by every follow-up handoff route.
           content:
             application/json:
               schema:

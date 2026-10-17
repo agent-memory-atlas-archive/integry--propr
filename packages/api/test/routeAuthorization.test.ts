@@ -9,6 +9,7 @@ import {
   createMemberCatalogRouteEntries,
   registerRouteEntries,
 } from '../routeRegistry.js';
+import { createOperatorRequestRateLimiter } from '../requestRateLimits.js';
 import { SUMMARY_TREE_ROUTE_PATH } from '../routes/summaryBrowserRoutes.js';
 
 after(async () => closeConnection());
@@ -23,7 +24,7 @@ function handlerCollection(): never {
   }) as never;
 }
 
-function createAuthorizationTestApp() {
+function createAuthorizationTestApp(operatorRateLimiter: RequestHandler = createOperatorRequestRateLimiter({ PROPR_OPERATOR_RATE_LIMIT_MAX: '1000' })) {
   const app = express();
   app.use((req, _res, next) => {
     const role = req.header('x-test-role');
@@ -54,6 +55,7 @@ function createAuthorizationTestApp() {
       agentVersionRoutes: handlerCollection(),
       configRoutes: handlerCollection(),
       followupHandoffRoutes: handlerCollection(),
+      operatorRateLimiter,
       visualPreviewAuthRoutes: handlerCollection(),
     }),
   ];
@@ -156,5 +158,52 @@ describe('assembled instance permission routes', () => {
         assert.equal(response.status, 403, path);
       }
     });
+  });
+
+  test('every follow-up handoff operator route is rate limited after the admin guard', async () => {
+    const followupHandoffRequests = managementRequests.filter(([, path]) => path.startsWith('/api/admin/followup-handoffs'));
+    assert.equal(followupHandoffRequests.length, 4);
+    const limit = followupHandoffRequests.length;
+    const app = createAuthorizationTestApp(createOperatorRequestRateLimiter({
+      PROPR_OPERATOR_RATE_LIMIT_MAX: String(limit),
+      PROPR_OPERATOR_RATE_LIMIT_WINDOW_MS: '60000',
+    }));
+
+    await withServer(async origin => {
+      const send = (method: string, path: string, role?: string) =>
+        fetch(`${origin}${path}`, { method, headers: role ? { 'x-test-role': role } : {} });
+
+      // Denied members never reach the limiter, so they neither see 429 nor drain the operator budget.
+      for (let round = 0; round < 3; round += 1) {
+        for (const [method, path] of followupHandoffRequests) {
+          const denied = await send(method, path);
+          assert.equal(denied.status, 403, `${method} ${path}`);
+          assert.equal(denied.headers.get('ratelimit'), null, `${method} ${path}`);
+          assert.equal((await denied.json() as { code: string }).code, 'INSUFFICIENT_INSTANCE_PERMISSION');
+        }
+      }
+
+      // The full budget remains for administrators and is shared by all four routes.
+      for (const [method, path] of followupHandoffRequests) {
+        const allowed = await send(method, path, 'admin');
+        assert.equal(allowed.status, 200, `${method} ${path}`);
+        assert.match(allowed.headers.get('ratelimit') ?? '', /"operator-recovery"/, `${method} ${path}`);
+      }
+      for (const [method, path] of followupHandoffRequests) {
+        const limited = await send(method, path, 'admin');
+        assert.equal(limited.status, 429, `${method} ${path}`);
+        assert.deepEqual(await limited.json(), {
+          code: 'RATE_LIMIT_EXCEEDED',
+          error: 'Too many requests. Please try again later.',
+        });
+      }
+
+      // An exhausted budget does not mask authorization: members are still refused by the guard.
+      for (const [method, path] of followupHandoffRequests) {
+        assert.equal((await send(method, path)).status, 403, `${method} ${path}`);
+      }
+      // Other admin routes do not share the operator budget.
+      assert.equal((await send('GET', '/api/admin/members', 'admin')).status, 200);
+    }, app);
   });
 });
