@@ -65,8 +65,23 @@ export async function up(knex) {
         table.index(['task_id']);
         table.index(['status']);
     });
+    // Comment IDs claimed by a cancelled, never-authorized follow-up whose
+    // handoff an operator released. The handoff row is replaceable by a later
+    // task and deleted on retirement, so this suppression evidence lives apart
+    // from it: a follow-up that captured these comments before taking the PR
+    // lease drops them under the lease, however many handoffs ran meanwhile.
+    await knex.schema.createTable('pr_followup_cancelled_claims', table => {
+        table.string('repository', 255).notNullable();
+        table.integer('pull_request').notNullable();
+        table.bigInteger('comment_id').notNullable();
+        table.string('task_id', 255).notNullable();
+        // Epoch milliseconds.
+        table.bigInteger('created_at').notNullable();
+        table.primary(['repository', 'pull_request', 'comment_id']);
+    });
 }
 
 export async function down(knex) {
+    await knex.schema.dropTableIfExists('pr_followup_cancelled_claims');
     await knex.schema.dropTableIfExists('pr_followup_handoffs');
 }

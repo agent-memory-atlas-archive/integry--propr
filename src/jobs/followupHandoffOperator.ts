@@ -6,7 +6,7 @@ import {
     type FollowupHandoffRecoveryDeps, type ResolvedRecoveryDeps, type TaskContainerInspection,
 } from './followupHandoffDeps.js';
 import {
-    advanceFollowupHandoff, loadFollowupHandoff, loadFollowupHandoffs, parseClaimedComments, parseSourceTaskIds,
+    advanceFollowupHandoff, loadFollowupHandoff, loadFollowupHandoffs, parseClaimedComments, parseSourceTaskIds, recordCancelledClaims,
     HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED, SETTLEMENT_RETRY_SCHEDULING,
     type FollowupHandoffKey, type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
 } from './followupHandoffStore.js';
@@ -83,7 +83,10 @@ async function branchReleaseRefusal(
  * or its withdrawal can fail; either way the hold survives without proof the
  * comments left the pending list. The task state — not the mutable status
  * reason a later diagnostic overwrites — decides, and the idempotent
- * withdrawal must succeed before the row may stop blocking admission.
+ * withdrawal must succeed before the row may stop blocking admission. A
+ * follow-up may already have captured the comments before taking the PR
+ * lease, so the claim IDs are first recorded as durable suppression evidence
+ * that outlives this replaceable row; that write must succeed too.
  */
 async function cancelledClaimsRefusal(
     record: FollowupHandoffRecord,
@@ -93,7 +96,9 @@ async function cancelledClaimsRefusal(
     try {
         const task = await deps.stateManager.getTaskState(record.task_id);
         if (record.status_reason !== 'cancelled_by_user' && task?.state !== deps.taskStates.CANCELLED) return null;
-        await deps.withdrawRestoredComments(record, parseClaimedComments(record));
+        const claimed = parseClaimedComments(record);
+        await recordCancelledClaims(deps.store, record, claimed.map(comment => comment.id));
+        await deps.withdrawRestoredComments(record, claimed);
         return null;
     } catch (error) {
         deps.log.warn({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, error: (error as Error).message },

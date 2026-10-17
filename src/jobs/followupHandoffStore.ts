@@ -318,6 +318,37 @@ export async function recordFollowupHandoffDiagnostic(
     return updated > 0;
 }
 
+export const PR_FOLLOWUP_CANCELLED_CLAIMS_TABLE = 'pr_followup_cancelled_claims';
+
+/**
+ * Durably records the comments a cancelled, unauthorized follow-up claimed,
+ * independent of its replaceable handoff row. Idempotent by comment ID.
+ */
+export async function recordCancelledClaims(
+    deps: FollowupHandoffStoreDeps,
+    record: Pick<FollowupHandoffRecord, 'repository' | 'pull_request' | 'task_id'>,
+    commentIds: number[],
+): Promise<void> {
+    const ids = [...new Set(commentIds)];
+    if (ids.length === 0) return;
+    const createdAt = nowMs(deps);
+    await database(deps)(PR_FOLLOWUP_CANCELLED_CLAIMS_TABLE)
+        .insert(ids.map(commentId => ({
+            repository: record.repository, pull_request: record.pull_request,
+            comment_id: commentId, task_id: record.task_id, created_at: createdAt,
+        })))
+        .onConflict(['repository', 'pull_request', 'comment_id'])
+        .ignore();
+}
+
+/** Every comment ID a released cancelled follow-up on this pull request claimed. */
+export async function loadCancelledClaimIds(deps: FollowupHandoffStoreDeps, key: FollowupHandoffKey): Promise<number[]> {
+    const rows = await database(deps)(PR_FOLLOWUP_CANCELLED_CLAIMS_TABLE)
+        .where({ repository: key.repository, pull_request: key.pull_request })
+        .select('comment_id') as Array<{ comment_id: number | string }>;
+    return rows.map(row => Number(row.comment_id));
+}
+
 /**
  * Deletes the handoff only while it is still the one the caller read, so a
  * stale finalizer can never drop a newer task's obligation.

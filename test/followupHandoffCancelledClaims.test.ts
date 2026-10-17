@@ -21,6 +21,8 @@ import { up } from '../packages/core/src/db/migrations/20261017000000_add_pr_fol
  * - A follow-up that claimed the cancelled comments from the pending list
  *   before taking the PR lease, and is admitted only after an operator
  *   released the cancelled predecessor, drops them before execution.
+ * - F37: that holds even when an unrelated follow-up ran in between and
+ *   replaced, then retired, the released handoff row.
  */
 
 const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
@@ -47,8 +49,8 @@ after(async () => {
 });
 
 const {
-    recordFollowupHandoff, advanceFollowupHandoff, loadFollowupHandoff, recordFollowupHandoffDiagnostic,
-    PR_FOLLOWUP_HANDOFFS_TABLE, HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED, SETTLEMENT_RETRY_SCHEDULING,
+    recordFollowupHandoff, advanceFollowupHandoff, finalizeFollowupHandoff, loadFollowupHandoff, recordFollowupHandoffDiagnostic,
+    PR_FOLLOWUP_HANDOFFS_TABLE, PR_FOLLOWUP_CANCELLED_CLAIMS_TABLE, HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED, SETTLEMENT_RETRY_SCHEDULING,
 } = await import('../src/jobs/followupHandoffStore.js');
 const { recoverInterruptedFollowupHandoffs, releaseFollowupHandoffRecord } = await import('../src/jobs/followupHandoffRecovery.js');
 const { createFollowupHandoffGitOps } = await import('../src/jobs/followupHandoffGitOps.js');
@@ -193,6 +195,7 @@ function laterFollowupPickup(h: Harness): number[] {
 
 beforeEach(async () => {
     await database(PR_FOLLOWUP_HANDOFFS_TABLE).delete();
+    await database(PR_FOLLOWUP_CANCELLED_CLAIMS_TABLE).delete();
 });
 
 // --- F32: cancelled claims stay suppressed across interruptions and release.
@@ -299,16 +302,21 @@ async function holdWithClaimsPending(h: Harness): Promise<void> {
     h.withdrawalFails = false;
 }
 
-async function admitAfterLease(h: Harness, captured: { commentsToProcess: Comment[]; pickedUpComments: Comment[] }) {
+async function admitAfterLease(
+    h: Harness,
+    captured: { commentsToProcess: Comment[]; pickedUpComments: Comment[] },
+    taskId = 'task-2',
+) {
     const redis = h.deps.redis as ReturnType<typeof createLockRedis>;
-    assert.equal(await redis.set(LOCK, 'task-2-token', 'EX', 3600, 'NX'), 'OK', 'the follow-up acquires the free lease');
+    const lockToken = `${taskId}-token`;
+    assert.equal(await redis.set(LOCK, lockToken, 'EX', 3600, 'NX'), 'OK', 'the follow-up acquires the free lease');
     const result = await gatePredecessorHandoff({
         job: { name: 'processPullRequestComment', data: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7 } } as never,
         ref: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7 },
-        taskId: 'task-2', stateManager: h.deps.stateManager as never, redisClient: redis as never,
-        ...captured, lockKey: LOCK, lockToken: 'task-2-token', correlatedLogger: silentLog as never,
+        taskId, stateManager: h.deps.stateManager as never, redisClient: redis as never,
+        ...captured, lockKey: LOCK, lockToken, correlatedLogger: silentLog as never,
     });
-    return { result, redis };
+    return { result, redis, lockToken };
 }
 
 test('a claim captured before the lease drops the released cancelled predecessor\'s comments before execution', async () => {
@@ -342,6 +350,61 @@ test('a follow-up whose captured comments were all cancelled claims is skipped a
     assert.deepEqual(commentsToProcess, []);
     assert.equal(await redis.set(LOCK, 'next', 'EX', 3600, 'NX'), 'OK', 'the skipped follow-up released its lease');
     assert.deepEqual(laterFollowupPickup(h), [], 'the cancelled request never returns to the queue');
+});
+
+test('F37: an intervening follow-up that replaces and retires the released row does not let the captured cancelled claim execute', async () => {
+    const h = await createHarness();
+    await holdWithClaimsPending(h);
+    // B claims the pending list (the cancelled request 11) for its new comment
+    // 12, then pauses before taking the PR lease.
+    const pickedUpComments = claimPendingBeforeLease(h);
+    const commentsToProcess = [comment(12), ...pickedUpComments];
+    assert.equal((await releaseFollowupHandoffRecord(KEY, {}, h.deps as never)).released, true);
+    const released = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(released?.status, HANDOFF_RELEASED);
+
+    // An unrelated follow-up C runs first: it passes the gate, records its own
+    // handoff over the released row, finishes, and retires it.
+    const cComments = [comment(13)];
+    const c = await admitAfterLease(h, { commentsToProcess: cComments, pickedUpComments: [...cComments] }, 'task-3');
+    assert.equal(c.result, undefined);
+    assert.deepEqual(cComments.map(entry => entry.id), [13], "C's own request is untouched");
+    h.states.set('task-3', 'processing');
+    const cHandoff = await recordFollowupHandoff({
+        ref: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7 },
+        taskId: 'task-3', sourceTaskIds: [], correlationId: 'corr-3',
+        target: { repoOwner: 'acme', repoName: 'widgets', branchName: BRANCH, isFork: false },
+        worktreePath: h.fx.wt, localRepoPath: h.fx.local, claimedComments: cComments,
+        jobData: { pullRequestNumber: 7, repoOwner: 'acme', repoName: 'widgets', correlationId: 'corr-3' } as never,
+        llm: 'claude', lockKey: LOCK, lockToken: c.lockToken,
+    }, { database });
+    assert.ok(cHandoff, 'the released row is replaceable');
+    assert.equal(cHandoff.incarnation === released?.incarnation, false, "C's handoff replaced the cancelled predecessor's identity");
+    assert.equal(await finalizeFollowupHandoff({ database }, cHandoff), true);
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined, 'no handoff row remains');
+    await c.redis.eval('del', 1, LOCK, c.lockToken);
+
+    // B resumes and is admitted under the lease.
+    const { result } = await admitAfterLease(h, { commentsToProcess, pickedUpComments });
+    assert.equal(result, undefined, 'B still runs its own request');
+    assert.deepEqual(commentsToProcess.map(entry => entry.id), [12], 'the cancelled request is still dropped');
+    assert.deepEqual(pickedUpComments, [], 'nor returned to the queue by a later reschedule');
+    assert.deepEqual(laterFollowupPickup(h), []);
+    assert.equal(h.states.get('task-1'), 'cancelled');
+});
+
+test('F37: release refuses when the cancelled-claim evidence cannot be recorded', async () => {
+    const h = await createHarness();
+    await holdWithClaimsPending(h);
+    await database.schema.renameTable(PR_FOLLOWUP_CANCELLED_CLAIMS_TABLE, 'cancelled_claims_unavailable');
+    try {
+        const refused = await releaseFollowupHandoffRecord(KEY, {}, h.deps as never);
+        assert.deepEqual(refused, { released: false, reason: 'cancelled_claims_withdrawal_failed' });
+    } finally {
+        await database.schema.renameTable('cancelled_claims_unavailable', PR_FOLLOWUP_CANCELLED_CLAIMS_TABLE);
+    }
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR, 'the hold keeps blocking admission');
+    assert.deepEqual(laterFollowupPickup(h), [11], 'nothing was withdrawn before the evidence was durable');
 });
 
 test('a released hold whose task was not cancelled leaves the captured comments alone', async () => {

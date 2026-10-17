@@ -5,7 +5,7 @@ import { createHooklessGit } from '@propr/core';
 import { createFollowupHandoffGitOps } from './followupHandoffGitOps.js';
 import type { CommentJobData, JobResult, UnprocessedComment, WorkerStateManager } from '@propr/core';
 import {
-    advanceFollowupHandoff, finalizeFollowupHandoff, loadFollowupHandoff, recordFollowupHandoff,
+    advanceFollowupHandoff, finalizeFollowupHandoff, handoffRepositoryKey, loadCancelledClaimIds, loadFollowupHandoff, recordFollowupHandoff,
     HANDOFF_ACTIVE, SETTLEMENT_RETRY_SCHEDULED, SETTLEMENT_RETRY_SCHEDULING, type FollowupHandoffRecord,
 } from './followupHandoffStore.js';
 import { adoptPredecessorFollowupHandoff, settleFollowupHandoffAfterFailure } from './followupHandoffRecovery.js';
@@ -286,7 +286,10 @@ function dropComments(comments: UnprocessedComment[], ids: ReadonlySet<number>):
  * capture a cancelled predecessor's restored claims and then be admitted after
  * an operator released that predecessor (the release's withdrawal finds the
  * pending list already empty). Under the lease, the captured set is reconciled
- * against the released cancelled predecessor; nothing it claimed may execute.
+ * against the durable cancelled-claim evidence the release recorded — not
+ * only the current handoff row, which an intervening follow-up may have
+ * replaced and retired meanwhile; nothing a cancelled predecessor claimed may
+ * execute.
  */
 function dropReleasedCancelledClaims(
     params: PredecessorHandoffGateParams,
@@ -339,6 +342,7 @@ export async function gatePredecessorHandoff(params: PredecessorHandoffGateParam
     });
     let adoption: Awaited<ReturnType<typeof adoptPredecessorFollowupHandoff>> = {};
     let blocked: string | undefined;
+    let cancelledClaimIds: number[] = [];
     try {
         // A superseded outcome means the row moved on mid-adoption; re-read and
         // resolve it before admitting this writer instead of racing an unknown
@@ -350,6 +354,7 @@ export async function gatePredecessorHandoff(params: PredecessorHandoffGateParam
             );
             if (attempt >= 2 || !('resumed' in adoption) || adoption.resumed?.outcome !== 'superseded') break;
         }
+        cancelledClaimIds = await loadCancelledClaimIds({}, { repository: handoffRepositoryKey(ref.repoOwner, ref.repoName), pull_request: ref.pullRequestNumber });
     } catch (error) {
         // Fail closed: an adoption this writer could not verify or finish (for
         // example unavailable remote evidence) leaves the predecessor's
@@ -362,8 +367,9 @@ export async function gatePredecessorHandoff(params: PredecessorHandoffGateParam
     }
     blocked ??= predecessorBlockReason(adoption);
     if (!blocked) {
-        if (!('releasedCancelledClaimIds' in adoption)) return undefined;
-        const skipped = dropReleasedCancelledClaims(params, adoption.releasedCancelledClaimIds);
+        if ('releasedCancelledClaimIds' in adoption) cancelledClaimIds.push(...adoption.releasedCancelledClaimIds);
+        if (cancelledClaimIds.length === 0) return undefined;
+        const skipped = dropReleasedCancelledClaims(params, cancelledClaimIds);
         if (skipped) await releasePRProcessingLock(redisClient, params.lockKey, params.lockToken);
         return skipped;
     }
