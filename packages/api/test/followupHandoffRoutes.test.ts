@@ -16,6 +16,7 @@ import {
   type FollowupHandoffRouteDeps,
   type FollowupHandoffStatus,
 } from '../routes/followupHandoffRoutes.js';
+import { createRequestRateLimiter } from '../requestRateLimits.js';
 
 test('the default deps module path points at the real recovery job source', () => {
   const routesDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../routes');
@@ -88,10 +89,11 @@ async function withServer(deps: FollowupHandoffRouteDeps, run: (origin: string) 
     next();
   });
   const routes = createFollowupHandoffRoutes(deps);
-  app.get('/api/admin/followup-handoffs', routes.list);
-  app.get('/api/admin/followup-handoffs/:owner/:repo/:pr', routes.get);
-  app.post('/api/admin/followup-handoffs/:owner/:repo/:pr/resume', routes.resume);
-  app.post('/api/admin/followup-handoffs/:owner/:repo/:pr/release', routes.release);
+  const rateLimiter = createRequestRateLimiter({ identifier: 'followup-handoff-routes-test-fixture', limit: 100, windowMs: 60_000 });
+  app.get('/api/admin/followup-handoffs', rateLimiter, routes.list);
+  app.get('/api/admin/followup-handoffs/:owner/:repo/:pr', rateLimiter, routes.get);
+  app.post('/api/admin/followup-handoffs/:owner/:repo/:pr/resume', rateLimiter, routes.resume);
+  app.post('/api/admin/followup-handoffs/:owner/:repo/:pr/release', rateLimiter, routes.release);
   const server = app.listen(0, '127.0.0.1');
   await new Promise<void>(resolve => server.once('listening', resolve));
   try { await run(`http://127.0.0.1:${(server.address() as AddressInfo).port}`); }
