@@ -992,6 +992,7 @@ test('Antigravity compatibility aliases, review values and custom labels retain 
     for (const [label, id, cli] of [
         ['antigravity-flash38-high', 'antigravity-gemini-3.8-flash-high', 'gemini-3.8-flash-high'],
         ['antigravity-pro-high', 'antigravity-gemini-3.1-pro-high', 'Gemini 3.1 Pro (High)'],
+        ['antigravity-argon-high', 'antigravity-gemini-4-argon-high', 'Gemini 4 Argon (High)'],
         ['antigravity-opus46-thinking', 'antigravity-claude-opus-4.6-thinking', 'Claude Opus 5.5 (High)'],
         ['antigravity-sonnet46-thinking', 'antigravity-claude-sonnet-4.6-thinking', 'Claude Sonnet 5.5 (High)'],
     ]) {

@@ -15,6 +15,7 @@ test('probes use configured lightweight models for each provider and respect cus
   for (const [type, models, expected] of [
     ['codex', ['gpt-6-astra', 'gpt-6-luna'], 'gpt-6-luna'],
     ['claude', ['claude-opus-5-5', 'claude-haiku-4-5-20251001'], 'claude-haiku-4-5-20251001'],
+    ['claude', ['claude-opus-5-5', 'claude-haiku-4-5-20251001', 'claude-haiku-5-5'], 'claude-haiku-5-5'],
     ['claude', ['claude-opus-5-5', 'claude-sonnet-5-5'], 'claude-sonnet-5-5'],
     ['antigravity', ['antigravity-gemini-3.1-pro', 'antigravity-gemini-3.8-flash'], 'antigravity-gemini-3.8-flash'],
     ['antigravity', ['antigravity-gemini-3.1-pro', 'antigravity-gemini-3.8-flash'], 'antigravity-gemini-3.8-flash'],

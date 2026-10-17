@@ -56,7 +56,7 @@ export interface LlmLabelResolution {
 /**
  * Static model aliases for backwards compatibility.
  * These map short names to full Claude model IDs.
- * Default aliases (opus, sonnet) point to the latest versions for each tier.
+ * Default aliases (fable, opus, sonnet, haiku) point to the latest versions for each tier.
  * Use opus45/sonnet45 aliases for older Claude Code versions.
  */
 const MODEL_ALIASES: Record<ModelAlias, ModelId> = {
@@ -125,10 +125,16 @@ const MODEL_ALIASES: Record<ModelAlias, ModelId> = {
     'sonnet-4-5': 'claude-sonnet-4-5-20250929',
     'claude-sonnet-4-5': 'claude-sonnet-4-5-20250929',
 
-    // Haiku aliases (only 4.5 available)
-    'haiku': 'claude-haiku-4-5-20251001',
+    // Haiku aliases: the plain alias points to the latest Haiku
+    'haiku': 'claude-haiku-5-5',
+    'claude-haiku': 'claude-haiku-5-5',
+
+    'haiku55': 'claude-haiku-5-5',
+    'haiku-5-5': 'claude-haiku-5-5',
+    'claude-haiku-5-5': 'claude-haiku-5-5',
+
     'haiku45': 'claude-haiku-4-5-20251001',
-    'claude-haiku': 'claude-haiku-4-5-20251001',
+    'haiku-4-5': 'claude-haiku-4-5-20251001',
     'claude-haiku-4-5': 'claude-haiku-4-5-20251001'
 };
 
@@ -354,6 +360,14 @@ function findMatchingModel(shortName: string, config: AgentConfig): string | nul
                 return model;
             }
         }
+    }
+
+    // Prefer the canonical model behind a bare tier alias (e.g. "fable" -> Fable 5.1)
+    // over older releases whose IDs also contain the alias.
+    const canonical = MODEL_ALIASES[lowerShort];
+    if (canonical) {
+        const canonicalModel = config.supportedModels.find(model => model.toLowerCase() === canonical);
+        if (canonicalModel) return canonicalModel;
     }
 
     // Try exact match against shortAlias from modelDefinitions
