@@ -462,12 +462,28 @@ export class ConfigManager {
   }
 
   /**
+   * Resolves the GitHub credential once every queued credential mutation has
+   * settled, so a write still awaiting persistence (which may yet roll back)
+   * is never observed.
+   */
+  getSettledGithubCredential(): Promise<GithubCredential | undefined> {
+    return this.serializeProfileMutation(async () => this.getGithubCredential());
+  }
+
+  /**
    * Clears the GitHub token together with any expiry and refresh metadata.
+   *
+   * With `expectedAccessToken`, the clear is a compare-and-set like
+   * `setGithubCredential`'s: it only happens when that token is still active
+   * once earlier credential mutations have settled, and resolves `false`
+   * otherwise.
    *
    * @returns A promise that resolves when the token is cleared.
    */
-  async clearGithubToken(): Promise<void> {
-    await this.replaceActiveProfileCredential({});
+  async clearGithubToken(options: { expectedAccessToken?: string } = {}): Promise<boolean> {
+    const expected = options.expectedAccessToken;
+    return this.replaceActiveProfileCredential({},
+      expected === undefined ? undefined : profile => profile.githubToken === expected);
   }
 
   private replaceActiveProfileCredential(

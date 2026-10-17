@@ -125,38 +125,63 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
     return false;
   };
 
-  const discardRevokedGithubCredential = async (): Promise<never> => {
-    renewedTokens.clear();
-    browserLoginFailure = GITHUB_SIGN_IN_REVOKED_MESSAGE;
-    // A revoked or expired grant cannot recover; remove it so setup asks for a
-    // new sign-in instead of repeatedly presenting a dead identity.
-    try { await configManager?.clearGithubToken(); } catch { browserTokenSaveFailed = true; }
-    throw new Error(GITHUB_SIGN_IN_REVOKED_MESSAGE);
-  };
+  /** Sign-ins whose credential write has been queued; a refresh compares this to detect a switch. */
+  let signInAttempts = 0;
 
   const rotateGithubCredential = async (credential: GithubUserCredential): Promise<string> => {
+    const signInsAtStart = signInAttempts;
+    // A sign-in confirmed while the refresh was in flight wins over this
+    // attempt's result, success or failure: never let the previous account's
+    // grant overwrite, clear, or set recovery state for the new identity.
+    // Only committed config counts: a sign-in still being saved may roll back,
+    // so wait for queued writes (including sign-ins queued meanwhile) to settle.
+    const supersedingToken = async (own: GithubUserCredential): Promise<string | undefined> => {
+      let current: GithubUserCredential | undefined;
+      let attempts: number;
+      do {
+        attempts = signInAttempts;
+        current = await configManager?.getSettledGithubCredential();
+      } while (attempts !== signInAttempts);
+      if (current && current.accessToken === own.accessToken && current.refreshToken === own.refreshToken) {
+        // A switch attempted meanwhile failed to save: never continue as the old account.
+        if (signInAttempts !== signInsAtStart) throw new Error("GitHub sign-in could not be saved. Choose Retry setup to sign in again.");
+        return undefined;
+      }
+      if (!current) throw new Error("Not logged in to GitHub. Run `propr login` first.");
+      return current.accessToken;
+    };
+
+    const discardRevokedGithubCredential = async (): Promise<string> => {
+      // A revoked or expired grant cannot recover; remove it so setup asks for a
+      // new sign-in instead of repeatedly presenting a dead identity. Compare-and-set,
+      // so a sign-in queued before this clear is kept and inherits no recovery state.
+      let cleared = true;
+      try {
+        cleared = await configManager?.clearGithubToken({ expectedAccessToken: credential.accessToken }) ?? true;
+      } catch { browserTokenSaveFailed = true; }
+      if (!cleared) {
+        const superseding = await supersedingToken(credential);
+        if (superseding !== undefined) return superseding;
+      }
+      renewedTokens.clear();
+      browserLoginFailure = GITHUB_SIGN_IN_REVOKED_MESSAGE;
+      throw new Error(GITHUB_SIGN_IN_REVOKED_MESSAGE);
+    };
+
     if (!credential.refreshToken || !options.refreshGithubCredential
       || (credential.refreshTokenExpiresAt !== undefined && credential.refreshTokenExpiresAt <= now())) {
       return discardRevokedGithubCredential();
     }
-    // A sign-in confirmed while the refresh was in flight wins over this
-    // attempt's result, success or failure: never let the previous account's
-    // grant overwrite, clear, or set recovery state for the new identity.
-    const supersedingToken = (): string | undefined => {
-      const current = configManager?.getGithubCredential();
-      if (current?.refreshToken === credential.refreshToken) return undefined;
-      if (!current) throw new Error("Not logged in to GitHub. Run `propr login` first.");
-      return current.accessToken;
-    };
     let rotated: GithubUserCredential;
     try {
       rotated = await options.refreshGithubCredential(credential.refreshToken, {});
     } catch (error) {
-      const superseding = supersedingToken();
-      if (superseding !== undefined) return superseding;
       // Provider/transport errors may contain credentials. Only fixed copy escapes.
       const message = GithubBrowserSignInError.safeMessage(error);
+      // The clear is conditional, so a sign-in confirmed meanwhile is kept.
       if (message === GITHUB_SIGN_IN_REVOKED_MESSAGE) return discardRevokedGithubCredential();
+      const superseding = await supersedingToken(credential);
+      if (superseding !== undefined) return superseding;
       throw new Error(message);
     }
     try {
@@ -165,20 +190,20 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
       // confirmed before or during this write is never overwritten or rolled back.
       const saved = await configManager!.setGithubCredential(rotated, { replacingRefreshToken: credential.refreshToken });
       if (!saved) {
-        const superseding = supersedingToken();
+        const superseding = await supersedingToken(credential);
         if (superseding !== undefined) return superseding;
         throw new Error("GitHub sign-in changed while it was being renewed. Retry the request.");
       }
       renewedTokens.set(credential.accessToken, rotated.accessToken);
     } catch {
-      const superseding = supersedingToken();
+      const superseding = await supersedingToken(credential);
       if (superseding !== undefined) return superseding;
       browserTokenSaveFailed = true;
       browserLoginFailure = "GitHub sign-in was renewed, but ProPR could not save it on this computer. Check available storage, then sign in again.";
       throw new Error(browserLoginFailure);
     }
     // A sign-in queued behind this write has replaced it by now; hand out that identity instead.
-    return supersedingToken() ?? rotated.accessToken;
+    return (await supersedingToken(rotated)) ?? rotated.accessToken;
   };
 
   /** Return a live GitHub user token, refreshing an expiring credential once across concurrent callers. */
@@ -593,6 +618,7 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
         try {
           // Replace the whole credential so a previous account's refresh token
           // can never be paired with the newly confirmed identity.
+          signInAttempts++;
           await configManager.setGithubCredential(credential);
           renewedTokens.clear();
           // An older refresh whose write failed while this sign-in was queued

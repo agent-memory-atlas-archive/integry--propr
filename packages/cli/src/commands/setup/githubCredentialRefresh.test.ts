@@ -351,3 +351,94 @@ for (const fail of [false, true]) {
     assert.ok(!env.seen.some(token => token.includes('integry')));
   });
 }
+
+test('a revoked refresh rejected while a sign-in is queued does not clear the newer account', async t => {
+  const env = await setup(t);
+  let now = 7_500_000_000;
+  await env.config.setGithubCredential(expiring('ghu_integry', 'ghr_integry', now));
+  now += 9 * HOUR;
+  let confirm!: (credential: GithubUserCredential) => void;
+  let revoke!: (error: Error) => void;
+  let loginStarted!: () => void;
+  let refreshStarted!: () => void;
+  const loginWaiting = new Promise<void>(resolve => { loginStarted = resolve; });
+  const refreshWaiting = new Promise<void>(resolve => { refreshStarted = resolve; });
+  const actions = createDefaultActions(env.config, {
+    now: () => now,
+    githubBrowserLogin: () => { loginStarted(); return new Promise(resolve => { confirm = resolve; }); },
+    refreshGithubCredential: () => { refreshStarted(); return new Promise((_, reject) => { revoke = reject; }); },
+  });
+  const discovery = actions.fetchRelayInstallations({ relayUrl: env.relayUrl });
+  const login = actions.loginWithGithub({ force: true });
+  await Promise.all([loginWaiting, refreshWaiting]);
+  // Same turn: the sign-in's write is queued before the old account's revocation cleanup.
+  confirm(expiring('ghu_ultrafix', 'ghr_ultrafix', now));
+  revoke(new GithubBrowserSignInError(GITHUB_SIGN_IN_REVOKED_MESSAGE));
+  assert.equal(await login, true);
+  assert.equal((await discovery).username, 'user-of-ghu_ultrafix');
+  assert.equal(env.config.getGithubCredential()?.refreshToken, 'ghr_ultrafix');
+  assert.equal(actions.hasGithubToken(), true);
+  assert.notEqual(actions.githubLoginRecovery?.()?.detail, GITHUB_SIGN_IN_REVOKED_MESSAGE);
+  const reloaded = new ConfigManager(env.dir);
+  await reloaded.init();
+  assert.deepEqual(reloaded.getGithubCredential(), expiring('ghu_ultrafix', 'ghr_ultrafix', now));
+});
+
+for (const fail of [false, true]) {
+  test(`a refresh waits for a queued sign-in's save and ${fail ? 'fails when it fails' : 'then uses it'}`, async t => {
+    const env = await setup(t);
+    let now = 8_000_000_000;
+    await env.config.setGithubCredential(expiring('ghu_integry', 'ghr_integry', now));
+    now += 9 * HOUR;
+    const save = env.config.save.bind(env.config);
+    const gates = [0, 1].map(() => {
+      let release!: () => void;
+      let paused!: () => void;
+      return { gate: new Promise<void>(resolve => { release = resolve; }), reached: new Promise<void>(resolve => { paused = resolve; }),
+        release: () => release(), paused: () => paused() };
+    });
+    let saves = 0;
+    t.mock.method(env.config, 'save', async () => {
+      const held = gates[saves++];
+      if (held) {
+        held.paused();
+        await held.gate;
+        // The second held write is the sign-in for the new account.
+        if (fail && held === gates[1]) throw new Error('disk full');
+      }
+      await save();
+    });
+    const setCredential = env.config.setGithubCredential.bind(env.config);
+    let signInQueued!: () => void;
+    const queued = new Promise<void>(resolve => { signInQueued = resolve; });
+    t.mock.method(env.config, 'setGithubCredential', (credential: GithubUserCredential, options?: { replacingRefreshToken?: string }) => {
+      const result = setCredential(credential, options);
+      if (credential.refreshToken === 'ghr_ultrafix') signInQueued();
+      return result;
+    });
+    const actions = createDefaultActions(env.config, {
+      now: () => now,
+      githubBrowserLogin: async () => expiring('ghu_ultrafix', 'ghr_ultrafix', now),
+      refreshGithubCredential: async () => expiring('ghu_integry2', 'ghr_integry2', now),
+    });
+    const discovery = actions.fetchRelayInstallations({ relayUrl: env.relayUrl });
+    await gates[0]!.reached;
+    const login = actions.loginWithGithub({ force: true });
+    await queued;
+    gates[0]!.release();
+    await gates[1]!.reached;
+    // The new account is in memory but not yet persisted: no relay call may use it.
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(env.seen, []);
+    gates[1]!.release();
+    assert.equal(await login, !fail);
+    if (fail) {
+      await assert.rejects(discovery, /could not be saved/);
+      assert.deepEqual(env.seen, []);
+      assert.equal(env.config.getGithubCredential()?.refreshToken, 'ghr_integry2');
+    } else {
+      assert.equal((await discovery).username, 'user-of-ghu_ultrafix');
+      assert.deepEqual(env.seen, ['ghu_ultrafix']);
+    }
+  });
+}
