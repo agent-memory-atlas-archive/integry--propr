@@ -139,11 +139,18 @@ export function useFollowupHandoff(sourceTaskId: string | undefined) {
   });
   // Only a request storage could not take is held here, for this page only. Once storage holds a
   // request, storage alone is authoritative: an entry the desktop cleared on an identity change stays gone.
-  const [memory, setMemory] = useState<{ key: string; value: StoredHandoff } | null>(null);
+  // A held request is bound to the connection it was accepted or found on, since the stable key cannot tell
+  // a renewal from a credential replacement and nothing clears page memory when credentials change.
+  const [memory, setMemory] = useState<{ key: string; generation: ConnectionGeneration; value: StoredHandoff } | null>(null);
+  const memoryCurrent = memory !== null && memory.key === key && isCurrentGeneration(memory.generation);
   const stored = useMemo(() => {
     const fromStorage = raw ? readStored(key) : null;
-    return fromStorage ?? (memory && memory.key === key ? memory.value : null);
-  }, [raw, key, memory]);
+    return fromStorage ?? (memoryCurrent ? memory.value : null);
+  }, [raw, key, memory, memoryCurrent]);
+  // A held request from a connection that is gone is dropped rather than kept for a later match.
+  useEffect(() => {
+    if (memory && !isCurrentGeneration(memory.generation)) setMemory(null);
+  }, [memory, connection]);
 
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
@@ -152,7 +159,7 @@ export function useFollowupHandoff(sourceTaskId: string | undefined) {
 
   const save = useCallback((targetKey: string, value: StoredHandoff | null) => {
     const persisted = writeStored(targetKey, value);
-    setMemory(value && !persisted ? { key: targetKey, value } : null);
+    setMemory(value && !persisted ? { key: targetKey, generation: currentGeneration(), value } : null);
   }, []);
 
   /** The scope and connection a submission starts in; `accept` records its receipt only while both are current. */

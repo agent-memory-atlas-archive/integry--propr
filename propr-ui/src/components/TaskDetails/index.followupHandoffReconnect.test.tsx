@@ -264,6 +264,68 @@ describe('without session storage the handoff lasts as long as the page', () => 
       setItem.mockRestore();
     }
   });
+
+  // Only handoff writes fail, as with full storage; the desktop's own clearing still succeeds.
+  const refuseHandoffWrites = () => {
+    const original = Storage.prototype.setItem;
+    return vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
+      if (key.startsWith('propr.followupHandoff.v1')) throw new Error('QuotaExceededError');
+      original.call(this, key, value);
+    });
+  };
+
+  it('drops a starting request held in memory when the same profile’s credentials are replaced, and never looks it up or writes it back', async () => {
+    const setItem = refuseHandoffWrites();
+    try {
+      const desktop = desktopConnection();
+      await desktop.connect('first-transport-generation');
+      renderPage();
+      await flush();
+      await postFollowup();
+      expect(handoffKeys()).toHaveLength(0);
+      expect(banner()).toHaveAttribute('data-phase', 'starting');
+
+      await desktop.disconnect();
+      setItem.mockRestore();
+      api.getTaskFollowupRuns.mockClear();
+      api.getTaskFollowupRuns.mockResolvedValue(runsOf([{ taskId: 'fresh-run', status: 'processing' }]));
+      await desktop.connect('replaced-identity-generation', storedProfile, 'BBBBBBBBBBBBBBBBBBBBBB');
+      await flush();
+      expect(banner()).toBeNull();
+
+      await poll();
+      expect(banner()).toBeNull();
+      expect(handoffKeys()).toHaveLength(0);
+      expect(api.getTaskFollowupRuns).not.toHaveBeenCalled();
+      expect(api.postTaskFollowup).toHaveBeenCalledTimes(1);
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
+  it('drops a run link held in memory when the same profile’s credentials are replaced', async () => {
+    const setItem = refuseHandoffWrites();
+    try {
+      const desktop = desktopConnection();
+      await desktop.connect('first-transport-generation');
+      renderPage();
+      await flush();
+      api.getTaskFollowupRuns.mockResolvedValue(runsOf([{ taskId: 'fresh-run', status: 'completed' }]));
+      await postFollowup();
+      await flush();
+      expect(handoffKeys()).toHaveLength(0);
+      expect(within(banner()!).getByRole('link', { name: /View new run/ })).toHaveAttribute('href', '/tasks/fresh-run');
+
+      await desktop.disconnect();
+      await desktop.connect('replaced-identity-generation', storedProfile, 'BBBBBBBBBBBBBBBBBBBBBB');
+      await flush();
+      expect(banner()).toBeNull();
+      expect(screen.queryByRole('link', { name: /View new run/ })).toBeNull();
+      expect(handoffKeys()).toHaveLength(0);
+    } finally {
+      setItem.mockRestore();
+    }
+  });
 });
 
 describe('a response from a connection that is gone is never applied', () => {
