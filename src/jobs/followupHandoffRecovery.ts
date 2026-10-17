@@ -9,7 +9,7 @@ import {
     type FollowupHandoffRecoveryDeps, type ResolvedRecoveryDeps,
 } from './followupHandoffDeps.js';
 import {
-    advanceFollowupHandoff, finalizeFollowupHandoff, handoffRepositoryKey, loadFollowupHandoff, loadFollowupHandoffs,
+    advanceFollowupHandoff, finalizeFollowupHandoff, handoffRepositoryKey, loadFollowupHandoff, loadFollowupHandoffs, parseClaimedComments,
     HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED,
     type FollowupHandoffKey, type FollowupHandoffRecord,
 } from './followupHandoffStore.js';
@@ -184,7 +184,24 @@ export type PredecessorAdoption =
         blocked: 'predecessor_agent_still_running' | 'predecessor_liveness_unavailable'
         | 'predecessor_awaiting_operator' | 'predecessor_container_identity_mismatch';
     }
-    | { resumed?: ResumeOutcome };
+    | { resumed?: ResumeOutcome }
+    /** Comment IDs a released, unauthorized cancelled predecessor claimed; they must never execute. */
+    | { releasedCancelledClaimIds: number[] };
+
+/**
+ * A released handoff whose task was cancelled — and never authorized for
+ * publication — still names the requests the user stopped. A follow-up that
+ * captured those comments before the operator release (its pending-list claim
+ * runs before it takes the lease) must drop them, so the claim set is
+ * returned for the caller to filter. The task state decides, as for the
+ * release itself: the release overwrote the status reason.
+ */
+async function releasedCancelledClaimIds(record: FollowupHandoffRecord, resolved: ResolvedRecoveryDeps): Promise<number[]> {
+    if (record.operator_authorized) return [];
+    const task = await resolved.stateManager.getTaskState(record.task_id);
+    if (task?.state !== resolved.taskStates.CANCELLED) return [];
+    return parseClaimedComments(record).map(comment => comment.id);
+}
 
 /**
  * Serializes a redelivered or new follow-up behind its recoverable
@@ -204,7 +221,11 @@ export async function adoptPredecessorFollowupHandoff(
             pull_request: params.pullRequestNumber,
         };
         const record = await loadFollowupHandoff(resolved.store, key);
-        if (!record || record.status === HANDOFF_RELEASED) return {};
+        if (!record) return {};
+        if (record.status === HANDOFF_RELEASED) {
+            const claimIds = await releasedCancelledClaimIds(record, resolved);
+            return claimIds.length > 0 ? { releasedCancelledClaimIds: claimIds } : {};
+        }
         // An unresolved operator hold is a standing obligation: a new attempt
         // must not run (and later overwrite it) until the operator settles it.
         if (record.status === HANDOFF_AWAITING_OPERATOR) return { blocked: 'predecessor_awaiting_operator' };

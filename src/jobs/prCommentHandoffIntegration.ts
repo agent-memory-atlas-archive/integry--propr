@@ -266,9 +266,42 @@ export interface PredecessorHandoffGateParams {
     stateManager: WorkerStateManager;
     redisClient: Redis;
     pickedUpComments: UnprocessedComment[];
+    /** The job's full captured comment set, filtered in place like `pickedUpComments`. */
+    commentsToProcess?: UnprocessedComment[];
     lockKey: string;
     lockToken: string;
     correlatedLogger: Logger;
+}
+
+/** Removes the given comment IDs from a captured set in place, returning how many were removed. */
+function dropComments(comments: UnprocessedComment[], ids: ReadonlySet<number>): number {
+    const kept = comments.filter(comment => !ids.has(comment.id));
+    const removed = comments.length - kept.length;
+    comments.splice(0, comments.length, ...kept);
+    return removed;
+}
+
+/**
+ * A follow-up claims pending comments before it takes the PR lease, so it can
+ * capture a cancelled predecessor's restored claims and then be admitted after
+ * an operator released that predecessor (the release's withdrawal finds the
+ * pending list already empty). Under the lease, the captured set is reconciled
+ * against the released cancelled predecessor; nothing it claimed may execute.
+ */
+function dropReleasedCancelledClaims(
+    params: PredecessorHandoffGateParams,
+    claimIds: number[],
+): JobResult | undefined {
+    const ids = new Set(claimIds);
+    const commentsToProcess = params.commentsToProcess ?? params.pickedUpComments;
+    const removed = dropComments(commentsToProcess, ids);
+    if (commentsToProcess !== params.pickedUpComments) dropComments(params.pickedUpComments, ids);
+    if (removed === 0) return undefined;
+    params.correlatedLogger.info({ cancelledClaimIds: claimIds, dropped: removed, remaining: commentsToProcess.length },
+        'Dropped comments a released cancelled follow-up had claimed; they are not executed');
+    return commentsToProcess.length === 0
+        ? { status: 'skipped', reason: 'cancelled_predecessor_claims', pullRequestNumber: params.ref.pullRequestNumber }
+        : undefined;
 }
 
 function predecessorBlockReason(adoption: Awaited<ReturnType<typeof adoptPredecessorFollowupHandoff>>): string | undefined {
@@ -293,7 +326,8 @@ function predecessorBlockReason(adoption: Awaited<ReturnType<typeof adoptPredece
  * prepared: a recoverable predecessor is adopted and finished in-line — with
  * the lease kept renewed for the duration — while a still-live, unverifiable,
  * or operator-held predecessor reschedules this writer instead of letting it
- * race the retained worktree.
+ * race the retained worktree. A released cancelled predecessor's claims are
+ * dropped from the captured comments; a job left with none is skipped.
  */
 export async function gatePredecessorHandoff(params: PredecessorHandoffGateParams): Promise<JobResult | undefined> {
     const { job, ref, taskId, stateManager, redisClient, correlatedLogger } = params;
@@ -327,7 +361,12 @@ export async function gatePredecessorHandoff(params: PredecessorHandoffGateParam
         await stopHeartbeat();
     }
     blocked ??= predecessorBlockReason(adoption);
-    if (!blocked) return undefined;
+    if (!blocked) {
+        if (!('releasedCancelledClaimIds' in adoption)) return undefined;
+        const skipped = dropReleasedCancelledClaims(params, adoption.releasedCancelledClaimIds);
+        if (skipped) await releasePRProcessingLock(redisClient, params.lockKey, params.lockToken);
+        return skipped;
+    }
     const replacementTaskId = await schedulePRCommentRecovery({
         job, taskId, stateManager, redisClient, pickedUpComments: params.pickedUpComments,
         delay: 60_000, reason: blocked, correlatedLogger,

@@ -412,7 +412,7 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
     // unverifiable predecessor reschedules this writer instead of racing it.
     const predecessorGate = await gatePredecessorHandoff({
         job, ref: { repoOwner, repoName, pullRequestNumber }, taskId, stateManager, redisClient,
-        pickedUpComments: context.pickedUpComments, lockKey, lockToken, correlatedLogger,
+        pickedUpComments: context.pickedUpComments, commentsToProcess, lockKey, lockToken, correlatedLogger,
     });
     if (predecessorGate) return predecessorGate;
 

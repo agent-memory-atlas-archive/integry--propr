@@ -18,6 +18,9 @@ import { up } from '../packages/core/src/db/migrations/20261017000000_add_pr_fol
  *   succeeds) before the row stops blocking admission.
  * - F33: a writer that detected loss of handoff ownership stops every later
  *   checkpoint, including after a loss the container callback swallowed.
+ * - A follow-up that claimed the cancelled comments from the pending list
+ *   before taking the PR lease, and is admitted only after an operator
+ *   released the cancelled predecessor, drops them before execution.
  */
 
 const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
@@ -50,7 +53,7 @@ const {
 const { recoverInterruptedFollowupHandoffs, releaseFollowupHandoffRecord } = await import('../src/jobs/followupHandoffRecovery.js');
 const { createFollowupHandoffGitOps } = await import('../src/jobs/followupHandoffGitOps.js');
 const {
-    FollowupHandoffOwnershipLostError, markExecutionHandoffAgentExited, markExecutionHandoffContainer,
+    FollowupHandoffOwnershipLostError, gatePredecessorHandoff, markExecutionHandoffAgentExited, markExecutionHandoffContainer,
     stopAfterHandoffOwnershipLoss, writerOwnedWorktree,
 } = await import('../src/jobs/prCommentHandoffIntegration.js');
 
@@ -272,6 +275,90 @@ test('F32: releasing a hold whose task was not cancelled leaves the pending list
     assert.ok(held);
     assert.equal((await releaseFollowupHandoffRecord(KEY, {}, h.deps as never)).released, true);
     assert.deepEqual(laterFollowupPickup(h), [11], 'only a cancelled request is withdrawn');
+});
+
+// --- A pending-list claim taken before the lease, admitted after the release.
+
+type Comment = { id: number; body: string; author: string; type: 'issue' };
+const comment = (id: number): Comment => ({ id, body: `request ${id}`, author: 'alice', type: 'issue' });
+
+/** A later follow-up's destructive pending-list claim, taken before it holds the PR lease. */
+function claimPendingBeforeLease(h: Harness): Comment[] {
+    const claimed = [...h.pending].map(comment);
+    h.pending.clear();
+    return claimed;
+}
+
+/** Holds the cancelled predecessor with its claims still pending (the withdrawal failed). */
+async function holdWithClaimsPending(h: Harness): Promise<void> {
+    await seedHandoff(h);
+    h.onRestore = () => { h.states.set('task-1', 'cancelled'); };
+    h.withdrawalFails = true;
+    assert.equal((await recoverInterruptedFollowupHandoffs(h.deps)).awaitingOperator, 1);
+    assert.deepEqual([...h.pending], [11]);
+    h.withdrawalFails = false;
+}
+
+async function admitAfterLease(h: Harness, captured: { commentsToProcess: Comment[]; pickedUpComments: Comment[] }) {
+    const redis = h.deps.redis as ReturnType<typeof createLockRedis>;
+    assert.equal(await redis.set(LOCK, 'task-2-token', 'EX', 3600, 'NX'), 'OK', 'the follow-up acquires the free lease');
+    const result = await gatePredecessorHandoff({
+        job: { name: 'processPullRequestComment', data: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7 } } as never,
+        ref: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7 },
+        taskId: 'task-2', stateManager: h.deps.stateManager as never, redisClient: redis as never,
+        ...captured, lockKey: LOCK, lockToken: 'task-2-token', correlatedLogger: silentLog as never,
+    });
+    return { result, redis };
+}
+
+test('a claim captured before the lease drops the released cancelled predecessor\'s comments before execution', async () => {
+    const h = await createHarness();
+    await holdWithClaimsPending(h);
+    // The follow-up for a new comment claims the pending list, then waits for the lease.
+    const pickedUpComments = claimPendingBeforeLease(h);
+    const commentsToProcess = [comment(12), ...pickedUpComments];
+    // Meanwhile the operator releases the cancelled predecessor; its
+    // withdrawal finds nothing pending, because the follow-up holds the claim.
+    assert.equal((await releaseFollowupHandoffRecord(KEY, {}, h.deps as never)).released, true);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_RELEASED);
+
+    const { result } = await admitAfterLease(h, { commentsToProcess, pickedUpComments });
+    assert.equal(result, undefined, 'the follow-up still runs its own request');
+    assert.deepEqual(commentsToProcess.map(entry => entry.id), [12], 'the cancelled request is not executed');
+    assert.deepEqual(pickedUpComments, [], 'nor restored to the pending list by a later reschedule');
+    assert.equal(h.states.get('task-1'), 'cancelled');
+});
+
+test('a follow-up whose captured comments were all cancelled claims is skipped and frees the lease', async () => {
+    const h = await createHarness();
+    await holdWithClaimsPending(h);
+    const pickedUpComments = claimPendingBeforeLease(h);
+    // An empty pending-comment batch job: everything it captured is the cancelled claim.
+    const commentsToProcess = [...pickedUpComments];
+    assert.equal((await releaseFollowupHandoffRecord(KEY, {}, h.deps as never)).released, true);
+
+    const { result, redis } = await admitAfterLease(h, { commentsToProcess, pickedUpComments });
+    assert.deepEqual(result, { status: 'skipped', reason: 'cancelled_predecessor_claims', pullRequestNumber: 7 });
+    assert.deepEqual(commentsToProcess, []);
+    assert.equal(await redis.set(LOCK, 'next', 'EX', 3600, 'NX'), 'OK', 'the skipped follow-up released its lease');
+    assert.deepEqual(laterFollowupPickup(h), [], 'the cancelled request never returns to the queue');
+});
+
+test('a released hold whose task was not cancelled leaves the captured comments alone', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const held = await advanceFollowupHandoff({ database }, record, {
+        status: HANDOFF_AWAITING_OPERATOR, status_reason: 'usage_limit_retry_unconfirmed', settlement: SETTLEMENT_RETRY_SCHEDULING,
+    });
+    assert.ok(held);
+    h.pending.add(11);
+    const pickedUpComments = claimPendingBeforeLease(h);
+    const commentsToProcess = [...pickedUpComments];
+    assert.equal((await releaseFollowupHandoffRecord(KEY, {}, h.deps as never)).released, true);
+
+    const { result } = await admitAfterLease(h, { commentsToProcess, pickedUpComments });
+    assert.equal(result, undefined);
+    assert.deepEqual(commentsToProcess.map(entry => entry.id), [11], 'only a cancelled request is dropped');
 });
 
 // --- F33: detected ownership loss is a stop condition for every later checkpoint.
