@@ -29,7 +29,7 @@ export interface FollowupHandoffRecoveryDeps {
     inspectLiveness?: (taskId: string) => Promise<TaskContainerInspection>;
     git?: FollowupHandoffGitOps;
     restoreComments?: (record: FollowupHandoffRecord, comments: UnprocessedComment[]) => Promise<void>;
-    /** Removes restored comments of a cancelled no-change recovery from the pending list again. */
+    /** Removes a cancelled handoff's claimed comments from the pending list again (restored ones included). */
     withdrawRestoredComments?: (record: FollowupHandoffRecord, comments: UnprocessedComment[]) => Promise<void>;
     /** Queues the follow-up job that picks up comments a standalone no-change recovery restored. */
     scheduleRestoredComments?: (record: FollowupHandoffRecord) => Promise<void>;

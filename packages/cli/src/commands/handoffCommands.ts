@@ -86,6 +86,9 @@ export function handoffErrorMessage(error: unknown): string {
     if (code === "worktree_registrations_unavailable") {
       return "Release refused: the repository's Git worktree registrations could not be read, so branch release is unproven. Restore repository access, then re-run release.";
     }
+    if (code === "cancelled_claims_withdrawal_failed") {
+      return "Release refused: the cancelled request's comments could not be withdrawn from the pending list, so releasing could let them run. Restore Redis access, then re-run release.";
+    }
     if (code) return `${error.message} (${code})`;
   }
   return (error as Error).message;

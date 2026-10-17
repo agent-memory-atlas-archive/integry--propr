@@ -435,5 +435,5 @@ export const FollowupHandoffReleaseRequest = component('FollowupHandoffReleaseRe
 
 export const FollowupHandoffReleaseResult = component('FollowupHandoffReleaseResult', z.object({
   released: z.boolean(),
-  reason: z.string().optional().describe('Refusal code when `released` is false, for example `agent_still_running`, `liveness_unavailable`, `lease_held_by_live_writer`, `worktree_holds_unpublished_work`, `branch_still_registered` (a Git worktree registration still holds the branch, even after a forced detach) or `worktree_registrations_unavailable`.'),
+  reason: z.string().optional().describe('Refusal code when `released` is false, for example `agent_still_running`, `liveness_unavailable`, `lease_held_by_live_writer`, `worktree_holds_unpublished_work`, `branch_still_registered` (a Git worktree registration still holds the branch, even after a forced detach), `worktree_registrations_unavailable` or `cancelled_claims_withdrawal_failed` (the claimed comments of a cancelled request could not be withdrawn from the pending list, so releasing could let them run).'),
 }), 'Outcome of a release request; refusals answer `409` with `released: false`.');

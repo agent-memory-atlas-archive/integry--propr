@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- admission, execution, failure settlement and handoff ownership share one PR lease lifecycle */
 import { formatTaskTerminalReason } from '@propr/shared';
 import { prepareRepositoryWorkflow, resolveAttemptRepositoryWorkflow, persistRepositoryWorkflowDeferral, repositoryWorkflowHistoryMetadata,
     withRepositoryWorkflowAdmission, reconcileRepositoryWorkflowAdmission, deferRepositoryWorkflowJob, RepositoryWorkflowCapacityError, nonRetryableRepositoryWorkflowError } from './repositoryWorkflow.js';
@@ -43,7 +44,7 @@ import {
     acquireCurrentPRProcessingLock, ensurePRProcessingLockToken, releasePRProcessingLock, startPRProcessingLockHeartbeat,
 } from './prProcessingLock.js';
 import { createPRCommentTaskStateIfMissing, evaluatePRCommentPreExecutionRecovery, handlePRCommentLockContention } from './prCommentCollisionRecovery.js';
-import { checkpointExecutionHandoffUsageLimitRetry, gatePredecessorHandoff, markExecutionHandoffAgentExited, markExecutionHandoffCleanupPending, markExecutionHandoffContainer, recordExecutionHandoff, retireExecutionHandoffAfterCleanup, settleExecutionHandoffAfterError } from './prCommentHandoffIntegration.js';
+import { checkpointExecutionHandoffUsageLimitRetry, gatePredecessorHandoff, markExecutionHandoffAgentExited, markExecutionHandoffCleanupPending, markExecutionHandoffContainer, recordExecutionHandoff, retireExecutionHandoffAfterCleanup, settleExecutionHandoffAfterError, stopAfterHandoffOwnershipLoss, writerOwnedWorktree } from './prCommentHandoffIntegration.js';
 import { stopOriginalPRReviewCycle } from './prContinuationReview.js';
 import { loadOriginalContributionDiscussion } from './prContributionDiscussion.js';
 import { PullRequestPublication } from './prPublication.js';
@@ -372,6 +373,7 @@ async function runReviewCommandMode(
     return runWithExecutionAbortSignal(executionSignal, () => executeReviewProcessing({ job, context, llm, taskId, stateManager, state, redisClient, validatePRAndComments }), hashTaskAttemptToken(lockToken));
 }
 
+// eslint-disable-next-line complexity -- admission, execution, failure settlement and handoff ownership share one lease lifecycle
 async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<JobResult> {
     const context = await initializePRJobContext(job);
     const { pullRequestNumber, repoOwner, repoName, correlationId, correlatedLogger, isBatchJob, commentsToProcess, jobBranchName, llm } = context;
@@ -453,6 +455,10 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
         return await runWithExecutionAbortSignal(executionController.signal, () => executeProcessing({ job, context, llm, taskId, stateManager, state, lockKey, lockToken }), hashTaskAttemptToken(lockToken));
     } catch (error) {
         executionFailed = true;
+        // A recovery adopted this handoff: the successor now owns the starting
+        // comment, the task's terminal state and the handoff settlement, so
+        // neither failure publication nor settlement may run for this writer.
+        if (state.followupHandoffOwnershipLost) return stopAfterHandoffOwnershipLoss(error as Error, correlatedLogger);
         const failJob = (failure: Error) => handleJobError(failure, job, { pullRequestNumber, repoOwner, repoName, authorsText: state.authorsText, unprocessedComments: state.unprocessedComments, octokit: state.octokit, startingWorkComment: state.startingWorkComment, claudeResult: state.claudeResult, correlationId, correlatedLogger, stateManager, taskId, retryComments: context.commentsToProcess, publicationStatus: state.publication?.status, followupHandoff: state.followupHandoff, checkpointUsageLimitRetry: stage => checkpointExecutionHandoffUsageLimitRetry(state, stage, correlatedLogger) });
         if (error instanceof RepositoryWorkflowCapacityError) {
             capacityRefused = true;
@@ -480,7 +486,7 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
         return { status: 'requeued', reason: 'usage_limit' };
     } finally {
         await stopLockHeartbeat();
-        await cleanupJob({ stateManager, lockKey, lockToken, taskId, octokit: state.octokit ?? undefined, localRepoPath: state.localRepoPath, worktreeInfo: state.worktreeInfo, repoOwner, repoName, pullRequestNumber, jobBranchName: context.jobBranchName, jobLlm: context.llm, jobUserId: job.data.userId, jobReasoningLevel: job.data.reasoningLevel, correlatedLogger, redisClient, skipPendingCommentFollowup: capacityRefused, success: !executionFailed });
+        await cleanupJob({ stateManager, lockKey, lockToken, taskId, octokit: state.octokit ?? undefined, localRepoPath: state.localRepoPath, worktreeInfo: writerOwnedWorktree(state), repoOwner, repoName, pullRequestNumber, jobBranchName: context.jobBranchName, jobLlm: context.llm, jobUserId: job.data.userId, jobReasoningLevel: job.data.reasoningLevel, correlatedLogger, redisClient, skipPendingCommentFollowup: capacityRefused, success: !executionFailed });
         // Only now is branch release provable; the handoff retires against that
         // evidence, or stays at cleanup_pending for recovery to release it.
         await retireExecutionHandoffAfterCleanup(state, correlatedLogger);

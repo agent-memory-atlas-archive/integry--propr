@@ -73,9 +73,10 @@ export interface ResumeFollowupHandoffParams {
      */
     scheduleRestoredComments?(record: FollowupHandoffRecord): Promise<void>;
     /**
-     * Removes restored claimed comments from the pending list again when the
-     * originating task was cancelled while they were being restored, so they
-     * cannot trigger automatic execution without an operator decision.
+     * Removes the claimed comments from the pending list again whenever a
+     * cancelled handoff is held (an earlier pass may have restored them), so
+     * they cannot trigger automatic execution without an operator decision.
+     * Idempotent: comments that are not pending are left alone.
      */
     withdrawRestoredComments?(record: FollowupHandoffRecord, comments: UnprocessedComment[]): Promise<void>;
 }
@@ -147,21 +148,45 @@ function ownershipLost(params: ResumeFollowupHandoffParams, record: FollowupHand
 }
 
 /**
+ * Best effort by necessity: the operator hold that follows is the durable
+ * obligation, and a withdrawal failure is logged rather than letting it skip
+ * that hold. The release of a cancelled hold repeats the withdrawal and
+ * refuses until it succeeds, so a failed withdrawal is never forgotten.
+ */
+async function withdrawCancelledClaims(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<void> {
+    if (!params.withdrawRestoredComments) return;
+    try {
+        await params.withdrawRestoredComments(record, parseClaimedComments(record));
+    } catch (error) {
+        params.log.error({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, error: (error as Error).message },
+            'Could not withdraw restored comments of a cancelled follow-up from the pending list');
+    }
+}
+
+/**
+ * Holds a cancelled handoff after conservatively withdrawing its claimed
+ * comments from the pending list. Whether an earlier pass restored them is
+ * unknowable after a crash between the restoration and its own withdrawal,
+ * and withdrawing comments that were never restored is a no-op, so every
+ * cancellation hold reconciles the withdrawal — not only the pass that
+ * observed the cancellation while restoring.
+ */
+async function holdCancelled(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
+    await withdrawCancelledClaims(params, record);
+    return holdForOperator(params, record, 'cancelled_by_user');
+}
+
+/**
  * User cancellation is authoritative: re-checked before every publication
  * step. The task-state read is itself awaited, so a lease loss it observed is
  * reported too — neither an operator hold nor the caller's mutation may follow.
  */
-async function cancellationHold(
-    params: ResumeFollowupHandoffParams,
-    record: FollowupHandoffRecord,
-    beforeHold?: () => Promise<void>,
-): Promise<ResumeOutcome | null> {
+async function cancellationHold(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome | null> {
     if (record.operator_authorized) return ownershipLost(params, record) ? { outcome: 'ownership_lost' } : null;
     const taskState = await params.stateManager.getTaskState(record.task_id);
     if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
     if (taskState?.state !== params.taskStates.CANCELLED) return null;
-    await beforeHold?.();
-    return holdForOperator(params, record, 'cancelled_by_user');
+    return holdCancelled(params, record);
 }
 
 /**
@@ -345,22 +370,6 @@ async function attemptHandoffCleanup(params: ResumeFollowupHandoffParams, record
 }
 
 /**
- * Best effort by necessity: the operator hold that follows is the durable
- * obligation, and a withdrawal failure is logged rather than letting it skip
- * that hold. A crash before the hold leaves the row active, and the next pass
- * holds it on its initial cancellation check.
- */
-async function withdrawCancelledClaims(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord, claimed: UnprocessedComment[]): Promise<void> {
-    if (!params.withdrawRestoredComments) return;
-    try {
-        await params.withdrawRestoredComments(record, claimed);
-    } catch (error) {
-        params.log.error({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, error: (error as Error).message },
-            'Could not withdraw restored comments of a cancelled follow-up from the pending list');
-    }
-}
-
-/**
  * The normal error path reported the failure (with this handoff's marker) and
  * died before settling the handoff. Its failure settlement would have retired
  * a worktree without publishable work, so recovery reconciles to the same
@@ -429,14 +438,14 @@ async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record:
     if (notice.delivery === 'normal_failure') return finishDeliveredFailure(params, record, notice.url);
     const hold = await cancellationHold(params, record);
     if (hold) return hold;
-    const claimed = parseClaimedComments(record);
-    await params.restoreComments(record, claimed);
+    await params.restoreComments(record, parseClaimedComments(record));
     // A successor that adopts this phase restores (deduplicated) and schedules
     // again. A cancellation that landed while the restoration was awaited must
     // not schedule replacement work: the restored claims are withdrawn from
     // the pending list (so no follow-up job picks them up) before the handoff
-    // is held for an explicit operator decision.
-    const lateHold = await cancellationHold(params, record, () => withdrawCancelledClaims(params, record, claimed));
+    // is held for an explicit operator decision. A worker death before that
+    // withdrawal is reconciled by the next pass's initial cancellation hold.
+    const lateHold = await cancellationHold(params, record);
     if (lateHold) return lateHold;
     await params.scheduleRestoredComments?.(record);
     // The user can cancel while the follow-up job is being queued, too. The
@@ -445,10 +454,7 @@ async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record:
     // already queued finds neither the claims nor a free admission gate.
     const finalized = await finalizeRecoveredTask(params, record, 'no_changes');
     if (finalized === 'ownership_lost') return { outcome: 'ownership_lost' };
-    if (finalized === 'cancelled') {
-        await withdrawCancelledClaims(params, record, claimed);
-        return holdForOperator(params, record, 'cancelled_by_user');
-    }
+    if (finalized === 'cancelled') return holdCancelled(params, record);
     const advanced = await advanceFollowupHandoff(params.store, record, {
         phase: 'cleanup_pending', status_reason: SETTLEMENT_RETURNED_TO_QUEUE, settlement: SETTLEMENT_RETURNED_TO_QUEUE,
     });

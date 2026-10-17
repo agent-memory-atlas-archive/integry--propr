@@ -90,6 +90,10 @@ export class FollowupHandoffOwnershipLostError extends Error {
 }
 
 async function advanceExecutionHandoff(state: HandoffCarrier, changes: Parameters<typeof advanceFollowupHandoff>[2]): Promise<void> {
+    // A loss an earlier checkpoint observed — including the swallowed
+    // container-identity callback's — stops every later one: the cleared
+    // record must not read as "no handoff" and let publication continue.
+    if (state.followupHandoffOwnershipLost) throw new FollowupHandoffOwnershipLostError('handoff_ownership_already_lost');
     if (!state.followupHandoff) return;
     const record = state.followupHandoff;
     const advanced = await advanceFollowupHandoff({}, record, changes);
@@ -113,6 +117,26 @@ async function advanceExecutionHandoff(state: HandoffCarrier, changes: Parameter
     state.followupHandoff = null;
     state.followupHandoffOwnershipLost = true;
     throw new FollowupHandoffOwnershipLostError(fresh ? 'handoff_record_changed' : 'handoff_record_missing');
+}
+
+/**
+ * The job result of a writer that observed its handoff move on to a recovery
+ * successor. Ownership loss is a stop condition: the successor owns the
+ * starting comment, the task's terminal state and the handoff settlement, so
+ * no failure is published or settled for this writer.
+ */
+export function stopAfterHandoffOwnershipLoss(error: Error, correlatedLogger: Logger): JobResult {
+    correlatedLogger.warn({ error: error.message }, 'Follow-up handoff ownership was lost; stopping without failure publication or settlement');
+    return { status: 'skipped', reason: 'followup_handoff_ownership_lost' };
+}
+
+/**
+ * The worktree this writer may still clean up. The successor that adopted the
+ * handoff also owns its retained worktree: detaching it would break that
+ * recovery's publication.
+ */
+export function writerOwnedWorktree<T>(state: HandoffCarrier & { worktreeInfo?: T }): T | undefined {
+    return state.followupHandoffOwnershipLost ? undefined : state.worktreeInfo;
 }
 
 /** Binds the launched agent container's immutable identity to the handoff. */

@@ -3,10 +3,10 @@ import { inspectTaskContainerLivenessForTask } from '@propr/core';
 import { adoptPRProcessingLock, releasePRProcessingLock } from './prProcessingLock.js';
 import {
     containerIdentityConflict, recordFailedClosed, resolveRecoveryDeps,
-    type FollowupHandoffRecoveryDeps, type TaskContainerInspection,
+    type FollowupHandoffRecoveryDeps, type ResolvedRecoveryDeps, type TaskContainerInspection,
 } from './followupHandoffDeps.js';
 import {
-    advanceFollowupHandoff, loadFollowupHandoff, loadFollowupHandoffs, parseSourceTaskIds,
+    advanceFollowupHandoff, loadFollowupHandoff, loadFollowupHandoffs, parseClaimedComments, parseSourceTaskIds,
     HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED, SETTLEMENT_RETRY_SCHEDULING,
     type FollowupHandoffKey, type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
 } from './followupHandoffStore.js';
@@ -78,6 +78,31 @@ async function branchReleaseRefusal(
 }
 
 /**
+ * A cancelled request must never become executable through its release. A
+ * recovery that restored the claimed comments can die before withdrawing them,
+ * or its withdrawal can fail; either way the hold survives without proof the
+ * comments left the pending list. The task state — not the mutable status
+ * reason a later diagnostic overwrites — decides, and the idempotent
+ * withdrawal must succeed before the row may stop blocking admission.
+ */
+async function cancelledClaimsRefusal(
+    record: FollowupHandoffRecord,
+    deps: ResolvedRecoveryDeps,
+): Promise<'cancelled_claims_withdrawal_failed' | null> {
+    if (record.operator_authorized) return null;
+    try {
+        const task = await deps.stateManager.getTaskState(record.task_id);
+        if (record.status_reason !== 'cancelled_by_user' && task?.state !== deps.taskStates.CANCELLED) return null;
+        await deps.withdrawRestoredComments(record, parseClaimedComments(record));
+        return null;
+    } catch (error) {
+        deps.log.warn({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, error: (error as Error).message },
+            'Could not withdraw the claimed comments of a cancelled follow-up; the handoff is not released');
+        return 'cancelled_claims_withdrawal_failed';
+    }
+}
+
+/**
  * Marks a handoff released so recovery stops attempting it. Never deletes the
  * worktree or any commits: it only detaches the worktree HEAD to free the
  * branch, and refuses even that while unpublished work exists unless the
@@ -85,7 +110,9 @@ async function branchReleaseRefusal(
  * The row is marked released only once no Git worktree registration holds the
  * branch any more; otherwise the obligation stays and the refusal names why.
  * The mutation runs only with the recorded agent proven gone and under the
- * pull request's processing lease, so it can never detach a live writer.
+ * pull request's processing lease, so it can never detach a live writer. A
+ * cancelled request's claimed comments are withdrawn from the pending list
+ * first; the release is refused until that withdrawal succeeds.
  */
 export async function releaseFollowupHandoffRecord(
     key: FollowupHandoffKey,
@@ -115,6 +142,8 @@ export async function releaseFollowupHandoffRecord(
         });
         if (adoption !== 'adopted') return { released: false, reason: 'lease_held_by_live_writer' };
         try {
+            const claimsRefusal = await cancelledClaimsRefusal(record, resolved);
+            if (claimsRefusal) return { released: false, reason: claimsRefusal };
             const settled = await resolved.git.releaseSettledWorktree(record.local_repo_path, record.branch_name, record.worktree_path);
             if (!settled && !options.force) {
                 return { released: false, reason: 'worktree_holds_unpublished_work' };

@@ -31,6 +31,7 @@ let resolvedWorkflow: ResolvedRepositoryWorkflow | undefined;
 let policyLoads = 0;
 let agentError: Error | undefined;
 let agentResult: unknown;
+let onAgentExitedCheckpoint: ((state: { followupHandoffOwnershipLost?: boolean }) => Promise<void>) | undefined;
 let postExecutionParams: { visualPreviewSettings?: unknown } | undefined;
 const processingMetadata: Array<Record<string, unknown>> = [];
 const cancellations: Array<Record<string, unknown>> = [];
@@ -207,10 +208,15 @@ const modules: Record<string, Record<string, unknown>> = {
     },
     // Durable handoff recovery is covered by test/followupHandoffRecovery.test.ts.
     prCommentHandoffIntegration: {
-        recordExecutionHandoff: noOp, markExecutionHandoffAgentExited: noOp, markExecutionHandoffContainer: noOp,
+        recordExecutionHandoff: noOp, markExecutionHandoffContainer: noOp,
+        markExecutionHandoffAgentExited: async (state: { followupHandoffOwnershipLost?: boolean }) => { await onAgentExitedCheckpoint?.(state); },
         markExecutionHandoffCommitted: noOp, markExecutionHandoffPushed: noOp, markExecutionHandoffCommentPublished: noOp,
         markExecutionHandoffCleanupPending: noOp, retireExecutionHandoffAfterCleanup: noOp,
-        gatePredecessorHandoff: async () => undefined, settleExecutionHandoffAfterError: noOp, checkpointExecutionHandoffUsageLimitRetry: noOp,
+        gatePredecessorHandoff: async () => undefined, checkpointExecutionHandoffUsageLimitRetry: noOp,
+        settleExecutionHandoffAfterError: async () => { events.push('settle-handoff'); },
+        // Mirrors of the real helpers (covered by test/followupHandoffCancelledClaims.test.ts).
+        stopAfterHandoffOwnershipLoss: () => ({ status: 'skipped', reason: 'followup_handoff_ownership_lost' }),
+        writerOwnedWorktree: (state: { followupHandoffOwnershipLost?: boolean; worktreeInfo?: unknown }) => state.followupHandoffOwnershipLost ? undefined : state.worktreeInfo,
     },
     prCommentCollisionRecovery: {
         createPRCommentTaskStateIfMissing: async (params: Parameters<typeof realRecovery.createPRCommentTaskStateIfMissing>[0]) => { if (realReentryHelpers) await realRecovery.createPRCommentTaskStateIfMissing(params); },
@@ -257,7 +263,7 @@ const job = (commandMode = 'default', pullRequestNumber = 42) => ({
     data: { repoOwner: 'upstream', repoName: 'project', pullRequestNumber, commandMode, correlationId: 'correlation', commentId: 5, commentBody: 'Implement', commentAuthor: 'contributor' },
 });
 beforeEach(() => {
-    refuseCapacity = false; otherRuns = 0; reconciledLimits.length = 0; nothingSelected = false; persistError = undefined; resolvedWorkflow = undefined; policyLoads = 0; processingMetadata.length = 0; agentError = undefined; agentResult = undefined; postExecutionParams = undefined;
+    refuseCapacity = false; otherRuns = 0; reconciledLimits.length = 0; nothingSelected = false; persistError = undefined; resolvedWorkflow = undefined; policyLoads = 0; processingMetadata.length = 0; agentError = undefined; agentResult = undefined; postExecutionParams = undefined; onAgentExitedCheckpoint = undefined;
     onLockAcquired = undefined; blockedLock = undefined; resolutionError = undefined; taskStates.clear();
     cancellations.length = 0; deferralHistory.length = 0;
     events = []; continuation = undefined; preparationError = undefined; handledStartingComment = undefined;
@@ -587,4 +593,25 @@ test('resumed follow-up work performs no assignment and no review request before
     assert.ok(events.includes('agent'));
     assert.deepEqual(autoAssignmentCalls, []);
     assert.deepEqual(githubRoutes.filter(route => /\/assignees$|\/requested_reviewers$/.test(route)), []);
+});
+
+// Review 6230272784 F33: a writer whose handoff a recovery adopted stops at
+// the checkpoint that detected it; the successor owns everything after.
+test('a detected handoff ownership loss publishes no failure, settles nothing and leaves the retained worktree alone', async () => {
+    agentResult = { claudeResult: { success: true }, agentType: 'agent' };
+    onAgentExitedCheckpoint = async state => {
+        // As the real checkpoint does when the row's owner token changed.
+        state.followupHandoffOwnershipLost = true;
+        throw new Error('Follow-up publication handoff ownership was lost (handoff_record_changed); stopping before further publication');
+    };
+    const result = await processPullRequestCommentJob(job() as never);
+    assert.deepEqual({ status: result.status, reason: result.reason }, { status: 'skipped', reason: 'followup_handoff_ownership_lost' });
+    assert.ok(events.includes('agent'));
+    assert.deepEqual(handledTaskIds, [], 'the generic error handler never PATCHes the starting comment or fails the task');
+    assert.equal(handledStartingComment, undefined);
+    assert.ok(!events.includes('settle-handoff'), "the successor's handoff obligation is not settled by this writer");
+    assert.deepEqual(githubRoutes.filter(route => route.startsWith('PATCH')), []);
+    assert.notEqual(taskStates.get('task-1'), 'failed');
+    assert.ok(events.includes('cleanup'), 'the lease is still released');
+    assert.ok(!events.includes('cleanup-worktree'), "the successor's retained worktree is not detached");
 });

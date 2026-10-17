@@ -247,7 +247,7 @@ export interface FollowupHandoffReleaseRequest {
 /** Outcome of a release request; refusals answer `409` with `released: false`. */
 export interface FollowupHandoffReleaseResult {
   released: boolean;
-  /** Refusal code when `released` is false, for example `agent_still_running`, `liveness_unavailable`, `lease_held_by_live_writer`, `worktree_holds_unpublished_work`, `branch_still_registered` (a Git worktree registration still holds the branch, even after a forced detach) or `worktree_registrations_unavailable`. */
+  /** Refusal code when `released` is false, for example `agent_still_running`, `liveness_unavailable`, `lease_held_by_live_writer`, `worktree_holds_unpublished_work`, `branch_still_registered` (a Git worktree registration still holds the branch, even after a forced detach), `worktree_registrations_unavailable` or `cancelled_claims_withdrawal_failed` (the claimed comments of a cancelled request could not be withdrawn from the pending list, so releasing could let them run). */
   reason?: string;
 }
 

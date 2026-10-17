@@ -91,6 +91,10 @@ test("refusal codes become actionable operator messages", () => {
     /could not be read/
   );
   assert.match(
+    handoffErrorMessage(conflict({ released: false, reason: "cancelled_claims_withdrawal_failed" })),
+    /could not be withdrawn from the pending list/
+  );
+  assert.match(
     handoffErrorMessage(conflict({ error: "no", code: "cancellation_authorization_unavailable" })),
     /not granted/
   );
