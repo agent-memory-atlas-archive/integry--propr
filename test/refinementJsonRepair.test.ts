@@ -136,6 +136,25 @@ describe('plan refinement JSON repair', () => {
         assert.equal(runPlanFileAgent.mock.callCount(), 0);
     });
 
+    test('salvages an answer the model started over with the file agent', async () => {
+        const response = JSON.stringify({ action: 'modified', summary: 'Dropped the JSON backend', plan: refined }, null, 2);
+        // Cut off mid-string, then restarted with a reworded summary.
+        const spliced = response.slice(0, response.indexOf('history store')) + response.replace('Dropped the JSON backend', 'Dropped the JSON history file');
+        llmResponses.push(spliced);
+        repairResult = JSON.parse(response.replace('Dropped the JSON backend', 'Dropped the JSON history file'));
+
+        const result = await refinePlan(options);
+
+        assert.deepEqual(result.plan, refined);
+        assert.equal(runLightweightLLMAnalysis.mock.callCount(), 1, 'no model call is used to repair JSON');
+        const call = runPlanFileAgent.mock.calls[0].arguments[0];
+        assert.equal(call.document, true);
+        assert.equal(call.salvage, true);
+        assert.equal(call.original, spliced);
+        assert.match(call.prompt, /started the whole answer over/);
+        assert.match(call.prompt, /validate-plan\.mjs --document --salvage/);
+    });
+
     test('reports a missing default model as a failed repair', async () => {
         llmResponses.push(broken);
         defaultModelError = Object.assign(new Error('No default model is configured'), { name: 'NoDefaultModelConfiguredError' });

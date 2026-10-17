@@ -7,6 +7,7 @@ import { after, describe, mock, test } from 'node:test';
 import {
   extractWholeJsonArray,
   incompletePlanItems,
+  unreadableDocumentOriginal,
   validatePlanText,
 } from '../packages/core/src/services/taskPlanning/planValidation.js';
 
@@ -125,6 +126,31 @@ describe('plan validator document mode', () => {
 
   test('plan mode still rejects a refinement object', async () => {
     assert.equal((await validatePlanText(response)).valid, false);
+  });
+});
+
+describe('plan validator salvage mode', () => {
+  const response = JSON.stringify({ action: 'modified', summary: 'Reworked storage', plan: [task('A'), task('B')] }, null, 2);
+  // The model was cut off mid-string, then started over with a reworded summary
+  // and an unescaped quote in its restarted copy.
+  const restart = response.replace('Reworked storage', 'Reworked the history store');
+  const original = response.slice(0, response.indexOf('Steps for B')) + restart.replace('\\"quotes\\"', '"quotes"');
+
+  test('accepts a syntax-only repair of the restarted copy', async () => {
+    assert.ok(await unreadableDocumentOriginal(original), 'a spliced answer is not one readable document');
+    assert.equal(await unreadableDocumentOriginal(original, { salvage: true }), null);
+    assert.deepEqual(await validatePlanText(restart, original, { document: true, salvage: true }), { valid: true, taskCount: 2, errors: [] });
+  });
+
+  test('rejects dropped, reworded or first-attempt content', async () => {
+    const dropped = JSON.stringify({ ...JSON.parse(restart), plan: [task('A')] });
+    assert.equal((await validatePlanText(dropped, original, { document: true, salvage: true })).valid, false);
+    assert.equal((await validatePlanText(response, original, { document: true, salvage: true })).valid, false);
+  });
+
+  test('cannot salvage an answer that was cut off without restarting', async () => {
+    const truncated = response.slice(0, response.indexOf('Steps for B'));
+    assert.match(await unreadableDocumentOriginal(truncated, { salvage: true }) ?? '', /no complete restarted copy/);
   });
 });
 

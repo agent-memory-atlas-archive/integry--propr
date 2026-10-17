@@ -141,6 +141,11 @@ export interface PlanFileAgentOptions {
    * rather than a plan array; only its content is checked against `original`.
    */
   document?: boolean;
+  /**
+   * With `document`: the original cannot be read structurally, so the result
+   * may drop content but every key and value must come from the original.
+   */
+  salvage?: boolean;
   /** `agent:model`, as configured for planning. */
   model: string;
   /** The plan draft, when there is one; it attributes the agent run. */
@@ -191,7 +196,7 @@ async function preparePlanWorkspace(options: PlanFileAgentOptions, workspaces: s
 }
 
 export async function runPlanFileAgent<T = PlanItem[]>(options: PlanFileAgentOptions): Promise<T> {
-  const { purpose, prompt, original, taskFiles = false, document = false, model, draftId, repository, githubToken, executionType, correlationId, metadata, routingSession } = options;
+  const { purpose, prompt, original, taskFiles = false, document = false, salvage = false, model, draftId, repository, githubToken, executionType, correlationId, metadata, routingSession } = options;
   const log = correlationId ? logger.withCorrelation(correlationId) : logger;
   const workspaces: string[] = [];
   try {
@@ -256,7 +261,7 @@ export async function runPlanFileAgent<T = PlanItem[]>(options: PlanFileAgentOpt
     } else {
       planText = await readWorkspaceFile(path.join(workspace, PLAN_FILE));
       if (planText === null) throw new PlanningFailedError(`Plan ${purpose} produced no ${PLAN_FILE}.${agentFailure}`);
-      report = await validatePlanText(planText, original, { document });
+      report = await validatePlanText(planText, original, { document, salvage });
     }
     if (!report.valid) {
       log.warn({ purpose, model, errors: report.errors.slice(0, 10) }, 'Plan file agent result failed validation');

@@ -190,6 +190,26 @@ Fix ${PLAN_FILE} so that \`node validate-plan.mjs --document\` exits with status
 Run \`node validate-plan.mjs --document\` after each change and stop once it reports "valid": true.`;
 }
 
+/**
+ * Task for the agent that salvages a refinement response the model started
+ * over after being cut off: a partial first attempt followed by a restarted copy.
+ */
+export function buildRefinementSalvagePrompt(parseError: string, unreadable: string): string {
+  return `${PLAN_FILE} in this workspace holds a plan refinement response (a JSON object with "action", "summary" and a "plan" array of tasks) that another model wrote, but it is not valid JSON (${parseError}) and cannot be read as one document (${unreadable}).
+
+The model's answer was cut off part-way and the model then started the whole answer over, so the file holds an incomplete first attempt followed by a complete restarted copy, which may itself contain syntax errors.
+
+Make ${PLAN_FILE} hold only the restarted copy, as valid JSON, so that \`node validate-plan.mjs --document --salvage\` exits with status 0.
+
+- Delete the incomplete first attempt: everything before the point where the answer starts over (\`{\` followed by \`"action"\` again).
+- In the restarted copy, fix JSON syntax only: escaping of quotes, backslashes and newlines inside strings, and missing or extra commas, brackets or braces.
+- Keep every field, value and task of the restarted copy with its exact text. Never reword, summarize, shorten, reorder or add content: the validator compares the result with the restarted copy in ${PLAN_ORIGINAL_FILE} and rejects any content change.
+- Do not modify ${PLAN_ORIGINAL_FILE} or validate-plan.mjs.
+- The file may be very large: cut and edit it in place with your tools instead of retyping it.
+
+Run \`node validate-plan.mjs --document --salvage\` after each change and stop once it reports "valid": true.`;
+}
+
 const isUsageLimitError = (error: unknown) => (error as Error)?.name === 'UsageLimitError';
 
 interface RefinementRepairContext {
@@ -224,11 +244,19 @@ async function parseRefinementWithRepair(response: string, context: RefinementRe
     throw new PlanningFailedError(`Failed to parse refined plan: ${parseError.message}`);
   }
 
+  // An original the validator cannot read as one document is usually an answer
+  // the model started over after being cut off: the agent salvages it, and the
+  // validator then requires a syntax-only repair of the restarted copy.
   const unreadable = await unreadableDocumentOriginal(original);
   if (unreadable) {
-    // A validator that cannot read the original rejects every repair of it.
-    correlatedLogger.error({ error: parseError.message, unreadable, responseLength: response.length }, 'Refinement response cannot be repaired in place');
-    throw new PlanningFailedError(`Failed to parse refined plan: ${parseError.message}. It cannot be repaired in place: ${unreadable}`);
+    // Without a complete restarted copy the content is simply missing, and no
+    // repair could pass validation.
+    const unsalvageable = await unreadableDocumentOriginal(original, { salvage: true });
+    if (unsalvageable) {
+      correlatedLogger.error({ error: parseError.message, unreadable, unsalvageable, responseLength: response.length }, 'Refinement response cannot be repaired in place');
+      throw new PlanningFailedError(`Failed to parse refined plan: ${parseError.message}. It cannot be repaired in place: ${unreadable}`);
+    }
+    correlatedLogger.warn({ error: parseError.message, unreadable, responseLength: response.length }, 'Refinement response restarts part-way; salvaging the restarted copy with an agent');
   }
 
   let repairModel: string | undefined;
@@ -245,7 +273,8 @@ async function parseRefinementWithRepair(response: string, context: RefinementRe
     const repaired = await runPlanFileAgent<RefinementResponse | PlanItem[]>({
       purpose: 'repair',
       document: true,
-      prompt: buildRefinementRepairPrompt(parseError.message),
+      salvage: !!unreadable,
+      prompt: unreadable ? buildRefinementSalvagePrompt(parseError.message, unreadable) : buildRefinementRepairPrompt(parseError.message),
       files: { [PLAN_FILE]: original, [PLAN_ORIGINAL_FILE]: original },
       original,
       model: repairModel,
@@ -254,10 +283,10 @@ async function parseRefinementWithRepair(response: string, context: RefinementRe
       githubToken: context.githubToken,
       executionType: 'plan-refinement',
       correlationId: context.correlationId ? `${context.correlationId}-repair` : undefined,
-      metadata: { jsonRepair: true, sourceModel: context.generationModel, sourceResponseLength: response.length },
+      metadata: { jsonRepair: true, jsonSalvage: !!unreadable, sourceModel: context.generationModel, sourceResponseLength: response.length },
       routingSession: repairRoute,
     });
-    correlatedLogger.info({ originalError: parseError.message, repairModel }, 'Repaired refinement response passed validation');
+    correlatedLogger.info({ originalError: parseError.message, repairModel, salvaged: !!unreadable }, 'Repaired refinement response passed validation');
     return toRefinementResponse(repaired, correlatedLogger);
   } catch (repairError) {
     if (isUsageLimitError(repairError)) throw repairError;
