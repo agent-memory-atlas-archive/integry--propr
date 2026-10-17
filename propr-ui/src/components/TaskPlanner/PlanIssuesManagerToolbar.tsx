@@ -5,6 +5,7 @@ import { PlanTask } from '../../api/plannerApi';
 import type { InstanceCatalogAgent } from '@propr/shared';
 import AgentModelSelector from './AgentModelSelector';
 import { UltrafixSettingsControls } from './PlanIssueRowComponents';
+import { useUltrafixDefaults } from './useUltrafixDefaults';
 import { ExecutionConfigPopover } from './ExecutionConfigPopover';
 import { getExecutionConfigSummary } from './planIssueRowUtils';
 import { getOutlineTitle } from './planDisplayName';
@@ -194,9 +195,10 @@ export const ExecutionOptionsToolbar: React.FC<ExecutionOptionsToolbarProps> = (
   tasks, disableImplementation = false,
 }) => {
   const ultrafixEnabled = runUltrafix || false;
+  const ultrafixDefaults = useUltrafixDefaults(ultrafixEnabled);
   const isBatchPlan = tasks.length >= 2;
   const summary = getExecutionConfigSummary({
-    showAgent: isBatchPlan, globalAgent, globalModel, globalIsMulti, globalSelectedModels, autoMerge, runUltrafix, ultrafixGoal,
+    showAgent: isBatchPlan, globalAgent, globalModel, globalIsMulti, globalSelectedModels, autoMerge, runUltrafix, ultrafixGoal: ultrafixGoal ?? ultrafixDefaults?.ratingGoal,
   });
 
   // One bar: the execution mode on the left, every other setting behind the config summary on the right.
@@ -247,8 +249,10 @@ export const ExecutionOptionsToolbar: React.FC<ExecutionOptionsToolbarProps> = (
                     maxCycles={ultrafixMaxCycles}
                     onGoalChange={(value) => onUltrafixGoalChange?.(value)}
                     onMaxCyclesChange={(value) => onUltrafixMaxCyclesChange?.(value)}
-                    goalPlaceholder="Instance default"
-                    maxPlaceholder="Default"
+                    defaultGoal={ultrafixDefaults?.ratingGoal}
+                    defaultMaxCycles={ultrafixDefaults?.maxCycles}
+                    goalPlaceholder="Instance setting"
+                    maxPlaceholder="—"
                     inputClassName="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-mono disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
                     goalInputWidthClassName="w-44"
                     maxInputWidthClassName="w-16"

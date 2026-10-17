@@ -157,6 +157,35 @@ describe('New Task issue launcher', () => {
     fireEvent.change(screen.getByLabelText('Agent'), { target: { value: 'issue-only' } });
     expect(screen.getByRole('button', { name: 'Run task' })).toBeEnabled();
   });
+  it('shows the instance default agent and its default model preselected without pinning them', async () => {
+    vi.mocked(submissions.submitTask).mockResolvedValue({ ...pending, state: 'issue_created', error: null });
+    renderPage();
+    await waitFor(() => expect(screen.getByLabelText('Agent')).toHaveValue('issue-only'));
+    expect(screen.getByLabelText('Model')).toHaveValue('model-1');
+    expect(screen.getByText('Advanced Options')).toHaveTextContent('issue-only · Model 1');
+    expect(screen.queryByRole('option', { name: /default/i })).not.toBeInTheDocument();
+    const run = screen.getByRole('button', { name: 'Run task' });
+    await waitFor(() => expect(run).toBeEnabled());
+    fireEvent.click(run);
+    await waitFor(() => expect(submissions.submitTask).toHaveBeenCalled());
+    const payload = vi.mocked(submissions.submitTask).mock.calls[0][1];
+    expect(payload).not.toHaveProperty('agentAlias');
+    expect(payload).not.toHaveProperty('model');
+  });
+  it('submits the shown fallback model for an agent without a configured default model', async () => {
+    const { getInstanceCatalog } = await import('../api/proprApi');
+    vi.mocked(getInstanceCatalog).mockResolvedValueOnce({ repositories: [{ name: 'acme/billing', enabled: true }], agents: [{ alias: 'issue-only', enabled: true, supportedModels: ['model-1'], defaultModel: 'model-1' }, { alias: 'single', enabled: true, supportedModels: ['model-2'] }] } as Awaited<ReturnType<typeof getInstanceCatalog>>);
+    vi.mocked(submissions.submitTask).mockResolvedValue({ ...pending, state: 'issue_created', error: null });
+    renderPage();
+    await screen.findByRole('option', { name: 'single' });
+    fireEvent.change(screen.getByLabelText('Agent'), { target: { value: 'single' } });
+    expect(screen.getByLabelText('Model')).toHaveValue('model-2');
+    const run = screen.getByRole('button', { name: 'Run task' });
+    await waitFor(() => expect(run).toBeEnabled());
+    fireEvent.click(run);
+    await waitFor(() => expect(submissions.submitTask).toHaveBeenCalled());
+    expect(vi.mocked(submissions.submitTask).mock.calls[0][1]).toMatchObject({ agentAlias: 'single', model: 'model-2' });
+  });
   it('remembers the last used repository, agent, and model once the issue is created', async () => {
     vi.mocked(submissions.submitTask).mockResolvedValue({ ...pending, state: 'issue_created', error: null });
     renderPage();

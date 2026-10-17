@@ -121,6 +121,84 @@ describe('UltrafixSettingsControls', () => {
     expect(goal.selectedOptions[0].textContent).toBe('◆ 8/10 (Standard)');
     expect(screen.getByLabelText('Max Loops')).toHaveValue(5);
   });
+
+  it('preselects the instance values when nothing is set and keeps following them', () => {
+    const onGoalChange = vi.fn();
+    const onMaxCyclesChange = vi.fn();
+    render(
+      <UltrafixSettingsControls
+        enabled goal={null} maxCycles={null} onGoalChange={onGoalChange} onMaxCyclesChange={onMaxCyclesChange}
+        defaultGoal={3} defaultMaxCycles={4}
+        goalPlaceholder="Instance setting" maxPlaceholder="—" inputClassName="" goalInputWidthClassName="" maxInputWidthClassName=""
+      />
+    );
+
+    const goal = screen.getByLabelText('Min Review Score') as HTMLSelectElement;
+    expect(goal.selectedOptions[0].textContent).toBe('3/10');
+    expect(screen.queryByRole('option', { name: 'Instance setting' })).not.toBeInTheDocument();
+    const max = screen.getByLabelText('Max Loops');
+    expect(max).toHaveValue(4);
+    fireEvent.blur(max);
+    fireEvent.change(max, { target: { value: '' } });
+    fireEvent.blur(max);
+    expect(max).toHaveValue(4);
+    expect(onMaxCyclesChange).not.toHaveBeenCalled();
+    fireEvent.change(max, { target: { value: '6' } });
+    fireEvent.blur(max);
+    expect(onMaxCyclesChange).toHaveBeenCalledWith(6);
+  });
+
+  it('shows the inherited instance value again after clearing an explicit value equal to it', () => {
+    const props = {
+      enabled: true, goal: null, onGoalChange: vi.fn(), defaultMaxCycles: 5,
+      goalPlaceholder: 'Instance setting', maxPlaceholder: '—', inputClassName: '', goalInputWidthClassName: '', maxInputWidthClassName: '',
+    };
+    const onMaxCyclesChange = vi.fn();
+    const { rerender } = render(<UltrafixSettingsControls {...props} maxCycles={5} onMaxCyclesChange={onMaxCyclesChange} />);
+
+    const max = screen.getByLabelText('Max Loops');
+    expect(max).toHaveValue(5);
+    fireEvent.change(max, { target: { value: '' } });
+    fireEvent.blur(max);
+    expect(onMaxCyclesChange).toHaveBeenCalledWith(null);
+    rerender(<UltrafixSettingsControls {...props} maxCycles={null} onMaxCyclesChange={onMaxCyclesChange} />);
+    expect(max).toHaveValue(5);
+  });
+
+  it('keeps an instance goal below 5 selectable after choosing an override', () => {
+    const props = {
+      enabled: true, maxCycles: null, onMaxCyclesChange: vi.fn(), defaultGoal: 3,
+      goalPlaceholder: 'Instance setting', maxPlaceholder: '—', inputClassName: '', goalInputWidthClassName: '', maxInputWidthClassName: '',
+    };
+    const onGoalChange = vi.fn();
+    const { rerender } = render(<UltrafixSettingsControls {...props} goal={null} onGoalChange={onGoalChange} />);
+
+    const goal = screen.getByLabelText('Min Review Score') as HTMLSelectElement;
+    fireEvent.change(goal, { target: { value: '8' } });
+    expect(onGoalChange).toHaveBeenLastCalledWith(8);
+    rerender(<UltrafixSettingsControls {...props} goal={8} onGoalChange={onGoalChange} />);
+    expect(goal.selectedOptions[0].textContent).toBe('◆ 8/10 (Standard)');
+    expect(screen.getByRole('option', { name: '3/10' })).toBeInTheDocument();
+
+    fireEvent.change(goal, { target: { value: '3' } });
+    expect(onGoalChange).toHaveBeenLastCalledWith(3);
+    rerender(<UltrafixSettingsControls {...props} goal={3} onGoalChange={onGoalChange} />);
+    expect(goal.selectedOptions[0].textContent).toBe('3/10');
+    expect(screen.getAllByRole('option', { name: '3/10' })).toHaveLength(1);
+  });
+
+  it('lists both an explicit goal and the instance goal when neither is a fixed option', () => {
+    render(
+      <UltrafixSettingsControls
+        enabled goal={2} maxCycles={null} onGoalChange={vi.fn()} onMaxCyclesChange={vi.fn()} defaultGoal={4}
+        goalPlaceholder="Instance setting" maxPlaceholder="—" inputClassName="" goalInputWidthClassName="" maxInputWidthClassName=""
+      />
+    );
+
+    const goal = screen.getByLabelText('Min Review Score') as HTMLSelectElement;
+    expect(goal.selectedOptions[0].textContent).toBe('2/10');
+    expect(screen.getByRole('option', { name: '4/10' })).toBeInTheDocument();
+  });
 });
 
 describe('RowActions', () => {

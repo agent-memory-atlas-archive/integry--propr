@@ -12,7 +12,7 @@ import MarkdownRenderer from '../TaskDetails/MarkdownRenderer';
 import { getModelName, getShortModelName, getImplementButtonClassName, getImplementButtonTitle } from './planIssueRowUtils';
 import { AuthenticatedAttachmentImage } from './AuthenticatedAttachmentImage';
 
-interface UltrafixSettingsControlsProps { enabled: boolean; goal: number | null | undefined; maxCycles: number | null | undefined; onGoalChange: (value: number | null) => void; onMaxCyclesChange: (value: number | null) => void; goalPlaceholder: string; maxPlaceholder: string; inputClassName: string; goalInputWidthClassName: string; maxInputWidthClassName: string; containerClassName?: string; errorClassName?: string; goalLabel?: string; maxLabel?: string; }
+interface UltrafixSettingsControlsProps { enabled: boolean; goal: number | null | undefined; maxCycles: number | null | undefined; onGoalChange: (value: number | null) => void; onMaxCyclesChange: (value: number | null) => void; goalPlaceholder: string; maxPlaceholder: string; inputClassName: string; goalInputWidthClassName: string; maxInputWidthClassName: string; containerClassName?: string; errorClassName?: string; goalLabel?: string; maxLabel?: string; defaultGoal?: number; defaultMaxCycles?: number; }
 
 // Each goal reads as the score pill it targets: same shape tiers as ScoreBadge, out of 10.
 const ULTRAFIX_GOAL_OPTIONS: { value: number; label: string }[] = [
@@ -55,16 +55,30 @@ export const UltrafixSettingsControls: React.FC<UltrafixSettingsControlsProps> =
   errorClassName = 'text-[11px] text-amber-700',
   goalLabel = 'Min Review Score',
   maxLabel = 'Max Loops',
+  defaultGoal,
+  defaultMaxCycles,
 }) => {
-  const [maxCyclesInput, setMaxCyclesInput] = useState(maxCycles?.toString() ?? '');
+  // An unset value shows the instance value it resolves to, not a "default" placeholder.
+  const shownMaxCycles = (maxCycles ?? defaultMaxCycles)?.toString() ?? '';
+  const [maxCyclesInput, setMaxCyclesInput] = useState(shownMaxCycles);
   const [maxCyclesError, setMaxCyclesError] = useState<string | null>(null);
-  useEffect(() => { setMaxCyclesInput(maxCycles?.toString() ?? ''); setMaxCyclesError(null); }, [maxCycles]);
+  // Also resync on maxCycles: clearing an explicit value equal to the instance value leaves shownMaxCycles unchanged.
+  useEffect(() => { setMaxCyclesInput(shownMaxCycles); setMaxCyclesError(null); }, [shownMaxCycles, maxCycles]);
   useEffect(() => { if (!enabled) setMaxCyclesError(null); }, [enabled]);
+  const shownGoal = goal ?? defaultGoal;
+  // Keep the instance value selectable after an override, alongside any explicit value outside the fixed list.
+  const extraGoals = [...new Set([defaultGoal, goal])].filter((value): value is number => value != null && !isUltrafixGoalOption(value));
+  const goalOptions = extraGoals.length > 0
+    ? [...ULTRAFIX_GOAL_OPTIONS, ...extraGoals.map((value) => ({ value, label: `${value}/10` }))].sort((a, b) => b.value - a.value)
+    : ULTRAFIX_GOAL_OPTIONS;
 
   const commitMaxCycles = () => {
     const result = parseUltrafixIntegerInput(maxCyclesInput, { minimum: 1, label: maxLabel });
     if (result.error) { setMaxCyclesError(result.error); return; }
-    setMaxCyclesError(null); if (result.value !== maxCycles) onMaxCyclesChange(result.value);
+    setMaxCyclesError(null);
+    // Clearing the field, or leaving the instance value untouched, keeps following the instance value.
+    if (maxCycles == null && (result.value === null || result.value === defaultMaxCycles)) { setMaxCyclesInput(shownMaxCycles); return; }
+    if (result.value !== maxCycles) onMaxCyclesChange(result.value);
   };
 
   return (
@@ -73,7 +87,7 @@ export const UltrafixSettingsControls: React.FC<UltrafixSettingsControlsProps> =
         <label className="flex items-center gap-1.5">
           <span className="text-xs text-slate-500 whitespace-nowrap">{goalLabel}</span>
           <select
-            value={isUltrafixGoalOption(goal) ? goal?.toString() : ''}
+            value={shownGoal != null && goalOptions.some((option) => option.value === shownGoal) ? shownGoal.toString() : ''}
             disabled={!enabled}
             onChange={(e) => {
               const value = Number(e.target.value);
@@ -81,8 +95,8 @@ export const UltrafixSettingsControls: React.FC<UltrafixSettingsControlsProps> =
             }}
             className={`${goalInputWidthClassName} ${inputClassName}`}
           >
-            {!isUltrafixGoalOption(goal) && <option value="" disabled>{goalPlaceholder}</option>}
-            {ULTRAFIX_GOAL_OPTIONS.map((option) => (
+            {shownGoal == null && <option value="" disabled>{goalPlaceholder}</option>}
+            {goalOptions.map((option) => (
               <option key={option.value} value={option.value}>{option.label}</option>
             ))}
           </select>

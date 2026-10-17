@@ -263,7 +263,8 @@ describe('instance catalog', () => {
                 loadSettings: async () => ({
                     default_agent_alias: 'default',
                     github_user_whitelist: ['private-user']
-                })
+                }),
+                loadUltrafixDefaults: async () => ({ ratingGoal: 8, maxCycles: 3 })
             }
         });
         const { response, record } = responseRecorder();
@@ -287,7 +288,7 @@ describe('instance catalog', () => {
                 baseBranch: 'main',
                 notificationsEnabled: true
             }],
-            defaultAgentAlias: 'default'
+            defaultAgentAlias: 'default', ultrafixDefaults: { ratingGoal: 8, maxCycles: 3 }
         });
         const serialized = JSON.stringify(record.body);
         assert.doesNotMatch(serialized, /private\.registry|operator|SECRET_TOKEN|private-user|private-disabled/);
