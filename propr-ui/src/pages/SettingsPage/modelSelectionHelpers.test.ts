@@ -37,7 +37,7 @@ describe('Antigravity model recommendations', () => {
     const agents = [{
       alias: 'antigravity',
       enabled: true,
-      supportedModels: ['antigravity-gemini-3.8-flash', 'antigravity-gemini-4-argon', 'antigravity-gemini-3.1-pro'],
+      supportedModels: ['antigravity-gemini-3.8-flash', 'antigravity-gemini-4-argon', 'antigravity-gpt-oss-120b'],
     }];
 
     for (const options of [buildPlanGenerationOptions(agents), buildPrReviewOptions(agents)]) {

@@ -79,8 +79,7 @@ export const CODEX_MODELS: ModelInfo[] = [
 // Google/Gemini model.
 export const ANTIGRAVITY_MODELS: ModelInfo[] = [
   { id: 'antigravity-gemini-3.8-flash', name: 'Antigravity Gemini 3.8 Flash', shortName: 'Gemini 3.8 Flash', shortAlias: 'flash38', githubLabel: 'llm-antigravity-flash38', contextWindow: '1M', maxTokens: 1000000, openRouterId: 'google/gemini-3.8-flash', minAgentVersion: '1.1.25' },
-  { id: 'antigravity-gemini-4-argon', name: 'Antigravity Gemini 4 Argon', shortName: 'Gemini 4 Argon', shortAlias: 'argon', githubLabel: 'llm-antigravity-argon', contextWindow: '1M', maxTokens: 1000000, openRouterId: 'google/gemini-4-argon' },
-  { id: 'antigravity-gemini-3.1-pro', name: 'Antigravity Gemini 3.1 Pro', shortName: 'Gemini 3.1 Pro', shortAlias: 'pro', githubLabel: 'llm-antigravity-pro', contextWindow: '1M', maxTokens: 1000000, openRouterId: 'google/gemini-3.1-pro-preview' },
+  { id: 'antigravity-gemini-4-argon', name: 'Antigravity Gemini 4 Argon', shortName: 'Gemini 4 Argon', shortAlias: 'argon', githubLabel: 'llm-antigravity-argon', contextWindow: '1M', maxTokens: 1000000, openRouterId: 'google/gemini-4-argon', minAgentVersion: '1.4.0' },
   { id: 'antigravity-claude-sonnet-5.5', name: 'Antigravity Claude Sonnet 5.5', shortName: 'Claude Sonnet 5.5', shortAlias: 'sonnet55', githubLabel: 'llm-antigravity-sonnet55', contextWindow: '1M', maxTokens: 1000000, openRouterId: 'anthropic/claude-sonnet-5.5' },
   { id: 'antigravity-claude-opus-5.5', name: 'Antigravity Claude Opus 5.5', shortName: 'Claude Opus 5.5', shortAlias: 'opus55', githubLabel: 'llm-antigravity-opus55', contextWindow: '1M', maxTokens: 1000000, openRouterId: 'anthropic/claude-opus-5.5' },
   { id: 'antigravity-gpt-oss-120b', name: 'Antigravity GPT-OSS 120B', shortName: 'GPT-OSS 120B', shortAlias: 'gpt-oss-120b', githubLabel: 'llm-antigravity-gpt-oss-120b', contextWindow: '1M', maxTokens: 1000000, openRouterId: 'openai/gpt-oss-120b' },
@@ -181,7 +180,7 @@ export const AGENT_DEFAULTS: Record<AgentType, {
     defaultModels: ANTIGRAVITY_MODELS.map(m => m.id),
     defaultAlias: 'antigravity',
     npmPackage: 'https://antigravity.google/cli/install.sh',
-    defaultCliVersion: '1.2.4'
+    defaultCliVersion: '1.4.0'
   },
   opencode: {
     dockerImage: 'propr/agent:latest',

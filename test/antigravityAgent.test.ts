@@ -175,13 +175,11 @@ describe('toAntigravityCliModelId', () => {
         }
     });
 
-    test('selects the closest supported effort going down for Pro and GPT-OSS', () => {
-        assert.equal(toAntigravityCliModelId('antigravity-gemini-3.1-pro', 'low'), 'Gemini 3.1 Pro (Low)');
-        assert.equal(toAntigravityCliModelId('antigravity-gemini-3.1-pro', 'medium'), 'Gemini 3.1 Pro (Low)');
+    test('selects the closest supported effort going down for GPT-OSS', () => {
         assert.equal(toAntigravityCliModelId('antigravity-gpt-oss-120b', 'high'), 'GPT-OSS 120B (Medium)');
         assert.equal(toAntigravityCliModelId('antigravity-gemini-3.8-flash'), 'gemini-3.8-flash-medium');
         for (const effort of [undefined, '', 'auto'] as const) {
-            assert.equal(toAntigravityCliModelId('antigravity-gemini-3.1-pro', effort), 'Gemini 3.1 Pro (Low)');
+            assert.equal(toAntigravityCliModelId('antigravity-gemini-4-argon', effort), 'Gemini 4 Argon (Medium)');
         }
         for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'ultracode', 'auto', '', undefined] as const) {
             assert.equal(toAntigravityCliModelId('antigravity-gpt-oss-120b', effort), 'GPT-OSS 120B (Medium)');
@@ -193,7 +191,7 @@ describe('toAntigravityCliModelId', () => {
             ['antigravity-claude-opus-5.5', 'Claude Opus 5.5 (High)'],
             ['antigravity-claude-sonnet-5.5', 'Claude Sonnet 5.5 (High)'],
             ['antigravity-gemini-3.8-flash', 'gemini-3.8-flash-high'],
-            ['antigravity-gemini-3.1-pro', 'Gemini 3.1 Pro (High)'],
+            ['antigravity-gemini-4-argon', 'Gemini 4 Argon (High)'],
         ]) {
             for (const effort of ['high', 'xhigh', 'max', 'ultra', 'ultracode'] as const) {
                 assert.equal(toAntigravityCliModelId(id, effort), expected);
@@ -252,7 +250,8 @@ test('Antigravity maps model reasoning choices to supported CLI efforts', () => 
         assert.equal(toAntigravityCliModelId(flash, level), 'gemini-3.8-flash-high');
     }
     assert.equal(toAntigravityCliModelId(flash, ''), 'gemini-3.8-flash-medium');
-    assert.equal(toAntigravityCliModelId('antigravity-gemini-3.1-pro', 'medium'), 'Gemini 3.1 Pro (Low)');
+    // CLI 1.4.0 retired Gemini 3.1 Pro; saved selections launch Gemini 4 Argon.
+    assert.equal(toAntigravityCliModelId('antigravity-gemini-3.1-pro', 'medium'), 'Gemini 4 Argon (Medium)');
     assert.equal(toAntigravityCliModelId('antigravity-gpt-oss-120b', 'low'), 'GPT-OSS 120B (Medium)');
     assert.equal(toAntigravityCliModelId('antigravity:antigravity-claude-opus-5.5', 'high'), 'Claude Opus 5.5 (High)');
 });

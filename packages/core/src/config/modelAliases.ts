@@ -339,11 +339,19 @@ function getAgentTypeFromModel(modelId: string): AgentType {
  * E.g., "pro" matches "gemini-2.5-pro", "opus" matches "claude-opus-4-5-20251101"
  * Also matches shortAlias from modelDefinitions (e.g., "g3-flash-preview" matches "gemini-3-flash-preview")
  */
+function findAntigravityCompatibilityModel(lowerShort: string, config: AgentConfig): string | null {
+    const candidate = lowerShort.startsWith('antigravity-') ? lowerShort : `antigravity-${lowerShort}`;
+    const compatibility = resolveModelAlias(candidate);
+    // Retired aliases (e.g. "pro") may resolve straight to a current base model.
+    const isCompatibility = getAntigravityCompatibilityRoute(compatibility) || ANTIGRAVITY_COMPATIBILITY_ALIASES[candidate];
+    return isCompatibility && antigravitySupportedModel(config, compatibility) ? compatibility : null;
+}
+
 function findMatchingModel(shortName: string, config: AgentConfig): string | null {
     const lowerShort = shortName.toLowerCase();
     if (config.type === 'antigravity') {
-        const compatibility = resolveModelAlias(lowerShort.startsWith('antigravity-') ? lowerShort : `antigravity-${lowerShort}`);
-        if (getAntigravityCompatibilityRoute(compatibility) && antigravitySupportedModel(config, compatibility)) return compatibility;
+        const compatibility = findAntigravityCompatibilityModel(lowerShort, config);
+        if (compatibility) return compatibility;
     }
 
     // Try exact match against model ID first

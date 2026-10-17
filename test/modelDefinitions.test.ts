@@ -163,6 +163,8 @@ test('Gemini 4 Argon is one namespaced Antigravity model with 1M limits', () => 
     assert.strictEqual(model?.githubLabel, 'llm-antigravity-argon');
     assert.strictEqual(model?.shortAlias, 'argon');
     assert.strictEqual(model?.openRouterId, 'google/gemini-4-argon');
+    assert.strictEqual(model?.minAgentVersion, '1.4.0');
+    assert.strictEqual(AGENT_DEFAULTS.antigravity.defaultCliVersion, '1.4.0');
     assert.strictEqual(model?.contextWindow, '1M');
     assert.strictEqual(model?.maxTokens, 1_000_000);
     assert.deepStrictEqual(getReasoningLevelsForAgentType('antigravity', modelId), ['low', 'medium', 'high']);
@@ -221,7 +223,6 @@ test('Antigravity offers one model entry with separate supported reasoning choic
     const expected = [
         ['antigravity-gemini-3.8-flash', 'flash38'],
         ['antigravity-gemini-4-argon', 'argon'],
-        ['antigravity-gemini-3.1-pro', 'pro'],
         ['antigravity-claude-sonnet-5.5', 'sonnet55'],
         ['antigravity-claude-opus-5.5', 'opus55'],
         ['antigravity-gpt-oss-120b', 'gpt-oss-120b'],
@@ -239,12 +240,13 @@ test('Antigravity offers one model entry with separate supported reasoning choic
         assert.deepStrictEqual(getReasoningLevelsForAgentType('antigravity', modelId), ['low', 'medium', 'high']);
     }
     for (const [modelId, levels] of [
-        ['antigravity-gemini-3.1-pro', ['low', 'high']],
         ['antigravity-gpt-oss-120b', ['medium']],
     ] as const) {
         assert.ok(ANTIGRAVITY_MODELS.some(model => model.id === modelId));
         assert.deepStrictEqual(getReasoningLevelsForAgentType('antigravity', modelId), levels);
     }
+    // Antigravity CLI 1.4.0 retired Gemini 3.1 Pro.
+    assert.ok(!ANTIGRAVITY_MODELS.some(model => model.id === 'antigravity-gemini-3.1-pro'));
 });
 
 
