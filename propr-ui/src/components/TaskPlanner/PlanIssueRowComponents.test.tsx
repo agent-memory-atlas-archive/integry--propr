@@ -164,6 +164,41 @@ describe('UltrafixSettingsControls', () => {
     rerender(<UltrafixSettingsControls {...props} maxCycles={null} onMaxCyclesChange={onMaxCyclesChange} />);
     expect(max).toHaveValue(5);
   });
+
+  it('keeps an instance goal below 5 selectable after choosing an override', () => {
+    const props = {
+      enabled: true, maxCycles: null, onMaxCyclesChange: vi.fn(), defaultGoal: 3,
+      goalPlaceholder: 'Instance setting', maxPlaceholder: '—', inputClassName: '', goalInputWidthClassName: '', maxInputWidthClassName: '',
+    };
+    const onGoalChange = vi.fn();
+    const { rerender } = render(<UltrafixSettingsControls {...props} goal={null} onGoalChange={onGoalChange} />);
+
+    const goal = screen.getByLabelText('Min Review Score') as HTMLSelectElement;
+    fireEvent.change(goal, { target: { value: '8' } });
+    expect(onGoalChange).toHaveBeenLastCalledWith(8);
+    rerender(<UltrafixSettingsControls {...props} goal={8} onGoalChange={onGoalChange} />);
+    expect(goal.selectedOptions[0].textContent).toBe('◆ 8/10 (Standard)');
+    expect(screen.getByRole('option', { name: '3/10' })).toBeInTheDocument();
+
+    fireEvent.change(goal, { target: { value: '3' } });
+    expect(onGoalChange).toHaveBeenLastCalledWith(3);
+    rerender(<UltrafixSettingsControls {...props} goal={3} onGoalChange={onGoalChange} />);
+    expect(goal.selectedOptions[0].textContent).toBe('3/10');
+    expect(screen.getAllByRole('option', { name: '3/10' })).toHaveLength(1);
+  });
+
+  it('lists both an explicit goal and the instance goal when neither is a fixed option', () => {
+    render(
+      <UltrafixSettingsControls
+        enabled goal={2} maxCycles={null} onGoalChange={vi.fn()} onMaxCyclesChange={vi.fn()} defaultGoal={4}
+        goalPlaceholder="Instance setting" maxPlaceholder="—" inputClassName="" goalInputWidthClassName="" maxInputWidthClassName=""
+      />
+    );
+
+    const goal = screen.getByLabelText('Min Review Score') as HTMLSelectElement;
+    expect(goal.selectedOptions[0].textContent).toBe('2/10');
+    expect(screen.getByRole('option', { name: '4/10' })).toBeInTheDocument();
+  });
 });
 
 describe('RowActions', () => {

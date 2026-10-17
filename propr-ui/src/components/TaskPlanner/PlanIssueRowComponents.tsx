@@ -66,8 +66,10 @@ export const UltrafixSettingsControls: React.FC<UltrafixSettingsControlsProps> =
   useEffect(() => { setMaxCyclesInput(shownMaxCycles); setMaxCyclesError(null); }, [shownMaxCycles, maxCycles]);
   useEffect(() => { if (!enabled) setMaxCyclesError(null); }, [enabled]);
   const shownGoal = goal ?? defaultGoal;
-  const goalOptions = shownGoal != null && !isUltrafixGoalOption(shownGoal)
-    ? [...ULTRAFIX_GOAL_OPTIONS, { value: shownGoal, label: `${shownGoal}/10` }].sort((a, b) => b.value - a.value)
+  // Keep the instance value selectable after an override, alongside any explicit value outside the fixed list.
+  const extraGoals = [...new Set([defaultGoal, goal])].filter((value): value is number => value != null && !isUltrafixGoalOption(value));
+  const goalOptions = extraGoals.length > 0
+    ? [...ULTRAFIX_GOAL_OPTIONS, ...extraGoals.map((value) => ({ value, label: `${value}/10` }))].sort((a, b) => b.value - a.value)
     : ULTRAFIX_GOAL_OPTIONS;
 
   const commitMaxCycles = () => {
