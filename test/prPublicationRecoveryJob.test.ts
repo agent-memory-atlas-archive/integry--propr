@@ -307,7 +307,7 @@ const modules: Record<string, Record<string, unknown>> = {
         startPRProcessingLockHeartbeat: () => noOp,
     },
     prCommentCollisionRecovery: { createPRCommentTaskStateIfMissing: async ({ taskId }: { taskId: string }) => { if (!taskStates.has(taskId)) taskStates.set(taskId, 'processing'); }, evaluatePRCommentPreExecutionRecovery: async () => ({}), handlePRCommentLockContention: async () => ({ status: 'deferred' }), schedulePRCommentRecovery: async () => undefined },
-    prCompletionComment: { buildCompletionComment: async (commit: unknown, comments: unknown, options: unknown, result: unknown) => JSON.stringify({ commit, comments, options, result }) },
+    prCompletionComment: { buildCompletionComment: async (commit: unknown, comments: unknown, options: unknown, result: unknown) => JSON.stringify({ commit, comments, options, result }), noChangeAnalysisSummary: () => '' },
     reviewCommentGatherer: { markReviewFindingsProcessed: noOp },
     // Follow-up assignment is covered by test/prAutoAssignmentFollowup.test.ts.
     prCommentAutoAssignment: { autoAssignFollowUpPullRequest: noOp },

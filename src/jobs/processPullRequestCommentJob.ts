@@ -35,6 +35,7 @@ import {
 import { shouldDeferUltrafixReview, ultrafixReviewDeferralUpdate } from './ultrafixReviewExecutionGate.js';
 import { handleNoAuthorizedFindings } from './prCommentNoAuthorizedFindings.js';
 import { handlePostExecution } from './prCommentPostExecution.js';
+import { noChangeAnalysisSummary } from './prCompletionComment.js';
 import {
     buildDeterministicPrTaskSubtitle, buildPrTaskTitle, buildPrTaskTitleContext,
     buildPrTaskTitleContextHistoryMetadata, getPrTaskWorkflowLabel, resolvePrTaskWorkflow,
@@ -317,7 +318,7 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
             onContainerInfo: containerId => markExecutionHandoffContainer(state, containerId),
         });
         state.claudeResult = claudeResult;
-        await markExecutionHandoffAgentExited(state, claudeResult.success === true);
+        await markExecutionHandoffAgentExited(state, claudeResult.success === true, claudeResult.success === true ? noChangeAnalysisSummary(claudeResult) : null);
 
         checkTerminalStateAfterExecution(await stateManager.getTaskState(taskId), taskId, correlatedLogger);
 

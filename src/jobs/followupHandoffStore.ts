@@ -51,6 +51,8 @@ export interface FollowupHandoffRecord {
     phase: string;
     /** 1 = agent exited with full success, 0 = stopped short, null = unknown (not exited, or lost). */
     agent_completed?: number | null;
+    /** Cleaned analysis of a fully successful agent; recovery's no-change completion reports it. */
+    agent_summary?: string | null;
     status: string;
     status_reason: string | null;
     /** Durable claim-ownership classification; see SETTLEMENT_*. Never overwritten by diagnostics. */
@@ -201,6 +203,7 @@ export async function recordFollowupHandoff(
         // columns written here, and a predecessor's agent success must never
         // become evidence for this incarnation's agent.
         agent_completed: null,
+        agent_summary: null,
         status: HANDOFF_ACTIVE,
         status_reason: null,
         settlement: null,
@@ -260,7 +263,7 @@ async function insertHandoff(deps: FollowupHandoffStoreDeps, record: FollowupHan
 }
 
 export type FollowupHandoffChanges = Partial<Pick<FollowupHandoffRecord,
-    'phase' | 'agent_completed' | 'status' | 'status_reason' | 'settlement' | 'operator_authorized'
+    'phase' | 'agent_completed' | 'agent_summary' | 'status' | 'status_reason' | 'settlement' | 'operator_authorized'
     | 'commit_hash' | 'completion_comment_url' | 'starting_comment_id' | 'lock_token'
     | 'container_id' | 'successor_task_id'>>;
 

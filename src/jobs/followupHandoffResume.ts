@@ -1,19 +1,25 @@
-import type { UnprocessedComment } from '@propr/core';
-import type { FollowupHandoffGitOps } from './followupHandoffGitOps.js';
 import {
     advanceFollowupHandoff, finalizeFollowupHandoff, parseClaimedComments, parseSourceTaskIds, retryOwnsClaims,
     HANDOFF_AWAITING_OPERATOR, SETTLEMENT_RETRY_SCHEDULING, SETTLEMENT_RETURNED_TO_QUEUE,
-    type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
+    type FollowupHandoffRecord,
 } from './followupHandoffStore.js';
 
 import { isNonFastForwardPushError } from './followupHandoffGitOps.js';
 import { handoffCommentMarker } from './followupHandoffMarker.js';
 import {
-    deliveredOutcome, failedOutcomes, interruptedWithoutChangesBody, normalDelivery, recoveredCompletionBody, recoveredTaskReasons,
-    recoveredTaskRecaps, recoveryCommitMessage, type OwedCommentDelivery, type RecoveredTaskOutcome,
+    deliveredOutcome, failedOutcomes, interruptedWithoutChangesBody, normalDelivery, recoveredCompletionBody, recoveredNoChangeCompletionBody,
+    recoveredTaskReasons, recoveredTaskRecaps, recoveryCommitMessage, type OwedCommentDelivery, type RecoveredTaskOutcome,
 } from './followupHandoffMessages.js';
 
+import {
+    splitHandoffRepository, type HandoffTaskStates, type IssueComment, type ResumeFollowupHandoffParams, type ResumeOutcome,
+} from './followupHandoffResumeTypes.js';
+
 export { createFollowupHandoffGitOps, type FollowupHandoffGitOps, type WorktreeAttachment } from './followupHandoffGitOps.js';
+export {
+    splitHandoffRepository, type HandoffOctokit, type HandoffStateManager, type HandoffTaskStates, type LoggerLike,
+    type ResumeFollowupHandoffParams, type ResumeOutcome,
+} from './followupHandoffResumeTypes.js';
 
 /**
  * Resumes the exact missing publication phase of an adopted follow-up handoff.
@@ -25,77 +31,6 @@ export { createFollowupHandoffGitOps, type FollowupHandoffGitOps, type WorktreeA
  * so a crash around branch release retries cleanup without republishing.
  */
 
-export interface LoggerLike {
-    info(context: Record<string, unknown>, message: string): void;
-    warn(context: Record<string, unknown>, message: string): void;
-    error(context: Record<string, unknown>, message: string): void;
-}
-
-interface IssueComment { id: number; body?: string; html_url?: string }
-
-export interface HandoffOctokit {
-    request(route: string, params?: Record<string, unknown>): Promise<{ data: unknown }>;
-    paginate(route: string, params?: Record<string, unknown>): Promise<unknown[]>;
-    auth(options: { type: 'installation' }): Promise<unknown>;
-}
-
-export interface HandoffStateManager {
-    getTaskState(taskId: string): Promise<{ state: string } | null>;
-    /** Resolves to the resulting state; a concurrent cancellation is returned unapplied. */
-    updateTaskState(taskId: string, state: string, metadata?: Record<string, unknown>): Promise<{ state?: string } | null | void>;
-    updateHistoryMetadata(taskId: string, historyState: string, metadata?: Record<string, unknown>): Promise<unknown>;
-}
-
-export interface HandoffTaskStates {
-    COMPLETED: string;
-    FAILED: string;
-    CANCELLED: string;
-}
-
-export interface ResumeFollowupHandoffParams {
-    record: FollowupHandoffRecord;
-    octokit: HandoffOctokit;
-    git: FollowupHandoffGitOps;
-    stateManager: HandoffStateManager;
-    restoreComments(record: FollowupHandoffRecord, comments: UnprocessedComment[]): Promise<void>;
-    store: FollowupHandoffStoreDeps;
-    log: LoggerLike;
-    taskStates: HandoffTaskStates;
-    /** Successor task adopting this handoff, when a new follow-up triggered the recovery. */
-    recoveredBy?: string;
-    /** Reports a lost PR processing lease; once true no further external mutation runs. */
-    isOwnershipLost?: () => boolean;
-    /**
-     * Guarantees another attempt for claimed comments a no-change recovery
-     * returned to the pending list. Standalone recovery passes enqueue a
-     * pending-comment follow-up job here; in-line predecessor adoption omits
-     * it because the adopting job's own cleanup queues that follow-up.
-     */
-    scheduleRestoredComments?(record: FollowupHandoffRecord): Promise<void>;
-    /**
-     * Removes the claimed comments from the pending list again whenever a
-     * cancelled handoff is held (an earlier pass may have restored them), so
-     * they cannot trigger automatic execution without an operator decision.
-     * Idempotent: comments that are not pending are left alone.
-     */
-    withdrawRestoredComments?(record: FollowupHandoffRecord, comments: UnprocessedComment[]): Promise<void>;
-}
-
-export type ResumeOutcome =
-    | { outcome: 'published'; commitHash: string | null }
-    /** Interrupted before producing changes; the claimed comments were returned to the queue. */
-    | { outcome: 'no_changes' }
-    /** The normal path had already delivered its no-change completion or failure; recorded without republishing or requeueing. */
-    | { outcome: 'settled' }
-    | { outcome: 'awaiting_operator'; reason: string }
-    | { outcome: 'cleanup_pending' }
-    | { outcome: 'ownership_lost' }
-    | { outcome: 'superseded' };
-
-export function splitHandoffRepository(repository: string): { owner: string; repo: string } {
-    const [owner, repo] = repository.split('/');
-    return { owner, repo };
-}
 
 export { handoffCommentMarker } from './followupHandoffMarker.js';
 
@@ -475,9 +410,31 @@ async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record:
 }
 
 /**
+ * The agent exited reporting full success without changing any file (for
+ * example, the requested correction was already present) and the worker died
+ * before the normal no-change completion was delivered. The request is
+ * answered, not interrupted: recovery delivers that completion — with the
+ * analysis persisted at the exit checkpoint — and checkpoints it before the
+ * task completes, instead of returning the comments for another agent run. A
+ * completion or failure the normal path already delivered is reconciled
+ * unchanged, and a repeated pass finds its own marked comment.
+ */
+async function finishCompletedWithoutChanges(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
+    const delivered = await publishOwedComment(params, record, recoveredNoChangeCompletionBody(record));
+    if ('done' in delivered) return delivered.done;
+    if (delivered.delivery === 'normal_failure') return finishDeliveredFailure(params, record, delivered.url);
+    const published = await advanceFollowupHandoff(params.store, record, { phase: 'comment_published', completion_comment_url: delivered.url });
+    if (!published) return { outcome: 'superseded' };
+    params.log.info({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, delivery: delivered.delivery },
+        'Delivered the completion of a successful no-change follow-up interrupted before publication; nothing was requeued');
+    return finishPublishedComment(params, published, delivered.delivery === 'recovery' ? 'completed_without_changes' : undefined);
+}
+
+/**
  * Collects the exited agent's output from the retained worktree: commits any
  * uncommitted work, or recognizes already-committed-but-unpushed work, or
- * settles the handoff as producing no changes at all.
+ * settles the handoff without changes — as a delivered completion when the
+ * agent recorded full success, or as an interrupted request otherwise.
  */
 async function collectAgentOutput(
     params: ResumeFollowupHandoffParams,
@@ -505,7 +462,13 @@ async function collectAgentOutput(
     if (!commitHash && await git.hasUnpushedCommits(record.worktree_path, record.branch_name)) {
         commitHash = await git.head(record.worktree_path);
     }
-    if (!commitHash) return { done: await finishWithoutChanges(params, record) };
+    if (!commitHash) {
+        // Only the exit checkpoint's recorded success distinguishes an answered
+        // request from a lost or stopped-short run that produced nothing.
+        return { done: record.agent_completed === 1
+            ? await finishCompletedWithoutChanges(params, record)
+            : await finishWithoutChanges(params, record) };
+    }
     const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'committed', commit_hash: commitHash });
     return advanced ? { record: advanced } : { done: { outcome: 'superseded' } };
 }
@@ -557,10 +520,14 @@ async function publishPushedCompletion(params: ResumeFollowupHandoffParams, reco
 }
 
 /** Finalizes the task for a recorded completion comment, then frees the branch while keeping the worktree. */
-async function finishPublishedComment(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
+async function finishPublishedComment(
+    params: ResumeFollowupHandoffParams,
+    record: FollowupHandoffRecord,
+    outcome: RecoveredTaskOutcome = deliveredOutcome(record),
+): Promise<ResumeOutcome> {
     let current = record;
     if (current.phase === 'comment_published') {
-        if (await finalizeRecoveredTask(params, current, deliveredOutcome(current)) !== 'finalized') return { outcome: 'ownership_lost' };
+        if (await finalizeRecoveredTask(params, current, outcome) !== 'finalized') return { outcome: 'ownership_lost' };
         const advanced = await advanceFollowupHandoff(params.store, current, { phase: 'cleanup_pending' });
         if (!advanced) return { outcome: 'superseded' };
         current = advanced;

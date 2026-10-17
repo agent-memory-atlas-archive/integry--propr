@@ -151,10 +151,16 @@ export async function markExecutionHandoffContainer(state: HandoffCarrier, conta
 /**
  * Marks the agent exited so recovery knows execution itself finished, and
  * whether it reported full success — the only evidence that lets a recovered
- * completion comment bind the accepted request bodies.
+ * completion comment bind the accepted request bodies, and that keeps a
+ * successful run without file changes from being executed again. A success's
+ * analysis is persisted with it, so that recovery can still deliver the
+ * no-change completion answer the normal path owed.
  */
-export async function markExecutionHandoffAgentExited(state: HandoffCarrier, agentCompleted: boolean): Promise<void> {
-    await advanceExecutionHandoff(state, { phase: 'agent_exited', agent_completed: agentCompleted ? 1 : 0 });
+export async function markExecutionHandoffAgentExited(state: HandoffCarrier, agentCompleted: boolean, analysisSummary?: string | null): Promise<void> {
+    await advanceExecutionHandoff(state, {
+        phase: 'agent_exited', agent_completed: agentCompleted ? 1 : 0,
+        agent_summary: agentCompleted ? analysisSummary || null : null,
+    });
 }
 
 /** Records the normal path's commit so restart recovery resumes from the push, not from scratch. */

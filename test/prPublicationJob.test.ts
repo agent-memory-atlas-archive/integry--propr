@@ -186,6 +186,7 @@ const modules: Record<string, Record<string, unknown>> = {
         ultrafixReviewDeferralUpdate: () => ({ reason: 'deferred', historyMetadata: {} }),
     },
     prCommentNoAuthorizedFindings: { handleNoAuthorizedFindings: async () => { events.push('no-authorized-findings'); } },
+    prCompletionComment: { noChangeAnalysisSummary: () => '' },
     prCommentPostExecution: { handlePostExecution: async (params: typeof postExecutionParams) => { postExecutionParams = params; throw new Error('post-execution stopped by test'); } },
     prTaskTitleHelpers: Object.fromEntries(['buildDeterministicPrTaskSubtitle', 'buildPrTaskTitle', 'buildPrTaskTitleContext', 'buildPrTaskTitleContextHistoryMetadata', 'getPrTaskWorkflowLabel', 'resolvePrTaskWorkflow'].map(name => [name, noOp])),
     prProcessingLock: {

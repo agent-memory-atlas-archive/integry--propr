@@ -29,6 +29,28 @@ export function recoveredCompletionBody(record: FollowupHandoffRecord): string {
     ].filter(Boolean).join('\n\n');
 }
 
+/**
+ * The no-change completion a recorded successful agent run owed when the
+ * worker died before delivering it: the agent itself reported success, so
+ * the request is answered (with the persisted analysis) and binds its
+ * accepted bodies like the normal no-change completion — never requeued.
+ */
+export function recoveredNoChangeCompletionBody(record: FollowupHandoffRecord): string {
+    const comments = filterRealComments(parseClaimedComments(record));
+    const ids = comments.map(comment => comment.id);
+    const authors = [...new Set(comments.map(comment => comment.author))].map(author => `@${author}`).join(', ');
+    return [
+        handoffCommentMarker(record),
+        `ℹ️ **Analyzed the follow-up request**${authors ? ` by ${authors}` : ''}`,
+        'A worker restart interrupted publication after the agent completed the request successfully. ProPR recovered the result from the retained worktree.',
+        record.agent_summary ? `## Analysis Summary\n\n${record.agent_summary}` : '',
+        'No code changes were necessary based on the current state of the branch.',
+        ids.length ? `---\nComment ID${ids.length > 1 ? 's' : ''}: ${ids.map(id => `${id}✓`).join(', ')}` : '',
+        buildWorkEvidenceMarker('completed', ids),
+        buildAcceptedRequestMarkers(comments),
+    ].filter(Boolean).join('\n\n');
+}
+
 export function interruptedWithoutChangesBody(record: FollowupHandoffRecord): string {
     const comments = filterRealComments(parseClaimedComments(record));
     const ids = comments.map(comment => comment.id);
@@ -56,11 +78,12 @@ export function normalDelivery(body: string | undefined): OwedCommentDelivery['d
     return body?.includes(HANDOFF_NORMAL_FAILURE_MARKER) ? 'normal_failure' : 'recovery';
 }
 
-export type RecoveredTaskOutcome = 'published' | 'completion_delivered' | 'failure_delivered' | 'no_changes';
+export type RecoveredTaskOutcome = 'published' | 'completion_delivered' | 'completed_without_changes' | 'failure_delivered' | 'no_changes';
 
 export const recoveredTaskRecaps: Record<RecoveredTaskOutcome, string> = {
     published: 'Recovered and published the interrupted follow-up after a worker restart.',
     completion_delivered: 'The follow-up completion was delivered before a worker restart; recovery recorded it without republishing.',
+    completed_without_changes: 'The agent completed the follow-up without file changes before a worker restart; recovery delivered its completion without running it again.',
     failure_delivered: 'The follow-up failure was reported before a worker restart; recovery recorded it without requeueing the request.',
     no_changes: 'A worker restart interrupted the follow-up before it produced changes; the request was returned to the queue.',
 };
@@ -68,6 +91,7 @@ export const recoveredTaskRecaps: Record<RecoveredTaskOutcome, string> = {
 export const recoveredTaskReasons: Record<RecoveredTaskOutcome, string> = {
     published: 'Recovered interrupted follow-up publication after a worker restart',
     completion_delivered: 'Recorded the follow-up completion delivered before a worker restart',
+    completed_without_changes: 'Recovered the no-change follow-up completion after a worker restart',
     failure_delivered: 'Recorded the follow-up failure reported before a worker restart',
     no_changes: 'Worker restart interrupted the follow-up before it produced changes',
 };

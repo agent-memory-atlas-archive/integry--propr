@@ -26,6 +26,10 @@ export async function up(knex) {
         // short, null until it exits. Only a recorded full success lets a
         // recovered completion comment bind the accepted request bodies.
         table.integer('agent_completed');
+        // The cleaned analysis a fully successful agent reported, persisted with
+        // agent_completed so recovery of a no-change success can deliver the
+        // completion answer the interrupted normal path owed.
+        table.text('agent_summary');
         // active | awaiting_operator | released
         table.string('status', 32).notNullable().defaultTo('active');
         table.string('status_reason', 255);
