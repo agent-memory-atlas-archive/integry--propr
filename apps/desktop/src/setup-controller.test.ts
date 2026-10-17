@@ -260,6 +260,46 @@ describe('desktop local setup controller', () => {
     } finally { await controller.shutdown(); rmSync(appData, { recursive: true, force: true }); }
   });
 
+  it('distinguishes a failed account change from the saved identity and requires explicit keep before enrollment', async () => {
+    const appData = realpathSync.native(mkdtempSync(join(tmpdir(), 'propr-setup-controller-')));
+    chmodSync(appData, 0o700);
+    const rootDir = join(appData, 'local-runtime');
+    const enrolled: string[] = [];
+    const controller = new DesktopSetupController({
+      actions: relayActions(rootDir, {
+        loginWithGithub: async () => false,
+        githubLoginRecovery: () => ({ detail: 'GitHub sign-in was declined. Retry and approve the intended account.', nextAction: 'Retry' }),
+        fetchRelayInstallations: async () => ({ username: 'integry', installations: [{ installation_id: 100, account_login: 'integry', account_type: 'User' }] }),
+        enrollRelay: async ({ installationId }) => { enrolled.push(installationId); return { relayUrl: 'https://relay.example.test', token: 'fixture-token' }; },
+      }),
+      platform: 'linux', appDataDir: appData, defaultRootDir: rootDir,
+      statePath: join(appData, 'setup', 'state.json'), sessionId: request.sessionId,
+      selectPrivateKey: async () => null, promptWebhookSecret: async () => null,
+      resolveApiBaseUrl: async () => 'http://localhost:4000', emit: () => undefined,
+    });
+    try {
+      const running = controller.start(relayRequest);
+      await waitForSnapshot(controller, value => value.githubIdentity?.status === 'selection-required');
+      await assert.rejects(controller.resolveGithubInstallation({ action: 'keep-account' }), /no failed GitHub account change/);
+      const switching = await controller.resolveGithubInstallation({ action: 'reauthenticate' });
+      assert.equal(switching.githubIdentity?.status, 'reauthenticating');
+      const failed = await waitForSnapshot(controller, value => value.githubIdentity?.status === 'reauthentication-failed');
+      assert.equal(failed.githubIdentity?.username, 'integry');
+      assert.equal(failed.githubIdentity?.selectedInstallationId, undefined);
+      assert.match(failed.githubIdentity?.reauthenticationFailure ?? '', /declined/);
+      await assert.rejects(controller.resolveGithubInstallation({ action: 'select', installationId: '100' }), /keep @integry or try again/);
+      assert.deepEqual(enrolled, []);
+      const kept = await controller.resolveGithubInstallation({ action: 'keep-account' });
+      assert.equal(kept.githubIdentity?.reauthenticationFailure, undefined);
+      await waitForSnapshot(controller, value => value.githubIdentity?.status === 'selection-required');
+      await controller.resolveGithubInstallation({ action: 'select', installationId: '100' });
+      await waitForSnapshot(controller, value => enrolled.length === 1 || value.phase !== 'running');
+      assert.deepEqual(enrolled, ['100']);
+      await controller.cancel();
+      await running;
+    } finally { await controller.shutdown(); rmSync(appData, { recursive: true, force: true }); }
+  });
+
   it('cancels admitted engine work and allows a fresh retry without touching a real stack', async () => {
     const appData = realpathSync.native(mkdtempSync(join(tmpdir(), 'propr-setup-controller-')));
     chmodSync(appData, 0o700);
@@ -533,7 +573,7 @@ describe('desktop local setup controller', () => {
 
 // Real browser -> desktop host -> isolated ConfigManager -> relay API -> controller.
 // Only native UI, network responses, and unrelated Docker/backend I/O are fixtures.
-for (const outcome of ['approved', 'approved-waiting', 'unconfirmed', 'declined', 'expired', 'transport', 'browser-launch', 'persistence'] as const) it(`browser host handoff through persistence and enrollment: ${outcome}`, async t => {
+for (const outcome of ['approved', 'approved-waiting', 'approved-expiring', 'unconfirmed', 'declined', 'expired', 'transport', 'browser-launch', 'persistence'] as const) it(`browser host handoff through persistence and enrollment: ${outcome}`, async t => {
   const { createDesktopSetupHost } = await import('../../../packages/cli/src/desktopLocalSetup');
   const { ConfigManager } = await import('../../../packages/cli/src/config/index');
   const { createGithubBrowserLogin } = await import('./github-browser-auth');
@@ -545,7 +585,9 @@ for (const outcome of ['approved', 'approved-waiting', 'unconfirmed', 'declined'
   const config = new ConfigManager(configDir); await config.init(); await config.setStackRoot(rootDir);
   const deviceSecret = 'fixture_device_secret'; const userCode = 'TEST-CODE';
   const accessToken = 'fixture_browser_token'; const relayToken = 'fixture_relay_secret';
-  let activeOutcome: string = outcome === 'approved-waiting' ? 'approved' : outcome;
+  const refreshToken = 'fixture_refresh_secret';
+  const approved = outcome === 'approved' || outcome === 'approved-waiting' || outcome === 'approved-expiring';
+  let activeOutcome: string = approved ? 'approved' : outcome;
   let nativeDialogs = 0;
   let dialogOpen = false; let confirmed = false; let relayCalls = 0;
   if (outcome === 'persistence') t.mock.method(ConfigManager.prototype, 'save', async () => { throw new Error(`${accessToken} private filesystem error`); });
@@ -585,7 +627,7 @@ for (const outcome of ['approved', 'approved-waiting', 'unconfirmed', 'declined'
           if (String(url).endsWith('/access_token')) {
             assert.equal(dialogOpen, true, 'polling starts before any initial-dialog action');
             if (activeOutcome === 'transport') throw new Error(`${accessToken} ${deviceSecret} ${userCode}`);
-            return Response.json(activeOutcome === 'declined' ? { error: 'access_denied' } : activeOutcome === 'expired' ? { error: 'expired_token' } : { access_token: accessToken, token_type: 'bearer' });
+            return Response.json(activeOutcome === 'declined' ? { error: 'access_denied' } : activeOutcome === 'expired' ? { error: 'expired_token' } : { access_token: accessToken, token_type: 'bearer', ...(outcome === 'approved-expiring' ? { expires_in: 28800, refresh_token: refreshToken, refresh_token_expires_in: 15897600 } : {}) });
           }
           return Response.json({ id: 123, login: 'fixture-user' });
         },
@@ -596,7 +638,7 @@ for (const outcome of ['approved', 'approved-waiting', 'unconfirmed', 'declined'
       selectPrivateKey: async () => null, promptWebhookSecret: async () => null, resolveApiBaseUrl: async () => 'http://localhost:4000', emit: snapshot => snapshots.push(snapshot),
     });
     const pending = controller.start(relayRequest);
-    if (outcome === 'approved' || outcome === 'approved-waiting') {
+    if (approved) {
       await waitForSnapshot(controller, snapshot => snapshot.githubIdentity?.status === 'selection-required');
       assert.equal(relayCalls, 1, 'discovery alone must not enroll');
       await controller.resolveGithubInstallation({ action: 'select', installationId: '100' });
@@ -604,8 +646,10 @@ for (const outcome of ['approved', 'approved-waiting', 'unconfirmed', 'declined'
     const result = await pending;
     assert.equal(dialogOpen, false);
     const disk = new ConfigManager(configDir); await disk.init();
-    if (outcome === 'approved' || outcome === 'approved-waiting') {
+    if (approved) {
       assert.equal(result.phase, 'completed'); assert.equal(disk.getGithubToken(), accessToken); assert.equal(relayCalls, 3);
+      assert.equal(disk.getGithubCredential()?.refreshToken, outcome === 'approved-expiring' ? refreshToken : undefined);
+      assert.equal(disk.getGithubCredential()?.expiresAt !== undefined, outcome === 'approved-expiring');
     } else {
       assert.equal(result.phase, 'failed'); assert.equal(disk.getGithubToken(), undefined); assert.equal(relayCalls, 0);
       const failed = result.state?.steps.find(step => step.id === 'github-auth');
@@ -613,7 +657,7 @@ for (const outcome of ['approved', 'approved-waiting', 'unconfirmed', 'declined'
       assert.doesNotMatch(failed?.nextAction ?? '', /propr login|propr setup/);
       assert.match(failed?.detail ?? '', { unconfirmed: /account was not confirmed/, declined: /declined/, expired: /expired/, transport: /browser sign-in could not complete/, 'browser-launch': /browser sign-in could not complete/, persistence: /could not save sign-in/ }[outcome]);
     }
-    if (outcome !== 'approved' && outcome !== 'approved-waiting') {
+    if (!approved) {
       t.mock.restoreAll();
       activeOutcome = 'approved';
       const retry = controller.retry();
@@ -623,6 +667,6 @@ for (const outcome of ['approved', 'approved-waiting', 'unconfirmed', 'declined'
       assert.equal(relayCalls, 3);
     }
     const publicData = JSON.stringify(snapshots);
-    for (const secret of [accessToken, deviceSecret, userCode, relayToken]) assert.ok(!publicData.includes(secret), 'public snapshots and logs must exclude secrets');
+    for (const secret of [accessToken, refreshToken, deviceSecret, userCode, relayToken]) assert.ok(!publicData.includes(secret), 'public snapshots and logs must exclude secrets');
   } finally { globalThis.fetch = originalFetch; rmSync(appData, { recursive: true, force: true }); }
 });

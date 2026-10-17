@@ -373,14 +373,19 @@ export type DesktopGithubInstallationDecision =
   | { action: 'select'; installationId: string }
   | { action: 'refresh' }
   | { action: 'install' }
-  | { action: 'reauthenticate' };
+  | { action: 'reauthenticate' }
+  /** Explicitly continue as the previously saved account after a failed account change. */
+  | { action: 'keep-account' };
 
 export interface DesktopGithubIdentityState {
-  status: 'selection-required' | 'authorization-failed' | 'refreshing' | 'installing' | 'reauthenticating' | 'enrolling' | 'enrolled';
+  status: 'selection-required' | 'authorization-failed' | 'reauthentication-failed' | 'refreshing' | 'installing' | 'reauthenticating' | 'enrolling' | 'enrolled';
+  /** During and after a failed account change this is the previously saved identity, not the attempted one. */
   username: string;
   installations: DesktopGithubInstallation[];
   selectedInstallationId?: string;
   permissionExplanation?: string;
+  /** Fixed safe reason the latest account change failed; present only with `reauthentication-failed`. */
+  reauthenticationFailure?: string;
   installAvailable: boolean;
 }
 

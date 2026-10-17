@@ -115,16 +115,23 @@ const GithubInstallationChoice: React.FC<{
     });
   }, [identity.selectedInstallationId, identity.username, installationIds]);
   const waiting = ['refreshing', 'installing', 'reauthenticating', 'enrolling'].includes(identity.status);
+  // During and after a failed account change, the shown identity is the old saved one, not the attempt.
+  const switchFailed = identity.status === 'reauthentication-failed';
+  const unconfirmed = switchFailed || identity.status === 'reauthenticating';
   return <section className="desktop-github-choice" aria-labelledby="desktop-github-choice-title">
-    <div className="desktop-github-identity"><Github aria-hidden="true" /><div><small>Authenticated GitHub account</small><strong>@{identity.username}</strong></div></div>
+    <div className="desktop-github-identity"><Github aria-hidden="true" /><div><small>{unconfirmed ? 'Previously saved GitHub account' : 'Authenticated GitHub account'}</small><strong>@{identity.username}</strong></div></div>
     <h2 id="desktop-github-choice-title">Choose a GitHub App installation</h2>
     <p>Discovery shows installations this account can access. The relay separately verifies enrollment permission after you choose.</p>
     {identity.status === 'reauthenticating' && <p role="status">Waiting for GitHub sign-in in your browser. Choose your intended account, then return to ProPR to confirm it. To stop signing in, choose Cancel sign-in in the desktop dialog.</p>}
+    {switchFailed && <div className="desktop-inline-error" role="alert">
+      <strong>Changing GitHub account did not complete.</strong> {identity.reauthenticationFailure}
+      {' '}ProPR did not replace the saved account. @{identity.username} is shown below, and ProPR will not use it unless you choose Keep @{identity.username}.
+    </div>}
     {identity.permissionExplanation && <div className="desktop-inline-error" role="alert">{identity.permissionExplanation}</div>}
     {identity.installations.length > 0 ? <div className="desktop-setup-options desktop-github-installations">
       {identity.installations.map(installation => <label key={installation.installationId}>
         <input type="radio" name="github-installation" checked={selected === installation.installationId}
-          disabled={busy || waiting} onChange={() => setSelected(installation.installationId)} />
+          disabled={busy || waiting || switchFailed} onChange={() => setSelected(installation.installationId)} />
         <span><strong>{installation.accountLogin}</strong><small>{installation.accountType} · Installation {installation.installationId}</small></span>
       </label>)}
     </div> : <div className="desktop-setup-note">No GitHub App installation is visible to @{identity.username} yet. Install the app, then refresh this list.</div>}
@@ -134,9 +141,11 @@ const GithubInstallationChoice: React.FC<{
       <button type="button" className="desktop-secondary-button" disabled={busy || waiting} onClick={() => {
         setSelected('');
         choose({ action: 'reauthenticate' });
-      }}><UserRoundCog /> Change GitHub account</button>
+      }}><UserRoundCog /> {switchFailed ? 'Try changing account again' : 'Change GitHub account'}</button>
+      {switchFailed && <button type="button" className="desktop-secondary-button" disabled={busy || waiting}
+        onClick={() => choose({ action: 'keep-account' })}><Github /> Keep @{identity.username}</button>}
     </div>
-    <button type="button" className="desktop-primary-button" disabled={busy || waiting || !selected}
+    <button type="button" className="desktop-primary-button" disabled={busy || waiting || switchFailed || !selected}
       onClick={() => choose({ action: 'select', installationId: selected })}>
       {waiting ? <><LoaderCircle className="desktop-spin" /> {identity.status === 'enrolling' ? 'Checking permission…' : 'Updating…'}</> : <>Continue with selection <ChevronRight /></>}
     </button>

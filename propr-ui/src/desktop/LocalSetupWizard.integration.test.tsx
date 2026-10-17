@@ -146,6 +146,30 @@ describe('production local setup journey', () => {
     expect(screen.getAllByRole('radio').every(radio => !(radio as HTMLInputElement).checked)).toBe(true);
   });
 
+  it('separates a failed account change from the previously saved identity until it is explicitly kept', async () => {
+    const failed = installationSnapshot({ status: 'reauthentication-failed', username: 'integry',
+      reauthenticationFailure: 'GitHub sign-in was declined. Retry and approve the intended account.' });
+    const kept = installationSnapshot({ username: 'integry' });
+    const resolveGithubInstallation = vi.fn(async (decision: DesktopGithubInstallationDecision) => decision.action === 'keep-account' ? kept : failed);
+    render(<LocalSetupWizard adapter={guidedAdapter({ status: vi.fn(async () => failed), resolveGithubInstallation })} onBack={vi.fn()} onComplete={vi.fn()} />);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Changing GitHub account did not complete.');
+    expect(alert).toHaveTextContent('GitHub sign-in was declined');
+    expect(alert).toHaveTextContent('ProPR did not replace the saved account');
+    expect(screen.getByText('Previously saved GitHub account')).toBeInTheDocument();
+    expect(screen.queryByText('Authenticated GitHub account')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('radio').every(radio => (radio as HTMLInputElement).disabled)).toBe(true);
+    expect(screen.getByRole('button', { name: 'Continue with selection' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Try changing account again' })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Keep @integry' }));
+    await waitFor(() => expect(resolveGithubInstallation).toHaveBeenCalledWith({ action: 'keep-account' }));
+    expect(await screen.findByText('Authenticated GitHub account')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Keep @integry' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('radio').every(radio => !(radio as HTMLInputElement).disabled)).toBe(true);
+  });
+
   it('clears a local choice that disappears from a refreshed installation list', async () => {
     const choosing = installationSnapshot();
     const refreshed = installationSnapshot({ installations: [choosing.githubIdentity!.installations[0]] });

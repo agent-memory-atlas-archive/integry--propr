@@ -319,6 +319,12 @@ export interface RelayInstallationChoiceContext {
   enrollmentPermissionError?: string;
   /** Hosted installation page; absent for custom relays. */
   installUrl?: string;
+  /**
+   * Present after "Change GitHub account" did not complete. `username` is
+   * still the previously saved identity, which was not replaced. Selection is
+   * refused until the user explicitly chooses `keep-account` or signs in again.
+   */
+  reauthenticationFailure?: { detail: string };
 }
 
 export type RelayInstallationDecision =
@@ -326,6 +332,8 @@ export type RelayInstallationDecision =
   | { action: "refresh" }
   | { action: "install" }
   | { action: "reauthenticate" }
+  /** Explicitly continue as the previously saved identity after a failed account change. */
+  | { action: "keep-account" }
   | { action: "cancel" };
 
 /** Minimal environment-check contract consumed by the setup state machine. */
@@ -682,6 +690,7 @@ async function runSetupAttempt(options: RunSetupOptions): Promise<SetupRunResult
 
     let selectedInstallationId: string | undefined;
     let enrollmentPermissionError: string | undefined;
+    let reauthenticationFailure: string | undefined;
     let failurePhase: "discovery" | "enrollment" = "discovery";
     while (true) try {
       // 2. Discover installations: auto-select the only one, pick among many,
@@ -720,6 +729,7 @@ async function runSetupAttempt(options: RunSetupOptions): Promise<SetupRunResult
           ...(selectedInstallationId ? { selectedInstallationId } : {}),
           ...(enrollmentPermissionError ? { enrollmentPermissionError } : {}),
           ...(usingHostedRelay ? { installUrl: DEFAULT_PROPR_GITHUB_APP_INSTALL_URL } : {}),
+          ...(reauthenticationFailure ? { reauthenticationFailure: { detail: reauthenticationFailure } } : {}),
         };
         const decision: RelayInstallationDecision = prompts.chooseInstallation
           ? await prompts.chooseInstallation(context)
@@ -741,12 +751,29 @@ async function runSetupAttempt(options: RunSetupOptions): Promise<SetupRunResult
         }
         if (decision.action === "reauthenticate") {
           const authenticated = await actions.loginWithGithub({ onLog: log, signal: options.signal, force: true });
-          if (!authenticated) {
-            enrollmentPermissionError = actions.githubLoginRecovery?.()?.detail ?? "GitHub authentication did not complete. Try again or keep the current account.";
-          } else {
-            selectedInstallationId = undefined;
-            enrollmentPermissionError = undefined;
+          selectedInstallationId = undefined;
+          enrollmentPermissionError = undefined;
+          // The previously saved identity is never silently reused: a failed
+          // switch is reported against it and must be explicitly accepted.
+          reauthenticationFailure = authenticated
+            ? undefined
+            : actions.githubLoginRecovery?.()?.detail ?? "GitHub authentication did not complete.";
+          if (!authenticated && !actions.hasGithubToken()) {
+            return {
+              note: actions.githubLoginRecovery?.() ?? {
+                detail: "relay not enrolled — GitHub sign-in did not complete and no saved account remains",
+                nextAction: "Run `propr login`, then re-run `propr setup` and accept ProPR Connect.",
+              },
+            };
           }
+          continue;
+        }
+        if (decision.action === "keep-account") {
+          reauthenticationFailure = undefined;
+          continue;
+        }
+        if (reauthenticationFailure) {
+          enrollmentPermissionError = `Changing GitHub account did not complete, so @${username} is still the saved account. Choose Keep @${username} to continue with it, or Change GitHub account to try again.`;
           continue;
         }
         installationId = decision.installationId;
