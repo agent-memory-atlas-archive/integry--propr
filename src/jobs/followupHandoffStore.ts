@@ -341,6 +341,38 @@ export async function recordCancelledClaims(
         .ignore();
 }
 
+/**
+ * Removes the suppression evidence this handoff's own task recorded. Release
+ * records it before its withdrawal, which can still fail and leave the hold
+ * standing; an explicit authorization of that hold then supersedes it, or the
+ * evidence would drop the authorized request once recovery returns it.
+ */
+export async function revokeCancelledClaims(
+    deps: FollowupHandoffStoreDeps,
+    record: Pick<FollowupHandoffRecord, 'repository' | 'pull_request' | 'task_id'>,
+): Promise<void> {
+    await database(deps)(PR_FOLLOWUP_CANCELLED_CLAIMS_TABLE)
+        .where({ repository: record.repository, pull_request: record.pull_request, task_id: record.task_id })
+        .delete();
+}
+
+/**
+ * True when a scheduled usage-limit retry owns the claimed comments. The
+ * attempt it replaced ends CANCELLED as a requeue, which is not a user
+ * cancellation: its claims must never be suppressed or withdrawn as one.
+ */
+export function retryOwnsClaims(record: Pick<FollowupHandoffRecord, 'settlement'>): boolean {
+    return record.settlement === SETTLEMENT_RETRY_SCHEDULED;
+}
+
+/** Runs the store writes in `run` atomically. */
+export async function inFollowupHandoffTransaction<T>(
+    deps: FollowupHandoffStoreDeps,
+    run: (transactional: FollowupHandoffStoreDeps) => Promise<T>,
+): Promise<T> {
+    return database(deps).transaction(trx => run({ ...deps, database: trx }));
+}
+
 /** Every comment ID a released cancelled follow-up on this pull request claimed. */
 export async function loadCancelledClaimIds(deps: FollowupHandoffStoreDeps, key: FollowupHandoffKey): Promise<number[]> {
     const rows = await database(deps)(PR_FOLLOWUP_CANCELLED_CLAIMS_TABLE)

@@ -23,6 +23,11 @@ import { up } from '../packages/core/src/db/migrations/20261017000000_add_pr_fol
  *   released the cancelled predecessor, drops them before execution.
  * - F37: that holds even when an unrelated follow-up ran in between and
  *   replaced, then retired, the released handoff row.
+ * - F40: an explicit authorization after a refused release revokes the
+ *   suppression that release recorded, so the authorized request returned to
+ *   the queue still executes.
+ * - F41: a scheduled usage-limit retry keeps its claims through an operator
+ *   release of the requeued (CANCELLED) attempt it replaced.
  */
 
 const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
@@ -51,8 +56,9 @@ after(async () => {
 const {
     recordFollowupHandoff, advanceFollowupHandoff, finalizeFollowupHandoff, loadFollowupHandoff, recordFollowupHandoffDiagnostic,
     PR_FOLLOWUP_HANDOFFS_TABLE, PR_FOLLOWUP_CANCELLED_CLAIMS_TABLE, HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED, SETTLEMENT_RETRY_SCHEDULING,
+    SETTLEMENT_RETRY_SCHEDULED, loadCancelledClaimIds,
 } = await import('../src/jobs/followupHandoffStore.js');
-const { recoverInterruptedFollowupHandoffs, releaseFollowupHandoffRecord } = await import('../src/jobs/followupHandoffRecovery.js');
+const { authorizeCancelledFollowupHandoff, recoverInterruptedFollowupHandoffs, releaseFollowupHandoffRecord } = await import('../src/jobs/followupHandoffRecovery.js');
 const { createFollowupHandoffGitOps } = await import('../src/jobs/followupHandoffGitOps.js');
 const {
     FollowupHandoffOwnershipLostError, gatePredecessorHandoff, markExecutionHandoffAgentExited, markExecutionHandoffContainer,
@@ -422,6 +428,82 @@ test('a released hold whose task was not cancelled leaves the captured comments 
     const { result } = await admitAfterLease(h, { commentsToProcess, pickedUpComments });
     assert.equal(result, undefined);
     assert.deepEqual(commentsToProcess.map(entry => entry.id), [11], 'only a cancelled request is dropped');
+});
+
+// --- F40: authorization supersedes the suppression a refused release recorded.
+
+test('F40: authorizing a hold whose release was refused after recording suppression keeps the returned request executable', async () => {
+    const h = await createHarness();
+    await holdWithClaimsPending(h);
+    // The release records the suppression evidence, then its withdrawal fails.
+    h.withdrawalFails = true;
+    assert.deepEqual(await releaseFollowupHandoffRecord(KEY, {}, h.deps as never), { released: false, reason: 'cancelled_claims_withdrawal_failed' });
+    assert.deepEqual(await loadCancelledClaimIds({ database }, KEY), [11], 'the refused release left suppression evidence');
+    h.withdrawalFails = false;
+
+    assert.ok(await authorizeCancelledFollowupHandoff(KEY, h.deps as never));
+    assert.deepEqual(await loadCancelledClaimIds({ database }, KEY), [], 'authorization revoked its own suppression');
+    // Recovery returns the authorized no-change request to the queue and retires the handoff.
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.noChanges, 1);
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+
+    const pickedUpComments = claimPendingBeforeLease(h);
+    const commentsToProcess = [...pickedUpComments];
+    const { result } = await admitAfterLease(h, { commentsToProcess, pickedUpComments });
+    assert.equal(result, undefined, 'the restored request is admitted');
+    assert.deepEqual(commentsToProcess.map(entry => entry.id), [11], 'and executes');
+});
+
+test('F40: authorization keeps suppression another released cancellation recorded', async () => {
+    const h = await createHarness();
+    await holdWithClaimsPending(h);
+    // An earlier, successfully released cancelled task's claim on this pull request.
+    await database(PR_FOLLOWUP_CANCELLED_CLAIMS_TABLE).insert({ ...KEY, comment_id: 99, task_id: 'task-0', created_at: 1 });
+    h.withdrawalFails = true;
+    await releaseFollowupHandoffRecord(KEY, {}, h.deps as never);
+    h.withdrawalFails = false;
+    assert.ok(await authorizeCancelledFollowupHandoff(KEY, h.deps as never));
+    assert.deepEqual(await loadCancelledClaimIds({ database }, KEY), [99]);
+});
+
+// --- F41: a scheduled usage-limit retry owns its claims through operator release.
+
+test('F41: releasing a retry-owned handoff after failed cleanup keeps the scheduled retry\'s claims', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    assert.ok(await advanceFollowupHandoff({ database }, record, { settlement: SETTLEMENT_RETRY_SCHEDULED }));
+    const realGit = h.deps.git as ReturnType<typeof createFollowupHandoffGitOps>;
+    h.deps.git = { ...realGit, async releaseSettledWorktree() { throw new Error('index.lock exists'); } };
+
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.errors, 0);
+    const pendingCleanup = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(pendingCleanup?.phase, 'cleanup_pending');
+    assert.equal(pendingCleanup?.status, HANDOFF_ACTIVE);
+    assert.equal(h.states.get('task-1'), 'cancelled', 'recovery recorded the requeued attempt');
+
+    // The release condition is repaired and the operator releases the handoff.
+    h.deps.git = realGit;
+    assert.equal((await releaseFollowupHandoffRecord(KEY, {}, h.deps as never)).released, true);
+    assert.deepEqual(await loadCancelledClaimIds({ database }, KEY), [], 'no suppression for the retry\'s claims');
+
+    // The scheduled retry carries the claimed comment in its payload.
+    const commentsToProcess = [comment(11)];
+    const { result } = await admitAfterLease(h, { commentsToProcess, pickedUpComments: [] }, 'task-retry');
+    assert.equal(result, undefined, 'the retry is admitted');
+    assert.deepEqual(commentsToProcess.map(entry => entry.id), [11], 'and keeps its request');
+});
+
+test('F41: a user-cancelled hold without a scheduled retry is still suppressed on release', async () => {
+    const h = await createHarness();
+    await holdWithClaimsPending(h);
+    assert.equal((await releaseFollowupHandoffRecord(KEY, {}, h.deps as never)).released, true);
+    assert.deepEqual(await loadCancelledClaimIds({ database }, KEY), [11]);
+    const commentsToProcess = [comment(11), comment(12)];
+    const { result } = await admitAfterLease(h, { commentsToProcess, pickedUpComments: [] });
+    assert.equal(result, undefined);
+    assert.deepEqual(commentsToProcess.map(entry => entry.id), [12]);
 });
 
 // --- F33: detected ownership loss is a stop condition for every later checkpoint.

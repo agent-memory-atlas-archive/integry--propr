@@ -6,7 +6,8 @@ import {
     type FollowupHandoffRecoveryDeps, type HandoffRedis, type ResolvedRecoveryDeps, type TaskContainerInspection,
 } from './followupHandoffDeps.js';
 import {
-    advanceFollowupHandoff, loadFollowupHandoff, loadFollowupHandoffs, parseClaimedComments, parseSourceTaskIds, recordCancelledClaims,
+    advanceFollowupHandoff, inFollowupHandoffTransaction, loadFollowupHandoff, loadFollowupHandoffs, parseClaimedComments, parseSourceTaskIds,
+    recordCancelledClaims, retryOwnsClaims, revokeCancelledClaims,
     HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED, SETTLEMENT_RETRY_SCHEDULING,
     type FollowupHandoffKey, type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
 } from './followupHandoffStore.js';
@@ -69,6 +70,9 @@ async function withOperatorRedis<T>(
  * Re-arms a cancelled, operator-held handoff for publication under explicit
  * operator authority. Null when the handoff is missing, not operator-held,
  * changed concurrently, or its pull request lease is held by another writer.
+ * A refused release may already have recorded the claims as suppressed; that
+ * evidence is revoked in the same transaction, so recovery's return of the
+ * authorized request to the queue is never dropped at admission.
  */
 export async function authorizeCancelledFollowupHandoff(
     key: FollowupHandoffKey,
@@ -78,8 +82,12 @@ export async function authorizeCancelledFollowupHandoff(
     const record = await loadFollowupHandoff(store, key);
     if (!record || record.status !== HANDOFF_AWAITING_OPERATOR) return null;
     const result = await withOperatorRedis(deps, redis => underOperatorLease(record, { store, redis }, 'authorize',
-        fresh => advanceFollowupHandoff(store, fresh, {
-            status: HANDOFF_ACTIVE, status_reason: 'operator_authorized', operator_authorized: 1,
+        fresh => inFollowupHandoffTransaction(store, async transactional => {
+            const authorized = await advanceFollowupHandoff(transactional, fresh, {
+                status: HANDOFF_ACTIVE, status_reason: 'operator_authorized', operator_authorized: 1,
+            });
+            if (authorized) await revokeCancelledClaims(transactional, fresh);
+            return authorized;
         })));
     return 'value' in result ? result.value : null;
 }
@@ -146,7 +154,9 @@ async function cancelledClaimsRefusal(
     record: FollowupHandoffRecord,
     deps: ResolvedRecoveryDeps,
 ): Promise<'cancelled_claims_withdrawal_failed' | null> {
-    if (record.operator_authorized) return null;
+    // A scheduled usage-limit retry owns the claims, and the CANCELLED state
+    // its requeue left on the replaced attempt is no user cancellation.
+    if (record.operator_authorized || retryOwnsClaims(record)) return null;
     try {
         const task = await deps.stateManager.getTaskState(record.task_id);
         if (record.status_reason !== 'cancelled_by_user' && task?.state !== deps.taskStates.CANCELLED) return null;

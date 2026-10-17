@@ -9,7 +9,7 @@ import {
     type FollowupHandoffRecoveryDeps, type ResolvedRecoveryDeps,
 } from './followupHandoffDeps.js';
 import {
-    advanceFollowupHandoff, finalizeFollowupHandoff, handoffRepositoryKey, loadFollowupHandoff, loadFollowupHandoffs, parseClaimedComments,
+    advanceFollowupHandoff, finalizeFollowupHandoff, handoffRepositoryKey, loadFollowupHandoff, loadFollowupHandoffs, parseClaimedComments, retryOwnsClaims,
     HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED,
     type FollowupHandoffKey, type FollowupHandoffRecord,
 } from './followupHandoffStore.js';
@@ -194,10 +194,12 @@ export type PredecessorAdoption =
  * captured those comments before the operator release (its pending-list claim
  * runs before it takes the lease) must drop them, so the claim set is
  * returned for the caller to filter. The task state decides, as for the
- * release itself: the release overwrote the status reason.
+ * release itself: the release overwrote the status reason. A scheduled
+ * usage-limit retry owns its claims despite the requeued attempt's CANCELLED
+ * state, so its admission keeps them.
  */
 async function releasedCancelledClaimIds(record: FollowupHandoffRecord, resolved: ResolvedRecoveryDeps): Promise<number[]> {
-    if (record.operator_authorized) return [];
+    if (record.operator_authorized || retryOwnsClaims(record)) return [];
     const task = await resolved.stateManager.getTaskState(record.task_id);
     if (task?.state !== resolved.taskStates.CANCELLED) return [];
     return parseClaimedComments(record).map(comment => comment.id);
