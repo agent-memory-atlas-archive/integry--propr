@@ -26,7 +26,7 @@ test('instance extension editor shows capability boundaries, immutable provenanc
     return route.fulfill({ json: { instanceId, profiles: [profile], catalog: [{ id: 'operator-documentation', digest: 'a'.repeat(64), tools: ['lookup', 'update_document'], capability: 'write', secrets: { count: 1, configured: true } }] } });
   });
   await page.setViewportSize({ width: 1280, height: 1000 });
-  await page.goto('/settings?tab=integrations');
+  await page.goto('/settings?tab=agent-extensions');
   const section = page.getByRole('region', { name: 'Agent extensions', exact: true });
   await expect(section).toBeVisible();
   await section.getByRole('button', { name: 'Edit profile' }).click();
@@ -121,7 +121,7 @@ test('extension profile configuration uses selections and keeps unlisted values 
     return route.fulfill({ json: { profiles: [profile], catalog: [] } });
   });
   await page.setViewportSize({ width: 1280, height: 1000 });
-  await page.goto('/settings?tab=integrations');
+  await page.goto('/settings?tab=agent-extensions');
   const section = page.getByRole('region', { name: 'Agent extensions', exact: true });
   await section.getByRole('button', { name: 'Edit profile' }).click();
   await expect(section.getByLabel('retired-agent', { exact: true })).toBeChecked();
@@ -197,7 +197,7 @@ test('extension editor keeps server names and pending tokens attached to rows an
     }
     return route.fulfill({ json: { profiles: [], bundles: [bundle], catalog: [{ id: 'docs', digest: 'a'.repeat(64), tools: ['lookup'], capability: 'read', secrets: { count: 0, configured: true } }] } });
   });
-  await page.goto('/settings?tab=integrations');
+  await page.goto('/settings?tab=agent-extensions');
   const section = page.getByRole('region', { name: 'Agent extensions', exact: true });
   await section.getByRole('button', { name: 'New profile' }).click();
   const agents = section.getByRole('group', { name: 'Agents', exact: true });
@@ -287,7 +287,7 @@ test('new HTTPS tools and GitHub branch imports can be selected with immutable c
     return route.fulfill({ json: { profiles: [], bundles: [], catalog: [] } });
   });
   await page.setViewportSize({ width: 1280, height: 1500 });
-  await page.goto('/settings?tab=integrations');
+  await page.goto('/settings?tab=agent-extensions');
   const section = page.getByRole('region', { name: 'Agent extensions', exact: true });
   await section.getByRole('button', { name: 'New profile' }).click();
   await section.getByLabel('Profile name', { exact: true }).fill('Documentation assistant');
