@@ -151,7 +151,7 @@ describe('GlobalSearch palette', () => {
     expect(within(preview).getByText('Review')).toHaveClass('rounded-full');
   });
 
-  it('caps and truncates a long repository name in the result row, keeping the full slug in a tooltip', async () => {
+  it('puts a long repository name on its own truncating line under the title, keeping the full slug in a tooltip', async () => {
     const longRepo = `integry/${'A'.repeat(90)}`;
     vi.mocked(getTasks).mockResolvedValue({
       tasks: [{ id: 'task-3', repository: longRepo, title: 'Long repo task', status: 'completed', createdAt: new Date().toISOString() }],
@@ -168,7 +168,12 @@ describe('GlobalSearch palette', () => {
     const metas = within(screen.getByRole('listbox')).getAllByTestId('global-search-result-meta');
     expect(metas).toHaveLength(2);
     for (const meta of metas) {
-      expect(meta).toHaveClass('min-w-0', 'max-w-[40%]');
+      // Metadata follows the title inside the same copy column rather than sitting beside it.
+      const title = meta.previousElementSibling as HTMLElement;
+      expect(title.textContent).toMatch(/^Long repo (task|plan)$/);
+      expect(meta.parentElement).toBe(title.parentElement);
+      expect(meta.parentElement?.parentElement).toHaveAttribute('role', 'option');
+      expect(meta).toHaveClass('min-w-0', 'max-w-full');
       expect(meta).not.toHaveClass('flex-shrink-0');
       const name = within(meta).getByText('A'.repeat(90));
       expect(name).toHaveClass('truncate');

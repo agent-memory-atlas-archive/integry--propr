@@ -221,8 +221,15 @@ test('a delayed 401 for a token renewed by a concurrent call retries with the re
   env.rejectWith('ghu_early');
   let firstDone!: () => void;
   const firstFinished = new Promise<void>(resolve => { firstDone = resolve; });
-  // The second original request's 401 arrives only after the first call renewed and retried.
-  env.holdResponses(async (token, index) => { if (token === 'ghu_early' && index === 1) await firstFinished; });
+  let secondArrived!: () => void;
+  const secondSent = new Promise<void>(resolve => { secondArrived = resolve; });
+  // Both original requests reach the relay with the early token before either 401 is answered,
+  // and the second original request's 401 arrives only after the first call renewed and retried.
+  env.holdResponses(async (token, index) => {
+    if (token !== 'ghu_early') return;
+    if (index === 0) await secondSent;
+    if (index === 1) { secondArrived(); await firstFinished; }
+  });
   const refreshCalls: string[] = [];
   const actions = createDefaultActions(env.config, {
     refreshGithubCredential: async refreshToken => { refreshCalls.push(refreshToken); return expiring('ghu_fresh', 'ghr_fresh', now); },
