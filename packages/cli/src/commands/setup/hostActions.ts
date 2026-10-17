@@ -113,7 +113,20 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
       && (credential.refreshTokenExpiresAt === undefined || credential.refreshTokenExpiresAt > now()));
   };
 
+  /** Each persisted renewal's rejected access token, mapped to its successor from the same grant. */
+  const renewedTokens = new Map<string, string>();
+  /** True only when `token` was reached from `rejected` by renewals, never by a different sign-in. */
+  const isRenewalOf = (rejected: string, token: string): boolean => {
+    let successor = renewedTokens.get(rejected);
+    for (let hops = 0; successor !== undefined && hops < renewedTokens.size; hops++) {
+      if (successor === token) return true;
+      successor = renewedTokens.get(successor);
+    }
+    return false;
+  };
+
   const discardRevokedGithubCredential = async (): Promise<never> => {
+    renewedTokens.clear();
     browserLoginFailure = GITHUB_SIGN_IN_REVOKED_MESSAGE;
     // A revoked or expired grant cannot recover; remove it so setup asks for a
     // new sign-in instead of repeatedly presenting a dead identity.
@@ -126,25 +139,32 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
       || (credential.refreshTokenExpiresAt !== undefined && credential.refreshTokenExpiresAt <= now())) {
       return discardRevokedGithubCredential();
     }
+    // A sign-in confirmed while the refresh was in flight wins over this
+    // attempt's result, success or failure: never let the previous account's
+    // grant overwrite, clear, or set recovery state for the new identity.
+    const supersedingToken = (): string | undefined => {
+      const current = configManager?.getGithubCredential();
+      if (current?.refreshToken === credential.refreshToken) return undefined;
+      if (!current) throw new Error("Not logged in to GitHub. Run `propr login` first.");
+      return current.accessToken;
+    };
     let rotated: GithubUserCredential;
     try {
       rotated = await options.refreshGithubCredential(credential.refreshToken, {});
     } catch (error) {
+      const superseding = supersedingToken();
+      if (superseding !== undefined) return superseding;
       // Provider/transport errors may contain credentials. Only fixed copy escapes.
       const message = GithubBrowserSignInError.safeMessage(error);
       if (message === GITHUB_SIGN_IN_REVOKED_MESSAGE) return discardRevokedGithubCredential();
       throw new Error(message);
     }
-    // A sign-in confirmed while the refresh was in flight wins; never let the
-    // previous account's rotated grant overwrite the newly confirmed identity.
-    const current = configManager?.getGithubCredential();
-    if (current?.refreshToken !== credential.refreshToken) {
-      if (!current) throw new Error("Not logged in to GitHub. Run `propr login` first.");
-      return current.accessToken;
-    }
+    const superseding = supersedingToken();
+    if (superseding !== undefined) return superseding;
     try {
       // GitHub has already invalidated the previous pair: persist before use.
       await configManager!.setGithubCredential(rotated);
+      renewedTokens.set(credential.accessToken, rotated.accessToken);
     } catch {
       browserTokenSaveFailed = true;
       browserLoginFailure = "GitHub sign-in was renewed, but ProPR could not save it on this computer. Check available storage, then sign in again.";
@@ -165,16 +185,21 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
     return refreshing;
   };
 
-  /** Run a relay call with a live token; an expiring token rejected early is refreshed once. */
+  /**
+   * Run a relay call with a live token; an expiring token rejected early is
+   * retried once with its renewal, whether this call or a concurrent one renewed it.
+   */
   const withRelayClient = async <T>(relayUrl: string | undefined, call: (client: RelayClientOptions) => Promise<T>): Promise<T> => {
     const client = relayClient(relayUrl, await currentGithubToken());
     try {
       return await call(client);
     } catch (error) {
       const credential = configManager?.getGithubCredential();
-      if (!(error instanceof RelayApiError) || error.status !== 401 || credential?.accessToken !== client.githubToken
-        || credential.expiresAt === undefined) throw error;
-      return call(relayClient(relayUrl, await currentGithubToken({ forceRefresh: true })));
+      if (!(error instanceof RelayApiError) || error.status !== 401 || credential?.expiresAt === undefined) throw error;
+      const token = await currentGithubToken({ forceRefresh: credential.accessToken === client.githubToken });
+      // A different account confirmed meanwhile must never inherit this call.
+      if (!isRenewalOf(client.githubToken, token)) throw error;
+      return call(relayClient(relayUrl, token));
     }
   };
   /** A client pointed at the local stack's API port (not the saved remote URL). */
@@ -561,6 +586,7 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
           // Replace the whole credential so a previous account's refresh token
           // can never be paired with the newly confirmed identity.
           await configManager.setGithubCredential(credential);
+          renewedTokens.clear();
           browserTokenSaveFailed = false;
         } catch {
           browserTokenSaveFailed = true;

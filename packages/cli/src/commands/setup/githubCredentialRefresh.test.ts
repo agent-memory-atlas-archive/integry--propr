@@ -17,9 +17,11 @@ async function setup(t: TestContext) {
   await config.init();
   const seen: string[] = [];
   let rejectToken: string | undefined;
-  const server = createServer((request: IncomingMessage, response) => {
+  let beforeRespond: ((token: string, index: number) => Promise<void>) | undefined;
+  const server = createServer(async (request: IncomingMessage, response) => {
     const token = String(request.headers.authorization ?? '').replace(/^Bearer /, '');
     seen.push(token);
+    await beforeRespond?.(token, seen.length - 1);
     response.setHeader('content-type', 'application/json');
     if (token === rejectToken) {
       response.statusCode = 401;
@@ -31,7 +33,8 @@ async function setup(t: TestContext) {
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
   const relayUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`;
-  return { dir, config, seen, relayUrl, rejectWith: (token: string) => { rejectToken = token; } };
+  return { dir, config, seen, relayUrl, rejectWith: (token: string) => { rejectToken = token; },
+    holdResponses: (hook: (token: string, index: number) => Promise<void>) => { beforeRespond = hook; } };
 }
 
 const expiring = (accessToken: string, refreshToken: string, now: number): GithubUserCredential => ({
@@ -181,6 +184,106 @@ test('an account switch confirmed during an in-flight refresh is not overwritten
   release();
   assert.equal((await discovery).username, 'user-of-ghu_ultrafix');
   assert.equal(env.config.getGithubCredential()?.refreshToken, 'ghr_ultrafix');
+});
+
+test('a revoked refresh for the old account does not clear an account confirmed meanwhile', async t => {
+  const env = await setup(t);
+  let now = 6_500_000_000;
+  await env.config.setGithubCredential(expiring('ghu_integry', 'ghr_integry', now));
+  now += 9 * HOUR;
+  let release!: () => void;
+  let started!: () => void;
+  const refreshStarted = new Promise<void>(resolve => { started = resolve; });
+  const actions = createDefaultActions(env.config, {
+    now: () => now,
+    githubBrowserLogin: async () => expiring('ghu_ultrafix', 'ghr_ultrafix', now),
+    refreshGithubCredential: async () => {
+      started();
+      await new Promise<void>(resolve => { release = resolve; });
+      throw new GithubBrowserSignInError(GITHUB_SIGN_IN_REVOKED_MESSAGE);
+    },
+  });
+  const discovery = actions.fetchRelayInstallations({ relayUrl: env.relayUrl });
+  await refreshStarted;
+  assert.equal(await actions.loginWithGithub({ force: true }), true);
+  release();
+  assert.equal((await discovery).username, 'user-of-ghu_ultrafix');
+  assert.equal(env.config.getGithubCredential()?.refreshToken, 'ghr_ultrafix');
+  assert.equal(actions.hasGithubToken(), true);
+  assert.notEqual(actions.githubLoginRecovery?.()?.detail, GITHUB_SIGN_IN_REVOKED_MESSAGE);
+  assert.equal((await actions.fetchRelayInstallations({ relayUrl: env.relayUrl })).username, 'user-of-ghu_ultrafix');
+});
+
+test('a delayed 401 for a token renewed by a concurrent call retries with the renewal', async t => {
+  const env = await setup(t);
+  const now = Date.now();
+  await env.config.setGithubCredential(expiring('ghu_early', 'ghr_live', now));
+  env.rejectWith('ghu_early');
+  let firstDone!: () => void;
+  const firstFinished = new Promise<void>(resolve => { firstDone = resolve; });
+  // The second original request's 401 arrives only after the first call renewed and retried.
+  env.holdResponses(async (token, index) => { if (token === 'ghu_early' && index === 1) await firstFinished; });
+  const refreshCalls: string[] = [];
+  const actions = createDefaultActions(env.config, {
+    refreshGithubCredential: async refreshToken => { refreshCalls.push(refreshToken); return expiring('ghu_fresh', 'ghr_fresh', now); },
+  });
+  const first = actions.fetchRelayInstallations({ relayUrl: env.relayUrl }).finally(firstDone);
+  const second = actions.fetchRelayInstallations({ relayUrl: env.relayUrl });
+  assert.equal((await first).username, 'user-of-ghu_fresh');
+  assert.equal((await second).username, 'user-of-ghu_fresh');
+  assert.deepEqual(refreshCalls, ['ghr_live']);
+  assert.deepEqual(env.seen, ['ghu_early', 'ghu_early', 'ghu_fresh', 'ghu_fresh']);
+});
+
+test('a delayed 401 is not retried under an account confirmed after the request', async t => {
+  const env = await setup(t);
+  const now = Date.now();
+  await env.config.setGithubCredential(expiring('ghu_integry', 'ghr_integry', now));
+  env.rejectWith('ghu_integry');
+  let respond!: () => void;
+  const responded = new Promise<void>(resolve => { respond = resolve; });
+  let received!: () => void;
+  const requestReceived = new Promise<void>(resolve => { received = resolve; });
+  env.holdResponses(async () => { received(); await responded; });
+  let refreshed = 0;
+  const actions = createDefaultActions(env.config, {
+    githubBrowserLogin: async () => expiring('ghu_ultrafix', 'ghr_ultrafix', now),
+    refreshGithubCredential: async () => { refreshed++; throw new Error('unused'); },
+  });
+  const enrollment = actions.enrollRelay({ relayUrl: env.relayUrl, installationId: '1', label: 'host' });
+  await requestReceived;
+  assert.equal(await actions.loginWithGithub({ force: true }), true);
+  respond();
+  await assert.rejects(enrollment, (error: Error & { status?: number }) => error.status === 401);
+  assert.equal(refreshed, 0);
+  assert.deepEqual(env.seen, ['ghu_integry']);
+  assert.equal(env.config.getGithubCredential()?.refreshToken, 'ghr_ultrafix');
+});
+
+test('a 401 refresh superseded by an account switch is not retried under the new account', async t => {
+  const env = await setup(t);
+  const now = Date.now();
+  await env.config.setGithubCredential(expiring('ghu_integry', 'ghr_integry', now));
+  env.rejectWith('ghu_integry');
+  let release!: () => void;
+  let started!: () => void;
+  const refreshStarted = new Promise<void>(resolve => { started = resolve; });
+  const actions = createDefaultActions(env.config, {
+    githubBrowserLogin: async () => expiring('ghu_ultrafix', 'ghr_ultrafix', now),
+    refreshGithubCredential: async () => {
+      started();
+      await new Promise<void>(resolve => { release = resolve; });
+      throw new GithubBrowserSignInError(GITHUB_SIGN_IN_REVOKED_MESSAGE);
+    },
+  });
+  const enrollment = actions.enrollRelay({ relayUrl: env.relayUrl, installationId: '1', label: 'host' });
+  await refreshStarted;
+  assert.equal(await actions.loginWithGithub({ force: true }), true);
+  release();
+  await assert.rejects(enrollment, (error: Error & { status?: number }) => error.status === 401);
+  assert.deepEqual(env.seen, ['ghu_integry']);
+  assert.equal(env.config.getGithubCredential()?.refreshToken, 'ghr_ultrafix');
+  assert.equal(actions.hasGithubToken(), true);
 });
 
 test('a failed account switch keeps the previous credential intact', async t => {
