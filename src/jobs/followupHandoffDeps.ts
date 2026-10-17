@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
     getAuthenticatedOctokit, getStateManager, inspectTaskContainerLivenessForTask, logger, TaskStates,
 } from '@propr/core';
@@ -6,7 +7,9 @@ import type { PRProcessingLockRedisClient } from './prProcessingLock.js';
 import { restorePendingComments } from './prPendingComments.js';
 import { createFollowupHandoffGitOps, type FollowupHandoffGitOps } from './followupHandoffGitOps.js';
 import { splitHandoffRepository, type HandoffOctokit, type HandoffStateManager, type HandoffTaskStates, type LoggerLike } from './followupHandoffResume.js';
-import { recordFollowupHandoffDiagnostic, type FollowupHandoffRecord, type FollowupHandoffStoreDeps } from './followupHandoffStore.js';
+import {
+    parseHandoffJobData, recordFollowupHandoffDiagnostic, type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
+} from './followupHandoffStore.js';
 
 /** Shared dependency resolution for follow-up handoff recovery and operator actions. */
 
@@ -26,6 +29,8 @@ export interface FollowupHandoffRecoveryDeps {
     inspectLiveness?: (taskId: string) => Promise<TaskContainerInspection>;
     git?: FollowupHandoffGitOps;
     restoreComments?: (record: FollowupHandoffRecord, comments: UnprocessedComment[]) => Promise<void>;
+    /** Queues the follow-up job that picks up comments a standalone no-change recovery restored. */
+    scheduleRestoredComments?: (record: FollowupHandoffRecord) => Promise<void>;
     taskStates?: HandoffTaskStates;
     /** PR lease heartbeat cadence while recovery owns a handoff; tests shorten it. */
     heartbeatIntervalMs?: number;
@@ -41,8 +46,31 @@ export interface ResolvedRecoveryDeps {
     inspectLiveness: (taskId: string) => Promise<TaskContainerInspection>;
     git: FollowupHandoffGitOps;
     restoreComments: (record: FollowupHandoffRecord, comments: UnprocessedComment[]) => Promise<void>;
+    scheduleRestoredComments: (record: FollowupHandoffRecord) => Promise<void>;
     taskStates: HandoffTaskStates;
     heartbeatIntervalMs?: number;
+}
+
+/**
+ * Restored comments sit in the PR's pending list, which only a
+ * processPullRequestComment job drains: the webhook queues one per new user
+ * comment, and a finishing job queues one when its cleanup finds leftovers.
+ * A standalone recovery pass runs in neither, so without this job the restored
+ * request would wait for an unrelated new comment (and expire with the list's
+ * TTL). The job ID is fixed per handoff incarnation, so a retried pass that
+ * restores the same comments again does not queue a second job.
+ */
+export async function queueRestoredCommentFollowup(record: FollowupHandoffRecord): Promise<void> {
+    // Lazy import: test suites replace @propr/core with enumerated mocks.
+    const { issueQueue } = await import('@propr/core');
+    const { owner, repo } = splitHandoffRepository(record.repository);
+    const jobData = parseHandoffJobData(record);
+    await issueQueue.add('processPullRequestComment', {
+        pullRequestNumber: record.pull_request, comments: [],
+        repoOwner: jobData.repoOwner ?? owner, repoName: jobData.repoName ?? repo,
+        branchName: jobData.branchName ?? record.branch_name, llm: jobData.llm ?? record.llm,
+        correlationId: randomUUID(), reasoningLevel: jobData.reasoningLevel,
+    }, { jobId: `pr-comments-batch-${owner}-${repo}-${record.pull_request}-handoff-${record.incarnation}`, delay: 3000 });
 }
 
 export async function resolveRecoveryDeps(deps: FollowupHandoffRecoveryDeps): Promise<ResolvedRecoveryDeps> {
@@ -83,6 +111,7 @@ export async function resolveRecoveryDeps(deps: FollowupHandoffRecoveryDeps): Pr
                 redisClient: resolvedRedis as Parameters<typeof restorePendingComments>[1]['redisClient'],
             });
         }),
+        scheduleRestoredComments: deps.scheduleRestoredComments ?? queueRestoredCommentFollowup,
         taskStates: deps.taskStates ?? {
             COMPLETED: TaskStates.COMPLETED, FAILED: TaskStates.FAILED, CANCELLED: TaskStates.CANCELLED,
         },

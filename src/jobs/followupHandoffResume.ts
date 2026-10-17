@@ -60,6 +60,13 @@ export interface ResumeFollowupHandoffParams {
     recoveredBy?: string;
     /** Reports a lost PR processing lease; once true no further external mutation runs. */
     isOwnershipLost?: () => boolean;
+    /**
+     * Guarantees another attempt for claimed comments a no-change recovery
+     * returned to the pending list. Standalone recovery passes enqueue a
+     * pending-comment follow-up job here; in-line predecessor adoption omits
+     * it because the adopting job's own cleanup queues that follow-up.
+     */
+    scheduleRestoredComments?(record: FollowupHandoffRecord): Promise<void>;
 }
 
 export type ResumeOutcome =
@@ -127,10 +134,15 @@ function ownershipLost(params: ResumeFollowupHandoffParams, record: FollowupHand
     return true;
 }
 
-/** User cancellation is authoritative: re-checked before every publication step. */
+/**
+ * User cancellation is authoritative: re-checked before every publication
+ * step. The task-state read is itself awaited, so a lease loss it observed is
+ * reported too — neither an operator hold nor the caller's mutation may follow.
+ */
 async function cancellationHold(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome | null> {
-    if (record.operator_authorized) return null;
+    if (record.operator_authorized) return ownershipLost(params, record) ? { outcome: 'ownership_lost' } : null;
     const taskState = await params.stateManager.getTaskState(record.task_id);
+    if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
     if (taskState?.state !== params.taskStates.CANCELLED) return null;
     return holdForOperator(params, record, 'cancelled_by_user');
 }
@@ -195,21 +207,22 @@ function interruptedWithoutChangesBody(record: FollowupHandoffRecord): string {
 
 /**
  * Publishes the owed comment exactly once, keyed by the handoff's durable
- * marker. The lease can be lost while any of these GitHub requests is awaited,
- * so ownership is re-checked immediately before each mutation — the
- * starting-comment PATCH and the fallback POST after pagination (which also
- * covers a PATCH that found its comment deleted).
+ * marker. The lease can be lost — and the user can cancel — while any of these
+ * GitHub requests is awaited, so both are re-checked immediately before each
+ * mutation: the starting-comment PATCH and the fallback POST after pagination
+ * (which also covers a PATCH that found its comment deleted).
  */
 async function publishOwedComment(
     params: ResumeFollowupHandoffParams,
     record: FollowupHandoffRecord,
     body: string,
-): Promise<{ url: string | null } | { lost: true }> {
+): Promise<{ url: string | null } | { done: ResumeOutcome }> {
     if (record.completion_comment_url) return { url: record.completion_comment_url };
     const { owner, repo } = splitHandoffRepository(record.repository);
     const marker = handoffCommentMarker(record);
     if (record.starting_comment_id) {
-        if (ownershipLost(params, record)) return { lost: true };
+        const hold = await cancellationHold(params, record);
+        if (hold) return { done: hold };
         try {
             const { data } = await params.octokit.request('PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}', {
                 owner, repo, comment_id: record.starting_comment_id, body,
@@ -224,7 +237,8 @@ async function publishOwedComment(
     }) as IssueComment[];
     const existing = comments.find(comment => comment.body?.includes(marker));
     if (existing) return { url: existing.html_url ?? null };
-    if (ownershipLost(params, record)) return { lost: true };
+    const hold = await cancellationHold(params, record);
+    if (hold) return { done: hold };
     const { data } = await params.octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
         owner, repo, issue_number: record.pull_request, body,
     });
@@ -234,9 +248,11 @@ async function publishOwedComment(
 const terminalStates = (taskStates: HandoffTaskStates): Set<string> =>
     new Set([taskStates.COMPLETED, taskStates.FAILED, taskStates.CANCELLED]);
 
-async function finalizeRecoveredTask(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord, published: boolean): Promise<void> {
+/** Returns false, without touching the task, when the lease was lost during the state read. */
+async function finalizeRecoveredTask(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord, published: boolean): Promise<boolean> {
     const { stateManager, taskStates } = params;
     const current = await stateManager.getTaskState(record.task_id);
+    if (ownershipLost(params, record)) return false;
     const historyMetadata = {
         followupPublicationHandoff: {
             recovered: true, phase: record.phase, branchName: record.branch_name,
@@ -249,7 +265,7 @@ async function finalizeRecoveredTask(params: ResumeFollowupHandoffParams, record
     };
     if (current && terminalStates(taskStates).has(current.state)) {
         await reportHandoffOnTaskTimeline(params, record, 'publication recovered; task already final');
-        return;
+        return true;
     }
     await stateManager.updateTaskState(record.task_id, published ? taskStates.COMPLETED : taskStates.FAILED, {
         reason: published
@@ -258,6 +274,7 @@ async function finalizeRecoveredTask(params: ResumeFollowupHandoffParams, record
         ...(published && record.commit_hash ? { commitHash: record.commit_hash } : {}),
         historyMetadata,
     });
+    return true;
 }
 
 /**
@@ -272,7 +289,11 @@ async function attemptHandoffCleanup(params: ResumeFollowupHandoffParams, record
         // A worktree that normal cleanup already removed or detached before the
         // row could retire no longer holds the branch — that is the release
         // proof this phase owes, so the row must not stay pending forever.
-        released = await params.git.worktreeAttachment(record.worktree_path, record.branch_name) !== 'attached'
+        const attachment = await params.git.worktreeAttachment(record.worktree_path, record.branch_name);
+        // The lease can be lost while the attachment is inspected; the branch
+        // release then belongs to the successor that now owns the handoff.
+        if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
+        released = attachment !== 'attached'
             || await params.git.releaseSettledWorktree(record.local_repo_path, record.branch_name, record.worktree_path);
     } catch (error) {
         params.log.warn({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, error: (error as Error).message },
@@ -282,6 +303,9 @@ async function attemptHandoffCleanup(params: ResumeFollowupHandoffParams, record
         await reportHandoffOnTaskTimeline(params, record, 'publication complete; branch release pending retry');
         return { outcome: 'cleanup_pending' };
     }
+    // A loss observed during the release leaves the row for the successor,
+    // whose cleanup pass proves the free branch and retires it.
+    if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
     await finalizeFollowupHandoff(params.store, record);
     params.log.info({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, commitHash: record.commit_hash },
         record.commit_hash
@@ -291,16 +315,19 @@ async function attemptHandoffCleanup(params: ResumeFollowupHandoffParams, record
 }
 
 async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
-    // Cancellation may have landed while the Git evidence was being awaited:
-    // re-check before publishing the notice or restoring the claimed comments,
-    // or the cancelled request would be requeued for another follow-up.
+    // Cancellation or lease loss may land while the Git evidence or the notice
+    // request is awaited: publication re-checks both before its mutation, and
+    // they are re-checked again before restoring the claimed comments, or a
+    // cancelled request would be requeued (or a successor's raced).
+    const notice = await publishOwedComment(params, record, interruptedWithoutChangesBody(record));
+    if ('done' in notice) return notice.done;
     const hold = await cancellationHold(params, record);
     if (hold) return hold;
-    if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
-    const notice = await publishOwedComment(params, record, interruptedWithoutChangesBody(record));
-    if ('lost' in notice) return { outcome: 'ownership_lost' };
     await params.restoreComments(record, parseClaimedComments(record));
-    await finalizeRecoveredTask(params, record, false);
+    // A successor that adopts this phase restores (deduplicated) and schedules again.
+    if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
+    await params.scheduleRestoredComments?.(record);
+    if (!await finalizeRecoveredTask(params, record, false)) return { outcome: 'ownership_lost' };
     const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'cleanup_pending' });
     if (!advanced) return { outcome: 'superseded' };
     params.log.info({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request },
@@ -323,7 +350,10 @@ async function collectAgentOutput(
     if (attachment === 'not_on_branch') return { done: await holdForOperator(params, record, 'worktree_not_on_branch') };
     let commitHash: string | null;
     if (await git.hasUncommittedChanges(record.worktree_path)) {
-        if (ownershipLost(params, record)) return { done: { outcome: 'ownership_lost' } };
+        // Cancellation or lease loss during the worktree inspection stops the
+        // commit; the later push check alone would leave a cancelled commit.
+        const hold = await cancellationHold(params, record);
+        if (hold) return { done: hold };
         const commit = await git.commitWork(record.worktree_path, recoveryCommitMessage(record), record.pull_request);
         commitHash = commit?.commitHash ?? null;
     } else if (await git.hasUnpushedCommits(record.worktree_path, record.branch_name)) {
@@ -356,7 +386,6 @@ async function pushCommittedWork(params: ResumeFollowupHandoffParams, record: Fo
     // cancellation or lease loss that landed during them must stop the push.
     const lateHold = await cancellationHold(params, record);
     if (lateHold) return { done: lateHold };
-    if (ownershipLost(params, record)) return { done: { outcome: 'ownership_lost' } };
     const { owner, repo } = splitHandoffRepository(record.target_repository);
     let pushed: Awaited<ReturnType<typeof git.push>>;
     try {
@@ -374,13 +403,10 @@ async function pushCommittedWork(params: ResumeFollowupHandoffParams, record: Fo
     return advanced ? { record: advanced } : { done: { outcome: 'superseded' } };
 }
 
-/** Publishes the owed completion comment after re-checking cancellation and lease ownership. */
+/** Publishes the owed completion comment; cancellation and lease ownership are re-checked before each comment mutation. */
 async function publishPushedCompletion(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeStep> {
-    const hold = await cancellationHold(params, record);
-    if (hold) return { done: hold };
-    if (ownershipLost(params, record)) return { done: { outcome: 'ownership_lost' } };
     const published = await publishOwedComment(params, record, recoveredCompletionBody(record));
-    if ('lost' in published) return { done: { outcome: 'ownership_lost' } };
+    if ('done' in published) return published;
     const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'comment_published', completion_comment_url: published.url });
     return advanced ? { record: advanced } : { done: { outcome: 'superseded' } };
 }
@@ -415,7 +441,7 @@ export async function resumeFollowupHandoff(params: ResumeFollowupHandoffParams)
         record = step.record;
     }
     if (record.phase === 'comment_published') {
-        await finalizeRecoveredTask(params, record, Boolean(record.commit_hash));
+        if (!await finalizeRecoveredTask(params, record, Boolean(record.commit_hash))) return { outcome: 'ownership_lost' };
         const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'cleanup_pending' });
         if (!advanced) return { outcome: 'superseded' };
         record = advanced;

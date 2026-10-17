@@ -14,6 +14,8 @@ const root = await mkdtemp(path.join(tmpdir(), 'followup-handoff-'));
 after(async () => { await database.destroy(); await rm(root, { recursive: true, force: true }); });
 
 const silentLog = { debug() {}, info() {}, warn() {}, error() {} };
+// Jobs the default standalone-recovery scheduler queues for restored comments.
+const queuedFollowupJobs: Array<{ name: string; data: Record<string, unknown>; opts: Record<string, unknown> }> = [];
 
 await mock.module('@propr/core', {
     namedExports: {
@@ -36,6 +38,12 @@ await mock.module('@propr/core', {
         getRepoUrl: () => 'https://example.test/repo.git',
         pushBranch: async () => { throw new Error('tests must inject git operations'); },
         getPendingPrCommentsKey: (owner: string, repo: string, pr: number) => `pending:${owner}:${repo}:${pr}`,
+        issueQueue: {
+            add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
+                queuedFollowupJobs.push({ name, data, opts });
+                return { id: String(opts.jobId) };
+            },
+        },
     },
 });
 
@@ -269,6 +277,7 @@ const publishedComments = (h: Harness) => h.octokit.comments.filter(comment => c
 
 beforeEach(async () => {
     await database(PR_FOLLOWUP_HANDOFFS_TABLE).delete();
+    queuedFollowupJobs.length = 0;
 });
 
 test('restart while the agent container is live leaves the handoff and worktree untouched', async () => {
@@ -388,6 +397,45 @@ test('no changes: owed notice is posted, claimed comments are returned, and the 
     assert.equal(h.stateManager.states.get('task-1'), 'failed');
     assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
     assert.equal(h.counters.released, 1);
+    // S7: a standalone pass runs outside any comment job, so it queues the
+    // pending-comment follow-up itself instead of waiting for a new comment.
+    assert.equal(queuedFollowupJobs.length, 1);
+    assert.equal(queuedFollowupJobs[0].name, 'processPullRequestComment');
+    assert.deepEqual(queuedFollowupJobs[0].data.comments, []);
+    assert.equal(queuedFollowupJobs[0].data.pullRequestNumber, 7);
+    assert.equal(queuedFollowupJobs[0].data.branchName, BRANCH);
+    assert.match(String(queuedFollowupJobs[0].opts.jobId), /^pr-comments-batch-acme-widgets-7-handoff-/);
+});
+
+test('S7: a no-change pass retried after a crash re-queues under the same per-incarnation job ID', async () => {
+    const h = await createHarness();
+    await seedHandoff(h);
+    // The worker dies after restoring and queuing, before the task is finalized.
+    const realUpdate = h.stateManager.updateTaskState.bind(h.stateManager);
+    h.stateManager.updateTaskState = async () => { throw new Error('worker died'); };
+    const first = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(first.errors, 1);
+    assert.equal(queuedFollowupJobs.length, 1);
+    h.stateManager.updateTaskState = realUpdate;
+    const second = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(second.noChanges, 1);
+    assert.equal(h.octokit.comments.length, 1, 'the notice is deduplicated by its marker');
+    assert.equal(queuedFollowupJobs.length, 2);
+    assert.equal(queuedFollowupJobs[1].opts.jobId, queuedFollowupJobs[0].opts.jobId,
+        'BullMQ keeps one job per ID, so the retry cannot queue a duplicate attempt');
+});
+
+test('S7: in-line predecessor adoption leaves the pending follow-up to the adopting job', async () => {
+    const h = await createHarness();
+    await seedHandoff(h);
+    queuedFollowupJobs.length = 0;
+    const adoption = await adoptPredecessorFollowupHandoff(
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog },
+        h.deps,
+    );
+    assert.equal('resumed' in adoption && adoption.resumed?.outcome, 'no_changes');
+    assert.deepEqual(h.restored.map(comment => comment.id), [11]);
+    assert.equal(queuedFollowupJobs.length, 0, 'the adopting job\'s cleanup drains the restored comments');
 });
 
 test('missing worktree holds the handoff for an operator instead of failing or fabricating work', async () => {

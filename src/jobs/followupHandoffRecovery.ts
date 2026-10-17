@@ -92,6 +92,8 @@ async function adoptAndResume(
                 stateManager: deps.stateManager, restoreComments: deps.restoreComments,
                 store: deps.store, log: deps.log, taskStates: deps.taskStates, recoveredBy,
                 isOwnershipLost: () => leaseLost,
+                // No job drains the pending list after a standalone pass.
+                scheduleRestoredComments: deps.scheduleRestoredComments,
             });
         } finally {
             await stopHeartbeat();
@@ -220,6 +222,8 @@ export async function adoptPredecessorFollowupHandoff(
             if (!linked) return { resumed: { outcome: 'superseded' } };
             adopted = linked;
         }
+        // No scheduleRestoredComments: comments restored here are drained by
+        // the adopting job's own cleanup, which queues the pending follow-up.
         const resumed = await resumeFollowupHandoff({
             record: adopted, octokit: await resolved.getOctokit(), git: resolved.git,
             stateManager: resolved.stateManager, restoreComments: resolved.restoreComments,

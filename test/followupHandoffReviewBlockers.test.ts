@@ -770,3 +770,185 @@ test('F20: a gate that cannot verify the predecessor reschedules the successor i
     assert.equal(queuedRecoveryJobs.length, 1, 'a delayed replacement job was queued');
     assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_ACTIVE, 'the predecessor obligation is untouched');
 });
+
+// --- Review 6229229315 F21: cancellation is re-checked inside comment
+// publication, before restoring claimed comments, and before committing.
+// F22: an observed lease loss stops restoration, task-state mutation and
+// branch release that follow an in-flight await.
+
+function trackedResumeParams(h: Harness, record: NonNullable<Awaited<ReturnType<typeof loadFollowupHandoff>>>, isOwnershipLost: () => boolean = () => false) {
+    return {
+        ...resumeParams(h, record, isOwnershipLost),
+        restoreComments: async (_record: unknown, claimed: Array<{ id: number }>) => { h.restored.push(...claimed); },
+    };
+}
+
+async function seedPushed(h: Harness) {
+    const record = await seedHandoff(h);
+    await agentEdit(h.fx);
+    const head = commitInWorktree(h.fx);
+    git(h.fx.wt, 'push', 'origin', `HEAD:refs/heads/${BRANCH}`);
+    const pushed = await advanceFollowupHandoff({ database }, record, { phase: 'pushed', commit_hash: head });
+    assert.ok(pushed);
+    return pushed;
+}
+
+test('F21: cancellation during comment pagination stops the fallback completion POST', async () => {
+    const h = await createHarness();
+    const pushed = await seedPushed(h);
+    h.octokit.paginate = async () => { h.stateManager.states.set('task-1', 'cancelled'); return []; };
+
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, pushed));
+    assert.equal(outcome.outcome, 'awaiting_operator');
+    assert.equal(h.octokit.comments.length, 0, 'no success comment is published for the cancelled task');
+    const held = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(held?.status, HANDOFF_AWAITING_OPERATOR);
+    assert.equal(held?.status_reason, 'cancelled_by_user');
+    assert.equal(held?.phase, 'pushed', 'the owed publication is preserved, not advanced');
+});
+
+test('F21: cancellation during a 404 starting-comment PATCH stops the fallback POST', async () => {
+    const h = await createHarness();
+    const pushed = await advanceFollowupHandoff({ database }, await seedPushed(h), { starting_comment_id: 555 });
+    assert.ok(pushed);
+    const realRequest = h.octokit.request.bind(h.octokit);
+    h.octokit.request = async (route: string, params?: Record<string, unknown>) => {
+        if (route.startsWith('PATCH ')) h.stateManager.states.set('task-1', 'cancelled');
+        return realRequest(route, params);
+    };
+
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, pushed));
+    assert.equal(outcome.outcome, 'awaiting_operator');
+    assert.equal(h.octokit.comments.length, 0);
+});
+
+test('F21: cancellation during the no-change notice request stops restoration and task failure', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const realRequest = h.octokit.request.bind(h.octokit);
+    h.octokit.request = async (route: string, params?: Record<string, unknown>) => {
+        const result = await realRequest(route, params);
+        if (route.startsWith('POST ')) h.stateManager.states.set('task-1', 'cancelled');
+        return result;
+    };
+
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, record));
+    assert.equal(outcome.outcome, 'awaiting_operator');
+    assert.deepEqual(h.restored, [], 'cancelled claimed comments are not returned to pending work');
+    assert.equal(h.stateManager.states.get('task-1'), 'cancelled', 'the task is never marked failed');
+    const held = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(held?.status, HANDOFF_AWAITING_OPERATOR);
+    assert.equal(git(h.fx.wt, 'branch', '--show-current'), BRANCH, 'the branch is not released');
+});
+
+test('F21: cancellation during dirty-worktree inspection stops the recovery commit', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    await agentEdit(h.fx);
+    const realDirty = h.gitOps.hasUncommittedChanges.bind(h.gitOps);
+    h.gitOps.hasUncommittedChanges = async (worktreePath: string) => {
+        const dirty = await realDirty(worktreePath);
+        h.stateManager.states.set('task-1', 'cancelled');
+        return dirty;
+    };
+    const before = git(h.fx.wt, 'rev-parse', 'HEAD');
+
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, record));
+    assert.equal(outcome.outcome, 'awaiting_operator');
+    assert.equal(h.counters.commits, 0, 'the cancelled work is never committed');
+    assert.equal(git(h.fx.wt, 'rev-parse', 'HEAD'), before);
+    assert.notEqual(git(h.fx.wt, 'status', '--porcelain'), '', 'the retained edit is preserved');
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.phase, 'agent_running');
+});
+
+test('F22: lease loss during dirty-worktree inspection stops the recovery commit', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    await agentEdit(h.fx);
+    let lost = false;
+    const realDirty = h.gitOps.hasUncommittedChanges.bind(h.gitOps);
+    h.gitOps.hasUncommittedChanges = async (worktreePath: string) => { lost = true; return realDirty(worktreePath); };
+
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, record, () => lost));
+    assert.equal(outcome.outcome, 'ownership_lost');
+    assert.equal(h.counters.commits, 0);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_ACTIVE);
+});
+
+test('F22: lease loss during the no-change notice request stops restoration and finalization', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    let lost = false;
+    const realRequest = h.octokit.request.bind(h.octokit);
+    h.octokit.request = async (route: string, params?: Record<string, unknown>) => {
+        const result = await realRequest(route, params);
+        if (route.startsWith('POST ')) lost = true;
+        return result;
+    };
+
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, record, () => lost));
+    assert.equal(outcome.outcome, 'ownership_lost');
+    assert.equal(h.octokit.comments.length, 1, 'the already-started notice request completed');
+    assert.deepEqual(h.restored, [], 'claimed comments are not restored after the observed loss');
+    assert.equal(h.stateManager.states.get('task-1'), 'processing', 'the task state is not mutated');
+    const retained = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(retained?.status, HANDOFF_ACTIVE);
+    assert.equal(retained?.phase, 'agent_running', 'the obligation is neither advanced nor retired');
+    assert.equal(git(h.fx.wt, 'branch', '--show-current'), BRANCH);
+});
+
+test('F22: lease loss while finalization reads the task state stops the state update', async () => {
+    const h = await createHarness();
+    const pushed = await seedPushed(h);
+    const published = await advanceFollowupHandoff({ database }, pushed, {
+        phase: 'comment_published', completion_comment_url: 'https://example.test/comment/1',
+    });
+    assert.ok(published);
+    let lost = false;
+    const realGet = h.stateManager.getTaskState.bind(h.stateManager);
+    h.stateManager.getTaskState = async (taskId: string) => { lost = true; return realGet(taskId); };
+
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, published, () => lost));
+    assert.equal(outcome.outcome, 'ownership_lost');
+    assert.equal(h.stateManager.states.get('task-1'), 'processing', 'the task is not finalized after the loss');
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.phase, 'comment_published');
+});
+
+test('F22: lease loss during the worktree attachment check stops the branch release', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const pending = await advanceFollowupHandoff({ database }, record, { phase: 'cleanup_pending' });
+    assert.ok(pending);
+    let lost = false;
+    const realAttachment = h.gitOps.worktreeAttachment.bind(h.gitOps);
+    h.gitOps.worktreeAttachment = async (worktreePath: string, branchName: string) => {
+        lost = true;
+        return realAttachment(worktreePath, branchName);
+    };
+
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, pending, () => lost));
+    assert.equal(outcome.outcome, 'ownership_lost');
+    assert.equal(h.counters.released, 0, 'the branch is not released after the observed loss');
+    assert.equal(git(h.fx.wt, 'branch', '--show-current'), BRANCH);
+    const retained = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(retained?.phase, 'cleanup_pending', 'the cleanup obligation stays for the successor');
+    assert.equal(retained?.status, HANDOFF_ACTIVE);
+});
+
+test('F22: lease loss during the branch release leaves the row for the successor to retire', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const pending = await advanceFollowupHandoff({ database }, record, { phase: 'cleanup_pending' });
+    assert.ok(pending);
+    let lost = false;
+    const realRelease = h.gitOps.releaseSettledWorktree.bind(h.gitOps);
+    h.gitOps.releaseSettledWorktree = async (localRepoPath: string, branchName: string, worktreePath: string) => {
+        const released = await realRelease(localRepoPath, branchName, worktreePath);
+        lost = true;
+        return released;
+    };
+
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, pending, () => lost));
+    assert.equal(outcome.outcome, 'ownership_lost');
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.phase, 'cleanup_pending');
+});
