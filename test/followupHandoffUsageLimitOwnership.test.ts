@@ -28,6 +28,8 @@ import { up } from '../packages/core/src/db/migrations/20261017000000_add_pr_fol
  * - Unpublished edits retained beside a scheduled retry are never published:
  *   the requeue's CANCELLED state is no user cancellation, and neither an
  *   operator's authorization nor resumption of such a hold publishes them.
+ * - Unpublished edits beside an unconfirmed retry are held for an operator
+ *   before collection, by standalone recovery and inline adoption alike.
  */
 
 const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
@@ -452,4 +454,70 @@ test('an operator resuming a retry-owned cancellation hold hands the request to 
     );
     assert.deepEqual(adoption, { resumed: { outcome: 'settled' } });
     await assertRetryRemainsSoleOwner(h, baseHead);
+});
+
+// Review 6231027074 F42: the retry is persisted but the worker dies before
+// confirming it, with unpublished edits retained. The retry may already own
+// the request, so recovery holds before collecting the edits — through either
+// entry point, and ahead of a cancellation hold an operator could authorize.
+async function retainEditsBesideUnconfirmedRetry(h: Harness): Promise<string> {
+    const record = await seedHandoff(h);
+    const baseHead = git(h.fx.wt, 'rev-parse', 'HEAD');
+    await writeFile(path.join(h.fx.wt, 'widget.txt'), 'half-finished edit\n');
+    onQueueAdd = () => { databaseOutage = true; };
+    await hitUsageLimit(h, { followupHandoff: record });
+    databaseOutage = false;
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.settlement, SETTLEMENT_RETRY_SCHEDULING);
+    assert.equal(queued.size, 1, 'the retry was persisted');
+    return baseHead;
+}
+
+async function assertHeldWithEditsUnpublished(h: Harness, baseHead: string): Promise<void> {
+    assert.equal(git(h.fx.local, 'ls-remote', 'origin', `refs/heads/${BRANCH}`).split('\t')[0], baseHead, 'nothing was pushed');
+    assert.equal(git(h.fx.wt, 'rev-parse', 'HEAD'), baseHead, 'nothing was committed');
+    assert.match(git(h.fx.wt, 'status', '--porcelain'), /widget\.txt/, 'the retained edits stay in the worktree');
+    assert.equal(h.octokit.comments.filter(comment => comment.id !== 500 && !/Processing Delayed/.test(comment.body)).length, 0, 'no completion comment');
+    assert.equal(h.octokit.comments.find(comment => comment.id === 500)?.body, '🤖 Starting work on the follow-up', 'the starting comment is left alone');
+    assert.deepEqual(h.restored, [], 'the possibly retry-owned claim is not returned');
+    assert.equal(h.scheduled.length, 0);
+    const held = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(held?.status, HANDOFF_AWAITING_OPERATOR);
+    assert.equal(held?.status_reason, 'usage_limit_retry_unconfirmed');
+    assert.equal(held?.phase, 'agent_exited');
+    assert.equal(held?.commit_hash ?? null, null);
+    assert.equal(held?.settlement, SETTLEMENT_RETRY_SCHEDULING, 'the unresolved owner stays durable');
+    const again = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(again.published, 0, 'a later pass publishes nothing either');
+    assert.deepEqual(h.restored, []);
+}
+
+test('retained edits beside an unconfirmed retry are held by standalone recovery, never collected or published', async () => {
+    const h = await createHarness();
+    const baseHead = await retainEditsBesideUnconfirmedRetry(h);
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.errors, 0);
+    assert.equal(summary.awaitingOperator, 1);
+    assert.equal(summary.published, 0);
+    await assertHeldWithEditsUnpublished(h, baseHead);
+});
+
+test('retained edits beside an unconfirmed retry are held by inline adoption, never collected or published', async () => {
+    const h = await createHarness();
+    const baseHead = await retainEditsBesideUnconfirmedRetry(h);
+    const [retry] = [...queued.values()];
+    const adoption = await adoptPredecessorFollowupHandoff(
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: retry.id, log: silentLog, lockToken: `${retry.id}-token` },
+        h.deps as never,
+    );
+    assert.deepEqual(adoption, { resumed: { outcome: 'awaiting_operator', reason: 'usage_limit_retry_unconfirmed' } });
+    await assertHeldWithEditsUnpublished(h, baseHead);
+});
+
+test('a cancelled task beside an unconfirmed retry is held as unconfirmed, not as an authorizable user cancellation', async () => {
+    const h = await createHarness();
+    const baseHead = await retainEditsBesideUnconfirmedRetry(h);
+    h.stateManager.states.set('task-1', 'cancelled');
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.awaitingOperator, 1);
+    await assertHeldWithEditsUnpublished(h, baseHead);
 });

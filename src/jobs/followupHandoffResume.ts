@@ -433,10 +433,6 @@ async function finishRetryOwnedClaims(params: ResumeFollowupHandoffParams, recor
 }
 
 async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
-    // The worker died around the queue add: the retry may own the comments,
-    // so returning them could run the request twice. Fail closed for an
-    // operator, who releases the handoff or resumes it to return them.
-    if (record.settlement === SETTLEMENT_RETRY_SCHEDULING) return holdForOperator(params, record, 'usage_limit_retry_unconfirmed');
     // Cancellation or lease loss may land while the Git evidence or the notice
     // request is awaited: publication re-checks both before its mutation, and
     // they are re-checked again before restoring the claimed comments, or a
@@ -584,6 +580,13 @@ export async function resumeFollowupHandoff(params: ResumeFollowupHandoffParams)
     // an operator's authorization of such a hold grants no publication: the
     // retained edits stay in the worktree while the retry runs the request.
     if (retryOwnsClaims(record) && record.phase !== 'cleanup_pending') return finishRetryOwnedClaims(params, record);
+    // The worker died around the retry's queue add: the retry may already own
+    // the request, so neither retained edits nor the claimed comments may be
+    // published, committed or returned — either would run it twice. Held
+    // before any collection (and before a cancellation hold an operator could
+    // authorize) until an operator resolves the owner: release if the retry
+    // exists, or resume to make this attempt the owner again.
+    if (record.settlement === SETTLEMENT_RETRY_SCHEDULING && record.phase !== 'cleanup_pending') return holdForOperator(params, record, 'usage_limit_retry_unconfirmed');
     if (record.phase !== 'cleanup_pending') {
         // User cancellation is authoritative: never publish without explicit operator authorization.
         const hold = await cancellationHold(params, record);
