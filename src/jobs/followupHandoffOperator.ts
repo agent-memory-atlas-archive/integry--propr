@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { inspectTaskContainerLivenessForTask } from '@propr/core';
 import { adoptPRProcessingLock, releasePRProcessingLock } from './prProcessingLock.js';
 import {
-    containerIdentityConflict, recordFailedClosed, resolveRecoveryDeps,
-    type FollowupHandoffRecoveryDeps, type ResolvedRecoveryDeps, type TaskContainerInspection,
+    containerIdentityConflict, recordFailedClosed, resolveHandoffRedis, resolveRecoveryDeps,
+    type FollowupHandoffRecoveryDeps, type HandoffRedis, type ResolvedRecoveryDeps, type TaskContainerInspection,
 } from './followupHandoffDeps.js';
 import {
     advanceFollowupHandoff, loadFollowupHandoff, loadFollowupHandoffs, parseClaimedComments, parseSourceTaskIds, recordCancelledClaims,
@@ -16,10 +16,60 @@ import type { FollowupHandoffGitOps } from './followupHandoffGitOps.js';
  * Operator actions over durable follow-up publication handoffs, exposed
  * through the admin API and the packaged CLI. None of them delete retained
  * worktrees or commits, and every mutation serializes under the pull request's
- * processing lease with the recorded agent proven gone first.
+ * processing lease against the row re-read under it; release additionally
+ * requires the recorded agent proven gone first.
  */
 
-/** Re-arms a cancelled, operator-held handoff for publication under explicit operator authority. */
+type OperatorLeaseResult<T> = { value: T } | { refused: 'lease_held_by_live_writer' | 'superseded' };
+
+/**
+ * Runs an operator mutation under the pull request's processing lease, taken
+ * over only from the handoff's recorded token, against the row re-read under
+ * that lease. Authorization, resume and release all take it, so none of them
+ * can change the handoff while another is between its checks and its
+ * worktree or database mutations; a row that moved on since the caller read
+ * it is refused as superseded instead of acted on from the stale snapshot.
+ */
+async function underOperatorLease<T>(
+    record: FollowupHandoffRecord,
+    deps: { store: FollowupHandoffStoreDeps; redis: HandoffRedis },
+    action: string,
+    run: (fresh: FollowupHandoffRecord) => Promise<T>,
+): Promise<OperatorLeaseResult<T>> {
+    const successorToken = `handoff-${action}:${record.incarnation}:${randomUUID()}`;
+    const adoption = await adoptPRProcessingLock(deps.redis, record.lock_key, {
+        predecessorToken: record.lock_token, successorToken,
+    });
+    if (adoption !== 'adopted') return { refused: 'lease_held_by_live_writer' };
+    try {
+        const fresh = await loadFollowupHandoff(deps.store, record);
+        if (!fresh || fresh.task_id !== record.task_id || fresh.incarnation !== record.incarnation
+            || fresh.generation !== record.generation) {
+            return { refused: 'superseded' };
+        }
+        return { value: await run(fresh) };
+    } finally {
+        await releasePRProcessingLock(deps.redis, record.lock_key, successorToken);
+    }
+}
+
+async function withOperatorRedis<T>(
+    deps: FollowupHandoffRecoveryDeps,
+    run: (redis: HandoffRedis) => Promise<T>,
+): Promise<T> {
+    const { redis, ownRedis } = await resolveHandoffRedis(deps);
+    try {
+        return await run(redis);
+    } finally {
+        if (ownRedis) await redis.quit?.();
+    }
+}
+
+/**
+ * Re-arms a cancelled, operator-held handoff for publication under explicit
+ * operator authority. Null when the handoff is missing, not operator-held,
+ * changed concurrently, or its pull request lease is held by another writer.
+ */
 export async function authorizeCancelledFollowupHandoff(
     key: FollowupHandoffKey,
     deps: FollowupHandoffRecoveryDeps = {},
@@ -27,9 +77,11 @@ export async function authorizeCancelledFollowupHandoff(
     const store = deps.store ?? {};
     const record = await loadFollowupHandoff(store, key);
     if (!record || record.status !== HANDOFF_AWAITING_OPERATOR) return null;
-    return advanceFollowupHandoff(store, record, {
-        status: HANDOFF_ACTIVE, status_reason: 'operator_authorized', operator_authorized: 1,
-    });
+    const result = await withOperatorRedis(deps, redis => underOperatorLease(record, { store, redis }, 'authorize',
+        fresh => advanceFollowupHandoff(store, fresh, {
+            status: HANDOFF_ACTIVE, status_reason: 'operator_authorized', operator_authorized: 1,
+        })));
+    return 'value' in result ? result.value : null;
 }
 
 export interface OperatorResumeResult { resumed: boolean; reason?: string }
@@ -54,11 +106,13 @@ export async function resumeOperatorHeldFollowupHandoff(
     }
     // An unconfirmed usage-limit retry is resolved by this decision: the
     // operator found no retry job, so resuming returns the request to the queue.
-    const advanced = await advanceFollowupHandoff(store, record, {
-        status: HANDOFF_ACTIVE, status_reason: 'operator_resumed',
-        ...(record.settlement === SETTLEMENT_RETRY_SCHEDULING ? { settlement: null } : {}),
-    });
-    return advanced ? { resumed: true } : { resumed: false, reason: 'superseded' };
+    const result = await withOperatorRedis(deps, redis => underOperatorLease(record, { store, redis }, 'resume',
+        fresh => advanceFollowupHandoff(store, fresh, {
+            status: HANDOFF_ACTIVE, status_reason: 'operator_resumed',
+            ...(fresh.settlement === SETTLEMENT_RETRY_SCHEDULING ? { settlement: null } : {}),
+        })));
+    if (!('value' in result)) return { resumed: false, reason: result.refused };
+    return result.value ? { resumed: true } : { resumed: false, reason: 'superseded' };
 }
 
 /**
@@ -141,35 +195,32 @@ export async function releaseFollowupHandoffRecord(
             // explicit stop procedure must settle the agent first.
             return { released: false, reason: 'liveness_unavailable' };
         }
-        const successorToken = `handoff-release:${record.incarnation}:${randomUUID()}`;
-        const adoption = await adoptPRProcessingLock(resolved.redis, record.lock_key, {
-            predecessorToken: record.lock_token, successorToken,
-        });
-        if (adoption !== 'adopted') return { released: false, reason: 'lease_held_by_live_writer' };
-        try {
-            const claimsRefusal = await cancelledClaimsRefusal(record, resolved);
+        // The checks above read an unlocked snapshot: a concurrent
+        // authorization or resume may re-arm the handoff before this lease is
+        // taken, so every worktree mutation acts on the row re-read under it.
+        const result = await underOperatorLease(record, resolved, 'release', async fresh => {
+            const claimsRefusal = await cancelledClaimsRefusal(fresh, resolved);
             if (claimsRefusal) return { released: false, reason: claimsRefusal };
-            const settled = await resolved.git.releaseSettledWorktree(record.local_repo_path, record.branch_name, record.worktree_path);
+            const settled = await resolved.git.releaseSettledWorktree(fresh.local_repo_path, fresh.branch_name, fresh.worktree_path);
             if (!settled && !options.force) {
                 return { released: false, reason: 'worktree_holds_unpublished_work' };
             }
             if (!settled && options.force) {
-                const attachment = await resolved.git.worktreeAttachment(record.worktree_path, record.branch_name);
-                if (attachment === 'attached') await resolved.git.detachWorktreeHead(record.worktree_path);
+                const attachment = await resolved.git.worktreeAttachment(fresh.worktree_path, fresh.branch_name);
+                if (attachment === 'attached') await resolved.git.detachWorktreeHead(fresh.worktree_path);
             }
             // Permission to attempt the release is not proof it happened: a
             // removed directory whose Git registration survives still holds
             // the branch, and admission ignores a released row. The
             // repository's own registrations must show the branch free.
-            const refusal = await branchReleaseRefusal(resolved.git, record);
+            const refusal = await branchReleaseRefusal(resolved.git, fresh);
             if (refusal) return { released: false, reason: refusal };
-            const advanced = await advanceFollowupHandoff(resolved.store, record, {
+            const advanced = await advanceFollowupHandoff(resolved.store, fresh, {
                 status: HANDOFF_RELEASED, status_reason: options.force ? 'released_by_operator_force' : 'released_by_operator',
             });
             return { released: Boolean(advanced), reason: advanced ? undefined : 'superseded' };
-        } finally {
-            await releasePRProcessingLock(resolved.redis, record.lock_key, successorToken);
-        }
+        });
+        return 'value' in result ? result.value : { released: false, reason: result.refused };
     } finally {
         if (resolved.ownRedis) await resolved.redis.quit?.();
     }

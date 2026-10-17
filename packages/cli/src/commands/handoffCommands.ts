@@ -75,7 +75,7 @@ export function handoffErrorMessage(error: unknown): string {
       return "The retained work was cancelled by the user. Re-run with --authorize-cancelled to explicitly authorize publishing it.";
     }
     if (code === "cancellation_authorization_unavailable") {
-      return "Cancellation authorization was not granted: the handoff is missing, not operator-held, or changed. Inspect it first.";
+      return "Cancellation authorization was not granted: the handoff is missing, not operator-held, changed, or its pull request lease is held by another writer. Inspect it first.";
     }
     if (code === "worktree_holds_unpublished_work") {
       return "Release refused: the retained worktree still holds unpublished work. Inspect it, then re-run with --force to detach anyway (files and commits are kept).";

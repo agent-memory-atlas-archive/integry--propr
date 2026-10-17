@@ -626,7 +626,7 @@ test('F6: cancellation during recovery halts before the push and preserves the h
     assert.equal(held?.status_reason, 'cancelled_by_user');
 
     // Explicit operator authorization publishes the preserved work exactly once.
-    assert.ok(await authorizeCancelledFollowupHandoff(KEY, { store: { database } }));
+    assert.ok(await authorizeCancelledFollowupHandoff(KEY, { store: { database }, redis: h.redis }));
     const second = await recoverInterruptedFollowupHandoffs(h.deps);
     assert.equal(second.published, 1);
     assert.equal(h.counters.pushes, 1);
@@ -663,7 +663,7 @@ test('F8: resume re-arms a repaired operator-held handoff; cancellation still ne
     await agentEdit(h.fx);
     await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_missing' });
 
-    const reactivated = await resumeOperatorHeldFollowupHandoff(KEY, { store: { database } });
+    const reactivated = await resumeOperatorHeldFollowupHandoff(KEY, { store: { database }, redis: h.redis });
     assert.deepEqual(reactivated, { resumed: true });
     const rearmed = await loadFollowupHandoff({ database }, KEY);
     assert.equal(rearmed?.status, HANDOFF_ACTIVE);
@@ -675,7 +675,7 @@ test('F8: resume re-arms a repaired operator-held handoff; cancellation still ne
     // A cancellation hold refuses the plain resume and demands explicit authorization.
     const cancelled = await seedHandoff(h, { taskId: 'task-2' });
     await advanceFollowupHandoff({ database }, cancelled, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' });
-    const refused = await resumeOperatorHeldFollowupHandoff(KEY, { store: { database } });
+    const refused = await resumeOperatorHeldFollowupHandoff(KEY, { store: { database }, redis: h.redis });
     assert.deepEqual(refused, { resumed: false, reason: 'requires_cancellation_authorization' });
     assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
 });

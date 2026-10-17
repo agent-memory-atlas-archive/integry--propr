@@ -82,20 +82,21 @@ export async function queueRestoredCommentFollowup(record: FollowupHandoffRecord
     }, { jobId: `pr-comments-batch-${owner}-${repo}-${record.pull_request}-handoff-${record.incarnation}`, delay: 3000 });
 }
 
+/** The supplied Redis client, or a new one the caller owns and must quit. */
+export async function resolveHandoffRedis(deps: Pick<FollowupHandoffRecoveryDeps, 'redis'>): Promise<{ redis: HandoffRedis; ownRedis: boolean }> {
+    if (deps.redis) return { redis: deps.redis, ownRedis: false };
+    // Recovery must read the same Redis the workers use for leases and
+    // pending comments: the shared runtime configuration carries the URL,
+    // credentials, TLS and database selection, not just host and port.
+    // (Lazy imports: test suites replace @propr/core with enumerated mocks.)
+    const [{ Redis }, { buildRedisRuntimeConfig }] = await Promise.all([import('ioredis'), import('@propr/core')]);
+    const { url, options } = buildRedisRuntimeConfig();
+    return { redis: (url ? new Redis(url, options) : new Redis(options)) as unknown as HandoffRedis, ownRedis: true };
+}
+
 export async function resolveRecoveryDeps(deps: FollowupHandoffRecoveryDeps): Promise<ResolvedRecoveryDeps> {
     const log = deps.log ?? logger as unknown as LoggerLike;
-    let redis = deps.redis;
-    let ownRedis = false;
-    if (!redis) {
-        // Recovery must read the same Redis the workers use for leases and
-        // pending comments: the shared runtime configuration carries the URL,
-        // credentials, TLS and database selection, not just host and port.
-        // (Lazy imports: test suites replace @propr/core with enumerated mocks.)
-        const [{ Redis }, { buildRedisRuntimeConfig }] = await Promise.all([import('ioredis'), import('@propr/core')]);
-        const { url, options } = buildRedisRuntimeConfig();
-        redis = (url ? new Redis(url, options) : new Redis(options)) as unknown as HandoffRedis;
-        ownRedis = true;
-    }
+    const { redis, ownRedis } = await resolveHandoffRedis(deps);
     let octokit: Promise<HandoffOctokit> | undefined;
     const getOctokit = deps.getOctokit
         ?? (() => octokit ??= getAuthenticatedOctokit() as unknown as Promise<HandoffOctokit>);

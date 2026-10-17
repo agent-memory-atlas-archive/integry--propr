@@ -41,7 +41,7 @@ export const ADMIN_ROUTE_DOCS: Record<string, RouteDoc> = {
       200: { description: 'The keyed pass ran; `summary` counts its outcome and `status` is the state afterwards.', schema: FollowupHandoffResumeResult },
       400: { description: 'Invalid target or non-boolean flag.' },
       404: { description: 'No handoff is recorded for the pull request (code `not_found`).' },
-      409: { description: 'The handoff cannot be resumed. `code` names why: `requires_cancellation_authorization`, `cancellation_authorization_unavailable`, `released` or `superseded`.' },
+      409: { description: 'The handoff cannot be resumed. `code` names why: `requires_cancellation_authorization`, `cancellation_authorization_unavailable` (also returned while another writer holds the PR lease), `lease_held_by_live_writer`, `released` or `superseded`.' },
     },
   },
   'POST /api/admin/followup-handoffs/:owner/:repo/:pr/release': {
@@ -55,7 +55,7 @@ export const ADMIN_ROUTE_DOCS: Record<string, RouteDoc> = {
       200: { description: 'The branch is free and the record retired.', schema: FollowupHandoffReleaseResult },
       400: { description: 'Invalid target or non-boolean flag.' },
       404: { description: 'No handoff is recorded for the pull request (code `not_found`).' },
-      409: { description: 'Refused; `reason` names why: `agent_still_running`, `liveness_unavailable`, `lease_held_by_live_writer`, `worktree_holds_unpublished_work`, `branch_still_registered`, `worktree_registrations_unavailable` or `cancelled_claims_withdrawal_failed`.', schema: FollowupHandoffReleaseResult },
+      409: { description: 'Refused; `reason` names why: `agent_still_running`, `liveness_unavailable`, `lease_held_by_live_writer`, `worktree_holds_unpublished_work`, `branch_still_registered`, `worktree_registrations_unavailable`, `cancelled_claims_withdrawal_failed` or `superseded` (the handoff changed concurrently, for example an operator re-armed it).', schema: FollowupHandoffReleaseResult },
     },
   },
 };

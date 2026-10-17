@@ -301,7 +301,7 @@ test('usage-limit crash window: a death around the queue add fails closed, and a
     assert.match(status.nextAction, /usage-limit retry job/);
 
     // The operator found no retry job and resumes: the request returns exactly once.
-    assert.deepEqual(await resumeOperatorHeldFollowupHandoff(KEY, { store: { database } } as never), { resumed: true });
+    assert.deepEqual(await resumeOperatorHeldFollowupHandoff(KEY, h.deps as never), { resumed: true });
     const resumed = await recoverInterruptedFollowupHandoffs(h.deps);
     assert.equal(resumed.noChanges, 1);
     assert.deepEqual(h.restored, [11]);

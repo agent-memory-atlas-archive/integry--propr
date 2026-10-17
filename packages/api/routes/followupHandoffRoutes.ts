@@ -175,7 +175,7 @@ export function createFollowupHandoffRoutes(deps: FollowupHandoffRouteDeps) {
       if (authorizeCancelled) {
         const record = await deps.authorizeCancelledFollowupHandoff(key);
         if (!record) {
-          res.status(409).json({ error: 'The handoff is missing, not operator-held, or changed; cancellation authorization was not granted', code: 'cancellation_authorization_unavailable' });
+          res.status(409).json({ error: 'The handoff is missing, not operator-held, changed, or its pull request lease is held by another writer; cancellation authorization was not granted', code: 'cancellation_authorization_unavailable' });
           return;
         }
       } else {

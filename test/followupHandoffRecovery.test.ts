@@ -488,7 +488,7 @@ test('user cancellation is authoritative: nothing publishes without explicit ope
     assert.ok(existsSync(path.join(h.fx.wt, 'feature.txt')), 'cancelled work is preserved');
 
     // Explicit operator authorization publishes the preserved work exactly once.
-    const authorized = await authorizeCancelledFollowupHandoff(KEY, { store: { database } });
+    const authorized = await authorizeCancelledFollowupHandoff(KEY, { store: { database }, redis: h.redis });
     assert.equal(authorized?.status, HANDOFF_ACTIVE);
     const second = await recoverInterruptedFollowupHandoffs(h.deps);
     assert.equal(second.published, 1);
