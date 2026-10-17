@@ -65,6 +65,36 @@ async function expectFullWidthTitles(list: Locator) {
   expect(await list.locator('xpath=..').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
 }
 
+/**
+ * Font-independent height check for the ~500-character plan row. Line counts depend on which font renders
+ * (Inter is a web font; fallbacks wrap the same title to 11-15 lines here), so instead of a fixed pixel
+ * height the title is compared with a hidden copy wrapped at 60% of the row's copy width, the most the
+ * old layout left it once repository metadata took its 40%. The row must also be only title + metadata line +
+ * padding, so nothing beside the title can stretch it.
+ */
+async function expectCompactLongRow(list: Locator) {
+  const row = list.getByRole('option').nth(1);
+  const metrics = await row.getByText(longTitle, { exact: true }).evaluate(title => {
+    const li = title.closest('li')!;
+    const style = getComputedStyle(li);
+    // The row's copy width: from where the title starts to the row's inner right edge.
+    const copyWidth = li.getBoundingClientRect().right - parseFloat(style.paddingRight) - parseFloat(style.borderRightWidth)
+      - title.getBoundingClientRect().left;
+    const copy = title.cloneNode(true) as HTMLElement;
+    copy.style.cssText = `position:absolute;visibility:hidden;width:${copyWidth * 0.6}px`;
+    title.parentElement!.appendChild(copy);
+    const squeezedHeight = copy.getBoundingClientRect().height;
+    copy.remove();
+    return {
+      titleHeight: title.getBoundingClientRect().height, squeezedHeight, rowHeight: li.getBoundingClientRect().height,
+      metaHeight: li.querySelector('[data-testid="global-search-result-meta"]')!.getBoundingClientRect().height,
+      padding: parseFloat(style.paddingTop) + parseFloat(style.paddingBottom),
+    };
+  });
+  expect(metrics.titleHeight).toBeLessThan(metrics.squeezedHeight * 0.75);
+  expect(Math.abs(metrics.rowHeight - (metrics.titleHeight + metrics.metaHeight + metrics.padding))).toBeLessThanOrEqual(1);
+}
+
 const expectNoPageOverflow = (page: Page) => expect(page.evaluate(() =>
   document.documentElement.scrollWidth <= window.innerWidth)).resolves.toBe(true);
 
@@ -73,9 +103,7 @@ test('long plan and task titles use the full results-row width at desktop size',
   await expectFullWidthTitles(list);
   await expectNoPageOverflow(page);
 
-  // The 500-character plan row stays far shorter than the ~452px rows the side-by-side layout produced.
-  const longRow = (await list.getByRole('option').nth(1).boundingBox())!;
-  expect(longRow.height).toBeLessThan(260);
+  await expectCompactLongRow(list);
 
   // Keyboard, hover and the preview still drive the one linear list.
   const preview = palette.getByTestId('global-search-preview');
@@ -119,6 +147,7 @@ for (const width of [320, 390]) {
     await palette.getByTestId('global-search-preview').locator('xpath=..').evaluate(el => { el.style.display = 'none'; });
     expect(Math.round((await list.boundingBox())!.width)).toBe(width - 34);
     await expectFullWidthTitles(list);
+    await expectCompactLongRow(list);
     await input.press('ArrowDown');
     await expect(list.getByRole('option').nth(1)).toHaveAttribute('aria-selected', 'true');
     await captureTarget(palette, `global-search-row-layout-${width}`);
