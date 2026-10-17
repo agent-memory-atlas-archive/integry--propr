@@ -93,19 +93,43 @@ installation still resolves the public dependency ranges inherited from stable
 packaging. This path does not promise byte-for-byte reproducibility across
 Node/npm toolchains or frozen downstream dependency resolution.
 
-For automated validation in a future prepare-only CI job, use the same command
-from a manual dispatch on `integry/propr` main, with full-history source checkout,
-no persisted checkout credentials, `contents: read`, and no release/npm/Docker
-secrets. The helper requires `GITHUB_SHA` to equal the explicit trusted main SHA
-and `GITHUB_REF=refs/heads/main` for GitHub Actions. Upload the completed directory
-as a run-specific artifact, not a release or npm package. No new CI workflow is
-added here; the supported entry point is the manual command above.
+## Prepare in CI (Preview CLI Bundle workflow)
+
+The manual **Preview CLI Bundle** workflow
+(`.github/workflows/preview-cli-bundle.yml`) runs the same command. Dispatch it
+from `main` with `source_revision` and the three digest-pinned `app_image`,
+`ui_image` and `agent_image` references emitted by the Preview Runtime Images
+`publish`/`publish-agent` runs. The workflow run commit (`github.sha`) is
+`TRUSTED_MAIN`.
+
+Before any source-revision code runs, the workflow's own trusted-main helper
+(`scripts/preview-cli-workflow.mjs`, executed from a separate full-history
+checkout of `github.sha`) refuses anything but `workflow_dispatch` on
+`refs/heads/main` in `integry/propr`, malformed SHAs, mutable/mismatched/
+non-digest image references, non-canonical origins, and a source that is not
+`TRUSTED_MAIN` or its ancestor. It writes the schema-v1 input with
+`JSON.stringify`. The exact source is then checked out (full history, no
+persisted credential), required to be clean, and its `origin/main` is pinned to
+`TRUSTED_MAIN` after proving the fetched canonical main contains it. The job uses
+only `contents: read` on linux/amd64 with Node 22 and the pinned `regctl`
+v0.11.5 installer; it has no environment, secret or publication step and keeps
+`GITHUB_REF`/`GITHUB_SHA` unchanged for the helper's own checks.
+
+After the build, the helper requires exactly one completed
+`dist-publish/preview/<version>/` directory containing only the tarball,
+`manifest.json`, `provenance.json` and a matching `SHA256SUMS` that bind the
+source, trusted main and three references. Only that directory is uploaded as
+the artifact `propr-cli-preview-<source_revision>-<run_id>` (60-day retention,
+`if-no-files-found: error`); any earlier failure skips the upload. The job
+summary lists the version, source and trusted-main revisions, tarball name and
+hash, manifest and provenance hashes, and the three runtime references.
 
 Tests use synthetic registry fixtures without live provider secrets:
 
 ```sh
 node --test test/previewCliPackage.test.mjs test/previewRuntimeImages.test.mjs test/previewAgentImage.test.mjs
 PROPR_CLI_PACKAGE_SMOKE=1 node --test test/previewCliPackage.test.mjs
+node --test test/previewCliWorkflow.test.mjs
 ```
 
 ## Fleet handoff and separate work
