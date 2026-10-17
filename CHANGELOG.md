@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recommended for plan generation and PR review. Gemini 3.8 Flash remains the
   Antigravity default. The bundled Antigravity CLI moves to 1.4.0, the first
   release that serves Argon. Existing agents gain the model on startup.
+- **Antigravity CLI model IDs**: ProPR now launches Gemini 4 Argon, Claude
+  Opus 5.5, Claude Sonnet 5.5 and GPT-OSS 120B with the IDs `agy models` lists
+  (for example `gemini-4-argon-high` and `claude-opus-5-5-high`) instead of
+  display names such as `Gemini 4 Argon (High)`. Runs that report either form
+  are still matched to the requested model.
 
 ### Changed
 

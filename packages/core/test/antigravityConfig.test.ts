@@ -151,7 +151,7 @@ test('Antigravity execution lets agy read the prompt from non-TTY stdin', () => 
         assert.ok(!args.includes('--yolo'));
         assert.ok(!args.includes('--skip-trust'));
         assert.ok(args.includes('--model'));
-        assert.equal(args[args.indexOf('--model') + 1], 'Gemini 4 Argon (Medium)');
+        assert.equal(args[args.indexOf('--model') + 1], 'gemini-4-argon-medium');
     });
 });
 
@@ -992,11 +992,11 @@ test('Antigravity compatibility aliases, review values and custom labels retain 
     for (const [label, id, cli] of [
         ['antigravity-flash38-high', 'antigravity-gemini-3.8-flash-high', 'gemini-3.8-flash-high'],
         // CLI 1.4.0 retired Gemini 3.1 Pro; saved Pro routes keep their effort on Argon.
-        ['antigravity-pro-high', 'antigravity-gemini-3.1-pro-high', 'Gemini 4 Argon (High)'],
-        ['antigravity-pro-low', 'antigravity-gemini-3.1-pro-low', 'Gemini 4 Argon (Low)'],
-        ['antigravity-argon-high', 'antigravity-gemini-4-argon-high', 'Gemini 4 Argon (High)'],
-        ['antigravity-opus46-thinking', 'antigravity-claude-opus-4.6-thinking', 'Claude Opus 5.5 (High)'],
-        ['antigravity-sonnet46-thinking', 'antigravity-claude-sonnet-4.6-thinking', 'Claude Sonnet 5.5 (High)'],
+        ['antigravity-pro-high', 'antigravity-gemini-3.1-pro-high', 'gemini-4-argon-high'],
+        ['antigravity-pro-low', 'antigravity-gemini-3.1-pro-low', 'gemini-4-argon-low'],
+        ['antigravity-argon-high', 'antigravity-gemini-4-argon-high', 'gemini-4-argon-high'],
+        ['antigravity-opus46-thinking', 'antigravity-claude-opus-4.6-thinking', 'claude-opus-5-5-high'],
+        ['antigravity-sonnet46-thinking', 'antigravity-claude-sonnet-4.6-thinking', 'claude-sonnet-5-5-high'],
     ]) {
         assert.equal(resolveModelAlias(label), id);
         assert.deepEqual(await resolveLlmLabel(label), { agentAlias: config.alias, model: id });
@@ -1025,8 +1025,8 @@ test('retired Gemini 3.1 Pro label and saved ID run on Gemini 4 Argon', async t 
     assert.equal(resolveModelAlias('antigravity-pro'), argon);
     assert.deepEqual(await resolveLlmLabel('antigravity-pro'), { agentAlias: config.alias, model: argon });
     assert.deepEqual(await resolveLlmLabel('my-agy-pro'), { agentAlias: config.alias, model: argon });
-    assert.equal(toAntigravityCliModelId('antigravity-gemini-3.1-pro'), 'Gemini 4 Argon (Medium)');
-    assert.equal(toAntigravityCliModelId('antigravity-gemini-3.1-pro', 'high'), 'Gemini 4 Argon (High)');
+    assert.equal(toAntigravityCliModelId('antigravity-gemini-3.1-pro'), 'gemini-4-argon-medium');
+    assert.equal(toAntigravityCliModelId('antigravity-gemini-3.1-pro', 'high'), 'gemini-4-argon-high');
     assert.equal(getModelShortName('antigravity-gemini-3.1-pro'), 'Gemini 4 Argon');
     assert.equal(getModelHardLimit('antigravity-gemini-3.1-pro'), 980000);
 });
@@ -1081,7 +1081,7 @@ test('Antigravity preserves explicit effort when merging base-only and effort-be
     try {
         for (const [model, requestedCliModel, wrongEffort] of [
             ['antigravity-gemini-3.8-flash', 'gemini-3.8-flash-low', 'gemini-3.8-flash-high'],
-            ['antigravity-claude-sonnet-5.5', 'Claude Sonnet 5.5 (Low)', 'Claude Sonnet 5.5 (High)'],
+            ['antigravity-claude-sonnet-5.5', 'claude-sonnet-5-5-low', 'claude-sonnet-5-5-high'],
         ]) {
             for (const stream of [true, false]) {
                 const output = (identity: string) => [
