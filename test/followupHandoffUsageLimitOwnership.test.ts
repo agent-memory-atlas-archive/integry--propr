@@ -30,6 +30,8 @@ import { up } from '../packages/core/src/db/migrations/20261017000000_add_pr_fol
  *   operator's authorization nor resumption of such a hold publishes them.
  * - Unpublished edits beside an unconfirmed retry are held for an operator
  *   before collection, by standalone recovery and inline adoption alike.
+ * - An operator release of that hold records that the retry owns the
+ *   request, so neither the release nor the retry's admission suppresses it.
  */
 
 const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
@@ -91,17 +93,17 @@ after(async () => {
 });
 
 const {
-    recordFollowupHandoff, advanceFollowupHandoff, loadFollowupHandoff, PR_FOLLOWUP_HANDOFFS_TABLE, HANDOFF_AWAITING_OPERATOR,
-    SETTLEMENT_RETRY_SCHEDULED, SETTLEMENT_RETRY_SCHEDULING,
+    recordFollowupHandoff, advanceFollowupHandoff, loadFollowupHandoff, loadCancelledClaimIds, PR_FOLLOWUP_HANDOFFS_TABLE,
+    PR_FOLLOWUP_CANCELLED_CLAIMS_TABLE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED, SETTLEMENT_RETRY_SCHEDULED, SETTLEMENT_RETRY_SCHEDULING,
 } = await import('../src/jobs/followupHandoffStore.js');
 const {
     recoverInterruptedFollowupHandoffs, adoptPredecessorFollowupHandoff, settleFollowupHandoffAfterFailure,
 } = await import('../src/jobs/followupHandoffRecovery.js');
-const { authorizeCancelledFollowupHandoff, resumeOperatorHeldFollowupHandoff } = await import('../src/jobs/followupHandoffOperator.js');
+const { authorizeCancelledFollowupHandoff, releaseFollowupHandoffRecord, resumeOperatorHeldFollowupHandoff } = await import('../src/jobs/followupHandoffOperator.js');
 const { createFollowupHandoffGitOps } = await import('../src/jobs/followupHandoffGitOps.js');
 const { handleJobError, UsageLimitError } = await import('../src/jobs/prCommentJobUtils.js');
 const {
-    checkpointExecutionHandoffUsageLimitRetry, markExecutionHandoffContainer, FollowupHandoffOwnershipLostError,
+    checkpointExecutionHandoffUsageLimitRetry, gatePredecessorHandoff, markExecutionHandoffContainer, FollowupHandoffOwnershipLostError,
 } = await import('../src/jobs/prCommentHandoffIntegration.js');
 
 type HandoffRecord = NonNullable<Awaited<ReturnType<typeof loadFollowupHandoff>>>;
@@ -246,6 +248,7 @@ const branchOf = (wt: string) => git(wt, 'branch', '--show-current');
 beforeEach(async () => {
     databaseOutage = false;
     await database(PR_FOLLOWUP_HANDOFFS_TABLE).delete();
+    await database(PR_FOLLOWUP_CANCELLED_CLAIMS_TABLE).delete();
     queued.clear();
     onQueueAdd = () => undefined;
 });
@@ -520,4 +523,43 @@ test('a cancelled task beside an unconfirmed retry is held as unconfirmed, not a
     const summary = await recoverInterruptedFollowupHandoffs(h.deps);
     assert.equal(summary.awaitingOperator, 1);
     await assertHeldWithEditsUnpublished(h, baseHead);
+});
+
+// Review 6231097252 F43: the operator verified the persisted retry exists and
+// force-releases the unconfirmed hold over the retained edits. The requeue
+// left the attempt CANCELLED, which must not read as a user cancellation: the
+// retry keeps its comments through the release and its own admission.
+test('force-releasing an unconfirmed retry hold keeps the existing retry as the request\'s one owner', async () => {
+    const h = await createHarness();
+    const baseHead = await retainEditsBesideUnconfirmedRetry(h);
+    h.stateManager.states.set('task-1', 'cancelled');
+    const withdrawn: number[] = [];
+    h.deps.withdrawRestoredComments = async (_record: unknown, claimed: Array<{ id: number }>) => { withdrawn.push(...claimed.map(entry => entry.id)); };
+    assert.equal((await recoverInterruptedFollowupHandoffs(h.deps)).awaitingOperator, 1);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, 'usage_limit_retry_unconfirmed');
+
+    assert.equal((await releaseFollowupHandoffRecord(KEY, { force: true }, h.deps as never)).released, true);
+    const released = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(released?.status, HANDOFF_RELEASED);
+    assert.equal(released?.settlement, SETTLEMENT_RETRY_SCHEDULED, 'the release persisted the retry as the owner');
+    assert.deepEqual(await loadCancelledClaimIds({ database }, KEY), [], 'no suppression was recorded');
+    assert.deepEqual(withdrawn, [], 'nothing was withdrawn as a cancellation');
+    assert.equal(git(h.fx.local, 'ls-remote', 'origin', `refs/heads/${BRANCH}`).split('\t')[0], baseHead, 'nothing was pushed');
+    assert.match(git(h.fx.wt, 'status', '--porcelain'), /widget\.txt/, 'the retained edits stay in the worktree');
+    assert.equal(branchOf(h.fx.wt), '', 'the branch is free for the retry');
+
+    // The existing retry reaches admission carrying the request.
+    const [retry] = [...queued.values()];
+    const commentsToProcess = (retry.data.comments ?? []).map(entry => ({ ...entry }));
+    assert.deepEqual(commentsToProcess.map(entry => entry.id), [11]);
+    const lockToken = `${retry.id}-token`;
+    assert.equal(await h.deps.redis.set(LOCK, lockToken, 'EX', 3600, 'NX'), 'OK');
+    const result = await gatePredecessorHandoff({
+        job: { name: 'processPullRequestComment', data: retry.data } as never,
+        ref: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7 },
+        taskId: retry.id, stateManager: h.stateManager as never, redisClient: h.deps.redis as never,
+        commentsToProcess: commentsToProcess as never, pickedUpComments: [], lockKey: LOCK, lockToken, correlatedLogger: silentLog as never,
+    });
+    assert.equal(result, undefined, 'the retry is admitted');
+    assert.deepEqual(commentsToProcess.map(entry => entry.id), [11], 'and keeps its request');
 });

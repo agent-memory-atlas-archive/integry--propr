@@ -8,7 +8,7 @@ import {
 import {
     advanceFollowupHandoff, inFollowupHandoffTransaction, loadFollowupHandoff, loadFollowupHandoffs, parseClaimedComments, parseSourceTaskIds,
     recordCancelledClaims, retryOwnsClaims, revokeCancelledClaims,
-    HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED, SETTLEMENT_RETRY_SCHEDULING,
+    HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED, SETTLEMENT_RETRY_SCHEDULED, SETTLEMENT_RETRY_SCHEDULING,
     type FollowupHandoffKey, type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
 } from './followupHandoffStore.js';
 import type { FollowupHandoffGitOps } from './followupHandoffGitOps.js';
@@ -176,6 +176,26 @@ async function cancelledClaimsRefusal(
 }
 
 /**
+ * Releasing an unconfirmed usage-limit retry is the operator's decision that
+ * the retry job exists and owns the request (resume is the decision that it
+ * does not). The requeue left this attempt CANCELLED, so without persisting
+ * that ownership first, the release and every later admission would read the
+ * attempt as a user cancellation and suppress the retry's own comments. Any
+ * suppression evidence this task recorded is revoked in the same transaction.
+ */
+async function confirmUnconfirmedRetryOwnership(
+    record: FollowupHandoffRecord,
+    store: FollowupHandoffStoreDeps,
+): Promise<FollowupHandoffRecord | null> {
+    if (record.settlement !== SETTLEMENT_RETRY_SCHEDULING) return record;
+    return inFollowupHandoffTransaction(store, async transactional => {
+        const confirmed = await advanceFollowupHandoff(transactional, record, { settlement: SETTLEMENT_RETRY_SCHEDULED });
+        if (confirmed) await revokeCancelledClaims(transactional, record);
+        return confirmed;
+    });
+}
+
+/**
  * Marks a handoff released so recovery stops attempting it. Never deletes the
  * worktree or any commits: it only detaches the worktree HEAD to free the
  * branch, and refuses even that while unpublished work exists unless the
@@ -185,7 +205,8 @@ async function cancelledClaimsRefusal(
  * The mutation runs only with the recorded agent proven gone and under the
  * pull request's processing lease, so it can never detach a live writer. A
  * cancelled request's claimed comments are withdrawn from the pending list
- * first; the release is refused until that withdrawal succeeds.
+ * first; the release is refused until that withdrawal succeeds. Releasing an
+ * unconfirmed usage-limit retry first records that the retry owns the request.
  */
 export async function releaseFollowupHandoffRecord(
     key: FollowupHandoffKey,
@@ -212,7 +233,9 @@ export async function releaseFollowupHandoffRecord(
         // The checks above read an unlocked snapshot: a concurrent
         // authorization or resume may re-arm the handoff before this lease is
         // taken, so every worktree mutation acts on the row re-read under it.
-        const result = await underOperatorLease(record, resolved, 'release', async fresh => {
+        const result = await underOperatorLease(record, resolved, 'release', async read => {
+            const fresh = await confirmUnconfirmedRetryOwnership(read, resolved.store);
+            if (!fresh) return { released: false, reason: 'superseded' };
             const claimsRefusal = await cancelledClaimsRefusal(fresh, resolved);
             if (claimsRefusal) return { released: false, reason: claimsRefusal };
             const settled = await resolved.git.releaseSettledWorktree(fresh.local_repo_path, fresh.branch_name, fresh.worktree_path);
@@ -259,7 +282,7 @@ function handoffNextAction(record: FollowupHandoffRecord, liveness: string): str
         return record.status_reason === 'cancelled_by_user'
             ? 'resume --authorize-cancelled to publish the cancelled work, or release to stop tracking it'
             : record.status_reason === 'usage_limit_retry_unconfirmed'
-                ? 'check the issue queue for the usage-limit retry job: release if it exists, or resume to return the request to the queue'
+                ? 'check the issue queue for the usage-limit retry job: release if it exists (the retry keeps the request; retained edits stay unpublished), or resume to return the request to the queue'
                 : 'repair the reported condition, then resume to re-arm recovery, or release to stop tracking it';
     }
     if (record.phase === 'cleanup_pending') return 'publication is complete; automatic recovery retries the branch release';

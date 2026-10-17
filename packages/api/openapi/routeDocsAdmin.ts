@@ -47,7 +47,7 @@ export const ADMIN_ROUTE_DOCS: Record<string, RouteDoc> = {
   'POST /api/admin/followup-handoffs/:owner/:repo/:pr/release': {
     operationId: 'releaseFollowupHandoff',
     summary: 'Release the handoff\'s branch from its retained worktree and retire the record',
-    description: 'Detaches the retained worktree\'s HEAD (keeping every file) so the branch is usable again, then marks the record released. Refuses while the bound agent is live or unverifiable, while another writer holds the PR lease, or when unpublished work remains — pass `force: true` to release despite unpublished work. Worktree files are never deleted.',
+    description: 'Detaches the retained worktree\'s HEAD (keeping every file) so the branch is usable again, then marks the record released. Refuses while the bound agent is live or unverifiable, while another writer holds the PR lease, or when unpublished work remains — pass `force: true` to release despite unpublished work. Releasing a `usage_limit_retry_unconfirmed` hold records that the usage-limit retry job exists and owns the request (settlement becomes `usage_limit_retry_scheduled`), so its comments are never suppressed as a cancellation; resume instead when no retry job exists. Worktree files are never deleted.',
     tags: ['Administration'],
     pathParams: FOLLOWUP_HANDOFF_PATH_PARAMS,
     requestBody: { schema: FollowupHandoffReleaseRequest, description: 'Optional flags; `{}` performs a safe release.' },
