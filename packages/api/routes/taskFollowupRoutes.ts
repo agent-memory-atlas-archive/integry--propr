@@ -5,7 +5,7 @@ import type { Request, Response } from 'express';
 import type { Knex } from 'knex';
 import type { Redis } from 'ioredis';
 import { issueQueue, getAuthenticatedOctokit, generateCorrelationId, logger, dispatchPostedFollowup } from '@propr/core';
-import { isPullRequestTask } from './pullRequestTaskIdentity.js';
+import { followupTargetsPullRequest, resolveFollowupThread, type FollowupTaskRecord } from './followupThread.js';
 import { validateTaskId, validateStringLength } from './validation.js';
 import { postIssueFollowup, type IssueFollowupDeps } from './taskIssueFollowup.js';
 
@@ -16,35 +16,9 @@ export interface TaskFollowupDeps extends IssueFollowupDeps {
   reviewAssignmentGate?: typeof commentAuthorMayFollowUp;
 }
 
-interface TaskRecord {
-  task_id: string;
-  repository: string;
-  issue_number: number;
-  pr_number?: number | null;
-  task_type: string;
-  replay_job_data?: unknown;
-}
+type TaskRecord = FollowupTaskRecord & { replay_job_data?: unknown };
 
-/**
- * Whether a follow-up continues work on a pull request. Without an explicit
- * target, a task that created a PR is followed up there; an implementation
- * task that never produced one is retried on its issue.
- */
-export function followupTargetsPullRequest(task: TaskRecord, targetsPullRequest: boolean): boolean {
-  return targetsPullRequest || Boolean(task.pr_number) || isPullRequestTask(task);
-}
-
-/**
- * Resolves the GitHub thread a follow-up comment is posted to. PR commands go
- * to the task's pull request; implementation tasks keep their source issue in
- * issue_number and the created PR in pr_number.
- */
-export function resolveFollowupThread(task: TaskRecord, targetsPullRequest: boolean): { number?: number; error: string } {
-  return followupTargetsPullRequest(task, targetsPullRequest)
-    // PR comment tasks record their pull request as the issue number; other tasks must have a PR of their own.
-    ? { number: task.pr_number ?? (isPullRequestTask(task) ? task.issue_number : undefined), error: 'Task does not have a valid GitHub pull request' }
-    : { number: task.issue_number, error: 'Task does not have valid GitHub issue information' };
-}
+export { followupTargetsPullRequest, resolveFollowupThread };
 
 async function followupBranch(
   octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>>,

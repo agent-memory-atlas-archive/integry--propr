@@ -22,6 +22,7 @@ async function createHistoryDatabase(): Promise<Knex> {
     table.text('repository');
     table.text('task_type');
     table.integer('issue_number');
+    table.integer('pr_number');
     table.text('correlation_id');
     table.text('initial_job_data');
     table.text('model_name');
@@ -117,6 +118,36 @@ test('task history redacts nested database history and task info without changin
     assert.deepEqual(Object.keys(body.history[0].metadata.nestedMetadata), ['[local preview omitted]']);
     assert.equal(body.usageMetrics, null);
     assert.deepEqual(body.usageMetricRecords, []);
+  } finally {
+    await database.destroy();
+  }
+});
+
+test('task history names the thread a follow-up for each stored task posts to', async () => {
+  const database = await createHistoryDatabase();
+  try {
+    await database('tasks').insert([
+      { task_id: 'issue-27-run', repository: 'acme/repo', task_type: 'issue', issue_number: 27, pr_number: 28 },
+      { task_id: 'issue-29-failed', repository: 'acme/repo', task_type: 'issue', issue_number: 29, pr_number: null },
+      { task_id: 'pr-comment-28', repository: 'acme/repo', task_type: 'pr-comment', issue_number: 28, pr_number: null },
+      { task_id: 'no-thread', repository: 'acme/repo', task_type: 'issue', issue_number: null, pr_number: null },
+    ]);
+    await database('task_history').insert(['issue-27-run', 'issue-29-failed', 'pr-comment-28', 'no-thread']
+      .map(task_id => ({ task_id, state: 'completed', timestamp: '2026-10-17T00:00:00.000Z' })));
+    const routes = createTaskHistoryRoutes({ db: database, redisClient: { get: async () => null } as unknown as RedisClientType, taskQueue: {} as never });
+    const targetOf = async (taskId: string) => {
+      const recorder = responseRecorder();
+      await routes.getTaskHistory({ params: { taskId } } as unknown as FlatRequest, recorder.response);
+      return (recorder.body() as { taskInfo: { number?: number; followupTarget?: unknown } }).taskInfo;
+    };
+
+    // The implementation that created PR #28 still reports its issue as the task's number.
+    const implementation = await targetOf('issue-27-run');
+    assert.equal(implementation.number, 27);
+    assert.deepEqual(implementation.followupTarget, { taskId: 'issue-27-run', repository: 'acme/repo', kind: 'pull_request', number: 28 });
+    assert.deepEqual((await targetOf('issue-29-failed')).followupTarget, { taskId: 'issue-29-failed', repository: 'acme/repo', kind: 'issue', number: 29 });
+    assert.deepEqual((await targetOf('pr-comment-28')).followupTarget, { taskId: 'pr-comment-28', repository: 'acme/repo', kind: 'pull_request', number: 28 });
+    assert.equal((await targetOf('no-thread')).followupTarget, undefined);
   } finally {
     await database.destroy();
   }

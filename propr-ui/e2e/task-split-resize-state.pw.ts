@@ -18,7 +18,8 @@ async function stub(page: Page, posts: string[]) {
   } }));
   await page.route(`**/api/task/${selectedRun}/history`, route => route.fulfill({ json: {
     history: [...detailsHistory, { state: 'COMPLETED', timestamp: ago(0) }],
-    taskInfo: { title: taskTitle, type: 'pr', number: 2664, issueNumber: 2664, repoOwner: 'integry', repoName: 'propr', modelName: 'gpt-6-astra' },
+    taskInfo: { title: taskTitle, type: 'pr', number: 2664, issueNumber: 2664, repoOwner: 'integry', repoName: 'propr', modelName: 'gpt-6-astra',
+      followupTarget: { taskId: selectedRun, repository: 'integry/propr', kind: 'pull_request', number: 2664 } },
   } }));
   await page.route(`**/api/task/${selectedRun}/file-changes`, route => route.fulfill({ json: {
     taskId: selectedRun, lastUpdated: new Date().toISOString(),
