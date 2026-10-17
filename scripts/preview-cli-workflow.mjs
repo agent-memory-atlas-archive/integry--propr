@@ -17,7 +17,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validatePreviewInput } from '../packages/cli/scripts/preview-package.mjs';
+import { createPreviewPackage, validatePreviewInput } from '../packages/cli/scripts/preview-package.mjs';
 import { sha256File } from './preview-runtime-images.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -101,9 +101,9 @@ export function verifyOutput({ root, input: inputPath, trustedMain, workspace = 
   const entries = existsSync(previewRoot) ? readdirSync(previewRoot) : [];
   if (entries.length !== 1) throw new Error(`Expected exactly one completed preview directory, found ${entries.length}`);
   const [version] = entries;
-  if (!new RegExp(`^${base.replaceAll('.', '\\.')}-preview\\.${input.sourceRevision}\\.[0-9a-f]{64}$`).test(version)) {
-    throw new Error(`Unexpected preview directory: ${version}`);
-  }
+  // Recompute the deterministic source/runtime-reference binding rather than
+  // trusting any 64-hex suffix the build left behind.
+  if (version !== createPreviewPackage(base, input).version) throw new Error(`Unexpected preview directory: ${version}`);
   const directory = join(previewRoot, version);
   const details = lstatSync(directory);
   if (!details.isDirectory() || details.isSymbolicLink()) throw new Error('Preview output must be a real directory');

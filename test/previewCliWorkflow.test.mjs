@@ -213,11 +213,11 @@ describe('preview CLI workflow output verification', () => {
   const source = 'd'.repeat(40);
   const trustedMain = 'e'.repeat(40);
   const sha = value => createHash('sha256').update(value).digest('hex');
-  const completed = (edit = () => {}) => {
+  const bound = createPreviewPackage('1.2.3', { schemaVersion: 1, repository: 'integry/propr', sourceRevision: source, images: images(source) }).version;
+  const completed = (edit = () => {}, version = bound) => {
     const root = fixture();
     mkdirSync(join(root, 'packages/cli'), { recursive: true });
     writeFileSync(join(root, 'packages/cli/package.json'), JSON.stringify({ version: '1.2.3' }));
-    const version = `1.2.3-preview.${source}.${'f'.repeat(64)}`;
     const directory = join(root, 'dist-publish/preview', version);
     mkdirSync(directory, { recursive: true });
     const tarball = `propr-cli-${version}.tgz`;
@@ -293,6 +293,11 @@ describe('preview CLI workflow output verification', () => {
     const other = { schemaVersion: 1, repository: 'integry/propr', sourceRevision: 'c'.repeat(40), images: images('c'.repeat(40)) };
     writeFileSync(wrongSource.input, JSON.stringify(other));
     assert.throws(() => verifyOutput({ root: wrongSource.root, input: wrongSource.input, trustedMain }), /Unexpected preview directory/);
+    // A self-consistent directory whose suffix is not the runtime-reference binding.
+    for (const suffix of ['f'.repeat(64), bound.slice(-64).replace(/.$/, c => (c === '0' ? '1' : '0'))]) {
+      const wrongBinding = completed(() => {}, `1.2.3-preview.${source}.${suffix}`);
+      assert.throws(() => verifyOutput({ root: wrongBinding.root, input: wrongBinding.input, trustedMain }), /Unexpected preview directory/);
+    }
   });
 
   test('CLI refusal writes no step outputs or summary, so the upload has no path', () => {
