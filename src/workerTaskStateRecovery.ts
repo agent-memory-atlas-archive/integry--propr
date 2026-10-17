@@ -59,6 +59,8 @@ export interface WorkerTaskStateRecoveryOptions {
     recoverGoals?: () => Promise<unknown>;
     /** Follow-up CI suspensions that outlived their task, under the same lease. */
     reconcileCiSuspensions?: () => Promise<unknown>;
+    /** Follow-up publication handoffs a worker restart interrupted, under the same lease. */
+    recoverFollowupHandoffs?: () => Promise<unknown>;
     /** Replacement attempts for orphaned tasks, and completion of interrupted replacement decisions. */
     replacement?: TaskReplacementService;
 }
@@ -314,6 +316,15 @@ export async function startWorkerTaskStateRecovery(
                     controller.signal,
                 );
                 logger.info(suspensionResult as Record<string, unknown>, 'Reconciled follow-up CI suspensions');
+            }
+            if (options.recoverFollowupHandoffs) {
+                const handoffResult = await runWithinDeadline(
+                    'Follow-up publication handoff recovery',
+                    options.recoverFollowupHandoffs,
+                    deadline - leaseReleaseBudgetMs,
+                    controller.signal,
+                );
+                logger.info(handoffResult as Record<string, unknown>, 'Recovered interrupted follow-up publication handoffs');
             }
             return true;
         } catch (error) {

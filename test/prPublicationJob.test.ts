@@ -184,8 +184,31 @@ const modules: Record<string, Record<string, unknown>> = {
     prTaskTitleHelpers: Object.fromEntries(['buildDeterministicPrTaskSubtitle', 'buildPrTaskTitle', 'buildPrTaskTitleContext', 'buildPrTaskTitleContextHistoryMetadata', 'getPrTaskWorkflowLabel', 'resolvePrTaskWorkflow'].map(name => [name, noOp])),
     prProcessingLock: {
         acquirePRProcessingLock: async (_redis: unknown, key: string) => { events.push(key); if (key === blockedLock) return false; onLockAcquired?.(); return true; },
+        acquireCurrentPRProcessingLock: async (_redis: unknown, { lockKey, onContended }: { lockKey: string; onContended: (key: string) => void }, resolveLockKey: () => Promise<string>) => {
+            for (;;) {
+                events.push(lockKey);
+                if (lockKey === blockedLock) { onContended(lockKey); return null; }
+                onLockAcquired?.();
+                let resolved: string;
+                try {
+                    resolved = await resolveLockKey();
+                } catch (error) {
+                    events.push(`release:${lockKey}`);
+                    throw error;
+                }
+                if (resolved === lockKey) return lockKey;
+                events.push(`release:${lockKey}`);
+                lockKey = resolved;
+            }
+        },
+        adoptPRProcessingLock: async () => 'adopted',
         ensurePRProcessingLockToken: async () => 'token', releasePRProcessingLock: async (_redis: unknown, key: string) => { events.push(`release:${key}`); },
         startPRProcessingLockHeartbeat: () => async () => { events.push('stop-heartbeat'); },
+    },
+    // Durable handoff recovery is covered by test/followupHandoffRecovery.test.ts.
+    prCommentHandoffIntegration: {
+        recordExecutionHandoff: noOp, markExecutionHandoffAgentExited: noOp, finalizeExecutionHandoff: noOp,
+        gatePredecessorHandoff: async () => undefined, settleExecutionHandoffAfterError: noOp,
     },
     prCommentCollisionRecovery: {
         createPRCommentTaskStateIfMissing: async (params: Parameters<typeof realRecovery.createPRCommentTaskStateIfMissing>[0]) => { if (realReentryHelpers) await realRecovery.createPRCommentTaskStateIfMissing(params); },

@@ -40,9 +40,10 @@ import {
 } from './prTaskTitleHelpers.js';
 import type { GitHubToken } from './githubTypes.js';
 import {
-    acquirePRProcessingLock, ensurePRProcessingLockToken, releasePRProcessingLock, startPRProcessingLockHeartbeat,
+    acquireCurrentPRProcessingLock, ensurePRProcessingLockToken, releasePRProcessingLock, startPRProcessingLockHeartbeat,
 } from './prProcessingLock.js';
 import { createPRCommentTaskStateIfMissing, evaluatePRCommentPreExecutionRecovery, handlePRCommentLockContention } from './prCommentCollisionRecovery.js';
+import { finalizeExecutionHandoff, gatePredecessorHandoff, markExecutionHandoffAgentExited, recordExecutionHandoff, settleExecutionHandoffAfterError } from './prCommentHandoffIntegration.js';
 import { stopOriginalPRReviewCycle } from './prContinuationReview.js';
 import { loadOriginalContributionDiscussion } from './prContributionDiscussion.js';
 import { PullRequestPublication } from './prPublication.js';
@@ -69,12 +70,6 @@ interface ValidationResult {
     unprocessedComments?: UnprocessedComment[];
     llm?: string | null;
     prCommentsForValidation?: PRComment[];
-}
-
-interface LockParams {
-    lockKey: string;
-    lockToken: string;
-    correlatedLogger: Logger;
 }
 
 async function getPrimaryLabels(): Promise<string[]> {
@@ -256,6 +251,10 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
         const githubToken = await octokit.auth({ type: 'installation' }) as GitHubToken;
         correlatedLogger.info({ worktreePath: state.worktreeInfo.worktreePath, gitTarget: publication.target, destination: publication.status }, 'Prepared PR publication destination');
 
+        // Durable handoff before the agent launches: a worker restart from here on
+        // leaves a record that recovery can adopt to finish the owed publication.
+        await recordExecutionHandoff({ state, job, ref: { repoOwner, repoName, pullRequestNumber }, taskId, correlationId, publication, llm, lockKey, lockToken, correlatedLogger });
+
         // Implementation is authorized and the publication destination is resolved, so
         // the validation of the head this task is about to replace is now obsolete.
         // Opt-in per repository; a failure there never stops the implementation.
@@ -309,6 +308,7 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
             reasoningLevel: job.data.reasoningLevel, repositoryWorkflow, applyRepositoryWorkflow: true,
         });
         state.claudeResult = claudeResult;
+        await markExecutionHandoffAgentExited(state);
 
         checkTerminalStateAfterExecution(await stateManager.getTaskState(taskId), taskId, correlatedLogger);
 
@@ -336,6 +336,8 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
         });
         if (!stopped) await handleUltrafixContinuation('fix', { job, stateManager, taskId, redisClient, repoOwner, repoName, pullRequestNumber, correlatedLogger, correlationId });
         await publication.finishCompletion();
+        // The owed commit, push and completion comment are published; retire the handoff.
+        await finalizeExecutionHandoff(state);
 
         return { status: postResult.partial ? 'partial' : 'complete', commit: postResult.commitHash, pullRequestNumber, claudeResult: { success: state.claudeResult.success } };
     });
@@ -345,29 +347,20 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
 export const processPullRequestCommentJob = (job: Job<CommentJobData>): Promise<JobResult> =>
     deferRepositoryWorkflowJob(job, () => withRunCostCap(pullRequestRunCostCapTarget(job), () => processAdmittedPRCommentJob(job)));
 
-async function acquireCurrentPRLock(
-    { lockKey, lockToken, correlatedLogger }: LockParams,
-    resolveLockKey: () => Promise<string>,
-): Promise<string | null> {
-    for (;;) {
-        if (!await acquirePRProcessingLock(redisClient, lockKey, lockToken)) {
-            correlatedLogger.info({ lockKey }, 'PR is currently being processed by another execution. Rescheduling...');
-            return null;
-        }
-        correlatedLogger.debug({ lockKey }, 'PR lock acquired');
-        let resolvedLockKey: string;
-        try {
-            resolvedLockKey = await resolveLockKey();
-        } catch (error) {
-            await releasePRProcessingLock(redisClient, lockKey, lockToken);
-            throw error;
-        }
-        if (resolvedLockKey === lockKey) return lockKey;
-        // Adoption may have become visible while acquiring the lease. Do no work
-        // under the continuation's own lease; acquire and revalidate the source.
-        await releasePRProcessingLock(redisClient, lockKey, lockToken);
-        lockKey = resolvedLockKey;
+/** Read-only review mode: deferral checks, then analysis without commits or pushes. */
+async function runReviewCommandMode(
+    params: ExecuteProcessingParams & { context: Awaited<ReturnType<typeof initializePRJobContext>> },
+    executionSignal: AbortSignal,
+): Promise<JobResult> {
+    const { job, context, taskId, stateManager, llm, state, lockToken } = params;
+    // Recovery can advance the continuation HEAD; gate its checks only after publication completes.
+    const ultrafixDeferral = await shouldDeferUltrafixReview(job, redisClient, context.correlatedLogger);
+    if (ultrafixDeferral) {
+        await restorePendingComments(context.pickedUpComments, { ...context, redisClient });
+        await stateManager.updateTaskState(taskId, TaskStates.COMPLETED, ultrafixReviewDeferralUpdate(ultrafixDeferral));
+        return { status: 'deferred', reason: 'ultrafix_waiting_for_exact_head_checks' };
     }
+    return runWithExecutionAbortSignal(executionSignal, () => executeReviewProcessing({ job, context, llm, taskId, stateManager, state, redisClient, validatePRAndComments }), hashTaskAttemptToken(lockToken));
 }
 
 async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<JobResult> {
@@ -390,7 +383,10 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
     const initialLockKey = await resolveLockKey();
     const lockToken = await ensurePRProcessingLockToken(job.data, correlationId, () => job.updateData(job.data));
 
-    const lockKey = await acquireCurrentPRLock({ lockKey: initialLockKey, lockToken, correlatedLogger }, resolveLockKey);
+    const lockKey = await acquireCurrentPRProcessingLock(redisClient, {
+        lockKey: initialLockKey, lockToken,
+        onContended: contendedKey => correlatedLogger.info({ lockKey: contendedKey }, 'PR is currently being processed by another execution. Rescheduling...'),
+    }, resolveLockKey);
     if (!lockKey) return handlePRCommentLockContention({ job, taskId, stateManager, redisClient, pickedUpComments: context.pickedUpComments, correlatedLogger });
 
     const recovery = await evaluatePRCommentPreExecutionRecovery({
@@ -399,6 +395,15 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
     });
     if (recovery.result) return recovery.result;
     const { preexistingState } = recovery;
+
+    // A recoverable predecessor's interrupted publication is finished under this
+    // same PR lease before any new worktree is prepared; a still-live or
+    // unverifiable predecessor reschedules this writer instead of racing it.
+    const predecessorGate = await gatePredecessorHandoff({
+        job, ref: { repoOwner, repoName, pullRequestNumber }, taskId, stateManager, redisClient,
+        pickedUpComments: context.pickedUpComments, lockKey, lockToken, correlatedLogger,
+    });
+    if (predecessorGate) return predecessorGate;
 
     const executionController = new AbortController();
     const stopLockHeartbeat = startPRProcessingLockHeartbeat({
@@ -434,14 +439,7 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
         }
         // Branch early for review mode — read-only analysis, no commits or pushes
         if (job.data.commandMode === 'review') {
-            // Recovery can advance the continuation HEAD; gate its checks only after publication completes.
-            const ultrafixDeferral = await shouldDeferUltrafixReview(job, redisClient, correlatedLogger);
-            if (ultrafixDeferral) {
-                await restorePendingComments(context.pickedUpComments, { ...context, redisClient });
-                await stateManager.updateTaskState(taskId, TaskStates.COMPLETED, ultrafixReviewDeferralUpdate(ultrafixDeferral));
-                return { status: 'deferred', reason: 'ultrafix_waiting_for_exact_head_checks' };
-            }
-            return await runWithExecutionAbortSignal(executionController.signal, () => executeReviewProcessing({ job, context, llm, taskId, stateManager, state, redisClient, validatePRAndComments }), hashTaskAttemptToken(lockToken));
+            return await runReviewCommandMode({ job, context, llm, taskId, stateManager, state, lockKey, lockToken }, executionController.signal);
         }
         return await runWithExecutionAbortSignal(executionController.signal, () => executeProcessing({ job, context, llm, taskId, stateManager, state, lockKey, lockToken }), hashTaskAttemptToken(lockToken));
     } catch (error) {
@@ -459,6 +457,12 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
         await failJob(error as Error);
         // Don't re-throw for user cancellations (not an error, just cancelled)
         const cancelledState = await stateManager.getTaskState(taskId);
+        // The handled failure delivered the owed comment and terminal state, so the
+        // handoff retires; a cancellation instead holds it for an operator decision.
+        await settleExecutionHandoffAfterError({
+            ref: { repoOwner, repoName, pullRequestNumber }, taskId, error: error as Error,
+            cancelledState, cancelledStateName: TaskStates.CANCELLED, correlatedLogger,
+        });
         if (cancelledState?.state === TaskStates.CANCELLED) return { status: 'cancelled', reason: cancelledState.terminalReason };
         if ((error as Error).message?.includes('aborted by user')) return { status: 'cancelled', reason: 'cancelled_by_user' };
         if (!(error instanceof UsageLimitError)) throw nonRetryableRepositoryWorkflowError(error);

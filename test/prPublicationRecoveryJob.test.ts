@@ -13,12 +13,14 @@ import { up, down } from '../packages/core/src/db/migrations/20260914000000_add_
 import { up as checkpointUp, down as checkpointDown } from '../packages/core/src/db/migrations/20260914010000_add_pr_publication_checkpoint.js';
 
 import { up as completionUp, down as completionDown } from '../packages/core/src/db/migrations/20260914020000_add_pr_publication_completion.js';
+import { up as handoffUp } from '../packages/core/src/db/migrations/20261017000000_add_pr_followup_handoffs.js';
 import * as pushSalvageExports from '../packages/core/src/git/pushSalvage.js';
 
 const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
 await up(database);
 await checkpointUp(database);
 await completionUp(database);
+await handoffUp(database);
 const root = await mkdtemp(path.join(tmpdir(), 'pr-continuation-'));
 // A rejected final push runs the salvage ladder; keep its bundles inside the test root.
 process.env.PUSH_RESCUE_BUNDLE_DIR = path.join(root, 'rescue');
@@ -94,6 +96,8 @@ await mock.module('../src/jobs/runCostCap.js', { namedExports: {
 await mock.module('@propr/core', { namedExports: {
     ...pushSalvageExports,
     preventWithdrawnJob: async () => null,
+    inspectTaskContainerLivenessForTask: async () => ({ liveness: 'not_found', container: null }),
+    releaseBranchFromSettledWorktree: async () => false,
     db: database, AI_COMMIT_AUTHOR: { name: 'Test Worker', email: 'worker@example.test' },
     logger: { ...log, withCorrelation: () => log },
     getStateManager: () => stateManager,
@@ -289,10 +293,19 @@ const modules: Record<string, Record<string, unknown>> = {
     prTaskTitleHelpers: Object.fromEntries(['buildDeterministicPrTaskSubtitle', 'buildPrTaskTitle', 'buildPrTaskTitleContext', 'buildPrTaskTitleContextHistoryMetadata', 'getPrTaskWorkflowLabel', 'resolvePrTaskWorkflow'].map(name => [name, noOp])),
     prProcessingLock: {
         acquirePRProcessingLock: async (_redis: unknown, key: string) => { events.push(key); if (heldLocks.has(key)) return false; heldLocks.add(key); return true; },
+        acquireCurrentPRProcessingLock: async (_redis: unknown, { lockKey, onContended }: { lockKey: string; onContended: (key: string) => void }, resolveLockKey: () => Promise<string>) => {
+            const key = await resolveLockKey();
+            events.push(key);
+            if (heldLocks.has(key)) { onContended(key); return null; }
+            heldLocks.add(key);
+            void lockKey;
+            return key;
+        },
+        adoptPRProcessingLock: async () => 'adopted',
         ensurePRProcessingLockToken: async () => 'token', releasePRProcessingLock: async (_redis: unknown, key: string) => { heldLocks.delete(key); },
         startPRProcessingLockHeartbeat: () => noOp,
     },
-    prCommentCollisionRecovery: { createPRCommentTaskStateIfMissing: async ({ taskId }: { taskId: string }) => { if (!taskStates.has(taskId)) taskStates.set(taskId, 'processing'); }, evaluatePRCommentPreExecutionRecovery: async () => ({}), handlePRCommentLockContention: async () => ({ status: 'deferred' }) },
+    prCommentCollisionRecovery: { createPRCommentTaskStateIfMissing: async ({ taskId }: { taskId: string }) => { if (!taskStates.has(taskId)) taskStates.set(taskId, 'processing'); }, evaluatePRCommentPreExecutionRecovery: async () => ({}), handlePRCommentLockContention: async () => ({ status: 'deferred' }), schedulePRCommentRecovery: async () => undefined },
     prCompletionComment: { buildCompletionComment: async (commit: unknown, comments: unknown, options: unknown, result: unknown) => JSON.stringify({ commit, comments, options, result }) },
     reviewCommentGatherer: { markReviewFindingsProcessed: noOp },
     // Follow-up assignment is covered by test/prAutoAssignmentFollowup.test.ts.
