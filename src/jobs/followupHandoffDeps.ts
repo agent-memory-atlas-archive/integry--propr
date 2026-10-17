@@ -68,11 +68,17 @@ export async function queueRestoredCommentFollowup(record: FollowupHandoffRecord
     const { issueQueue } = await import('@propr/core');
     const { owner, repo } = splitHandoffRepository(record.repository);
     const jobData = parseHandoffJobData(record);
+    // The replacement resumes the interrupted request under a new task ID, so
+    // it keeps that request's spend cap override and counts what the
+    // interrupted attempt (and its own earlier attempts) already spent.
+    const costBudgetTaskIds = [...new Set([...(jobData.costBudgetTaskIds ?? []), record.task_id])];
     await issueQueue.add('processPullRequestComment', {
         pullRequestNumber: record.pull_request, comments: [],
         repoOwner: jobData.repoOwner ?? owner, repoName: jobData.repoName ?? repo,
         branchName: jobData.branchName ?? record.branch_name, llm: jobData.llm ?? record.llm,
         correlationId: randomUUID(), reasoningLevel: jobData.reasoningLevel,
+        ...(jobData.maxCostUsd === undefined ? {} : { maxCostUsd: jobData.maxCostUsd }),
+        costBudgetTaskIds,
     }, { jobId: `pr-comments-batch-${owner}-${repo}-${record.pull_request}-handoff-${record.incarnation}`, delay: 3000 });
 }
 

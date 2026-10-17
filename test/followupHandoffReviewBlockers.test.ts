@@ -31,6 +31,10 @@ import { up } from '../packages/core/src/db/migrations/20261017000000_add_pr_fol
  * holds the handoff instead of scheduling replacement work (F24); recovered
  * completion comments bind accepted request bodies only when the agent's full
  * success was recorded (S8).
+ *
+ * Also regressions for review 6230552827 F36: the job a standalone recovery
+ * queues for restored comments keeps the request's spend cap override and
+ * budget lineage, including the interrupted task.
  */
 
 const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
@@ -326,7 +330,7 @@ async function createHarness(options: { taskStates?: Record<string, string> } = 
     return { fx, counters, gitOps, redis, stateManager, octokit, restored, deps };
 }
 
-async function seedHandoff(h: Harness, overrides: { taskId?: string; binding?: { headRef?: string; baseRef?: string; headSha?: string } } = {}) {
+async function seedHandoff(h: Harness, overrides: { taskId?: string; binding?: { headRef?: string; baseRef?: string; headSha?: string }; jobData?: Record<string, unknown> } = {}) {
     const record = await recordFollowupHandoff({
         ref: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7 },
         taskId: overrides.taskId ?? 'task-1',
@@ -335,7 +339,7 @@ async function seedHandoff(h: Harness, overrides: { taskId?: string; binding?: {
         target: { repoOwner: 'acme', repoName: 'widgets', branchName: BRANCH, isFork: false },
         worktreePath: h.fx.wt, localRepoPath: h.fx.local,
         claimedComments: [{ id: 11, body: 'please fix the widget', author: 'alice', type: 'issue' }],
-        jobData: { pullRequestNumber: 7, repoOwner: 'acme', repoName: 'widgets', correlationId: 'corr-1' } as never,
+        jobData: { pullRequestNumber: 7, repoOwner: 'acme', repoName: 'widgets', correlationId: 'corr-1', ...overrides.jobData } as never,
         llm: 'claude',
         lockKey: LOCK, lockToken: 'dead-worker-token',
         binding: overrides.binding,
@@ -1124,6 +1128,32 @@ test('F24: a standalone recovery pass cancelled during restoration queues no fol
     assert.deepEqual(withdrawn, [11], 'the recovery pass wires the withdrawal through');
     assert.deepEqual(queuedRecoveryJobs, [], 'the default scheduler never queued replacement work');
     assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
+});
+
+// --- Review 6230552827 F36: the restored request keeps its spending constraints.
+
+test('F36: standalone no-change recovery queues the restored request with its spend cap and budget lineage', async () => {
+    const h = await createHarness();
+    await seedHandoff(h, { jobData: { maxCostUsd: 4.5, costBudgetTaskIds: ['task-0'] } });
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps as never);
+    assert.equal(summary.noChanges, 1);
+    assert.deepEqual(h.restored.map(comment => comment.id), [11], 'the claimed comment was restored');
+    assert.equal(queuedRecoveryJobs.length, 1, 'the default scheduler queued the replacement');
+    const queued = queuedRecoveryJobs[0] as { name: string; data: Record<string, unknown> };
+    assert.equal(queued.name, 'processPullRequestComment');
+    assert.equal(queued.data.maxCostUsd, 4.5, 'the explicit spend cap override is kept');
+    assert.deepEqual(queued.data.costBudgetTaskIds, ['task-0', 'task-1'], 'earlier attempts and the interrupted task count toward the budget');
+    assert.notEqual(queued.data.correlationId, 'corr-1');
+});
+
+test('F36: a restored request without an override still counts the interrupted attempt\'s spend', async () => {
+    const h = await createHarness();
+    await seedHandoff(h);
+    await recoverInterruptedFollowupHandoffs(h.deps as never);
+    assert.equal(queuedRecoveryJobs.length, 1);
+    const queued = queuedRecoveryJobs[0] as { data: Record<string, unknown> };
+    assert.equal('maxCostUsd' in queued.data, false, 'no override is invented');
+    assert.deepEqual(queued.data.costBudgetTaskIds, ['task-1']);
 });
 
 // --- Review 6229380750 S8: accepted-request evidence on recovered completions.
