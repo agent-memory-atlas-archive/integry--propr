@@ -84,7 +84,7 @@ export const SETTINGS_CATEGORY_GUIDES: Record<SettingsCategoryId, SettingsCatego
       'Runtime packages use Debian apt names. Repository-specific npm or pip dependencies belong in .propr/setup.sh.',
     ],
     links: [
-      { label: 'Agent extensions', href: `${DOCS}/features/agent-extensions` },
+      { label: 'Skills & MCP servers', href: `${DOCS}/features/agent-extensions` },
       { label: 'Runtime packages', href: `${DOCS}/features/propr-cli#agent-runtime-packages` },
     ],
   },
