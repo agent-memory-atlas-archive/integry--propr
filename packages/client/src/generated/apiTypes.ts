@@ -226,6 +226,8 @@ export interface FollowupHandoffRecoverySummary {
   published: number;
   /** Interrupted runs that produced nothing; their requests were returned to the queue. */
   noChanges: number;
+  /** Runs whose no-change completion or failure the normal path had already delivered; recorded without republishing or requeueing. */
+  settled: number;
   /** Publication settled but branch release still owed; retried on the next pass. */
   cleanupPending: number;
   skippedLiveAgent: number;

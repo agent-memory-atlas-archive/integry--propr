@@ -33,6 +33,7 @@ export interface FollowupHandoffRecoverySummary {
   inspected: number;
   published: number;
   noChanges: number;
+  settled: number;
   cleanupPending: number;
   skippedLiveAgent: number;
   failedClosed: number;

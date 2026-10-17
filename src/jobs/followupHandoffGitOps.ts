@@ -39,7 +39,11 @@ export interface FollowupHandoffGitOps {
     /** Whether the given commit is the worktree HEAD or one of its ancestors. */
     isAncestorOfHead(worktreePath: string, sha: string): Promise<boolean>;
     push(worktreePath: string, target: { repoOwner: string; repoName: string; branchName: string }): Promise<{ commitHash?: string } | void>;
-    /** Frees the branch from a settled retained worktree; keeps the worktree itself. */
+    /**
+     * Frees the branch from a settled retained worktree; keeps the worktree
+     * itself. Generated runtime output commits never stage does not count as
+     * unsettled work.
+     */
     releaseSettledWorktree(localRepoPath: string, branchName: string, worktreePath: string): Promise<boolean>;
     /** Detaches the worktree HEAD in place: commits and working-tree files all stay. */
     detachWorktreeHead(worktreePath: string): Promise<void>;
@@ -48,6 +52,43 @@ export interface FollowupHandoffGitOps {
 async function fetchRemoteBranch(worktreePath: string, branchName: string): Promise<boolean> {
     try {
         await createHooklessGit(worktreePath).raw(['fetch', 'origin', `+refs/heads/${branchName}:refs/remotes/origin/${branchName}`]);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/** Paths named by `git status --porcelain -z` entries, including both sides of a rename or copy. */
+function porcelainPaths(status: string): string[] {
+    const tokens = status.split('\0').filter(Boolean);
+    const paths: string[] = [];
+    for (let index = 0; index < tokens.length; index += 1) {
+        const code = tokens[index].slice(0, 2);
+        paths.push(tokens[index].slice(3));
+        if (code.includes('R') || code.includes('C')) paths.push(tokens[++index] ?? '');
+    }
+    return paths;
+}
+
+/**
+ * Detaches a worktree whose only uncommitted content is generated runtime
+ * output (which commits unstage, so it can never be published) and whose HEAD
+ * the freshly fetched remote branch already contains. Core's settled-worktree
+ * release refuses any dirty status, which would otherwise strand such a branch
+ * behind a no-change or published recovery. Files and commits all stay.
+ */
+async function releaseGeneratedOnlyWorktree(worktreePath: string, branchName: string): Promise<boolean> {
+    // Lazy import: test suites replace @propr/core with enumerated mocks.
+    const { isGeneratedRuntimePath } = await import('@propr/core');
+    const worktreeGit = createHooklessGit(worktreePath);
+    try {
+        if ((await worktreeGit.raw(['branch', '--show-current'])).trim() !== branchName) return false;
+        const dirty = porcelainPaths(await worktreeGit.raw(['status', '--porcelain', '-z', '--untracked-files=all']));
+        if (dirty.length === 0 || !dirty.every(file => isGeneratedRuntimePath(file))) return false;
+        if (!await fetchRemoteBranch(worktreePath, branchName)) return false;
+        const unpushed = (await worktreeGit.raw(['rev-list', '--count', 'HEAD', '--not', `refs/remotes/origin/${branchName}`])).trim();
+        if (unpushed !== '0') return false;
+        await worktreeGit.raw(['checkout', '--detach']);
         return true;
     } catch {
         return false;
@@ -135,7 +176,8 @@ export function createFollowupHandoffGitOps(getToken: () => Promise<string>): Fo
             }) as Promise<{ commitHash?: string } | void>;
         },
         async releaseSettledWorktree(localRepoPath, branchName, worktreePath) {
-            return releaseBranchFromSettledWorktree(createHooklessGit(localRepoPath), branchName, worktreePath);
+            return await releaseBranchFromSettledWorktree(createHooklessGit(localRepoPath), branchName, worktreePath)
+                || await releaseGeneratedOnlyWorktree(worktreePath, branchName);
         },
         async detachWorktreeHead(worktreePath) {
             await createHooklessGit(worktreePath).raw(['checkout', '--detach']);

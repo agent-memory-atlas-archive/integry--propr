@@ -44,7 +44,7 @@ test('the default deps actually import the recovery module and run against the r
 });
 
 const summary: FollowupHandoffRecoverySummary = {
-  inspected: 1, published: 1, noChanges: 0, cleanupPending: 0,
+  inspected: 1, published: 1, noChanges: 0, settled: 0, cleanupPending: 0,
   skippedLiveAgent: 0, failedClosed: 0, awaitingOperator: 0, lockedByOtherWriter: 0, errors: 0,
 };
 

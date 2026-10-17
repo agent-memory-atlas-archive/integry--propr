@@ -22,6 +22,8 @@ import { releaseFollowupCiSuspensionsForTask } from './followupCiSuspension.js';
 import type { CiSuspensionOctokit } from './followupCiSuspensionRuns.js';
 import { schedulePRCommentUsageLimitRetry } from './prCommentUsageLimitRecovery.js';
 import { automaticRetryFailureMetadata } from './prCommentAutomaticRetry.js';
+import { normalFailureHandoffMarkers } from './followupHandoffMarker.js';
+import type { FollowupHandoffRecord } from './followupHandoffStore.js';
 
 export async function fetchOriginalContributionDiscussion(
     octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>>,
@@ -201,6 +203,8 @@ export interface JobErrorOptions {
     correlatedLogger: Logger; stateManager: WorkerStateManager; taskId: string;
     /** Complete in-memory claim to persist in a delayed retry payload. */
     retryComments?: UnprocessedComment[];
+    /** Durable publication handoff whose marker the failure notice carries for restart reconciliation. */
+    followupHandoff?: Pick<FollowupHandoffRecord, 'repository' | 'pull_request' | 'incarnation'> | null;
 }
 
 export class UsageLimitError extends Error {
@@ -314,7 +318,7 @@ async function handleGenericError(error: Error, job: Job<CommentJobData>, option
             const failedEvidence = buildWorkEvidenceMarker('failed', realCommentIds);
             await octokit.request('PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}', {
                 owner: repoOwner, repo: repoName, comment_id: startingWorkComment.data.id,
-                body: `${options.publicationStatus ? options.publicationStatus + '\n\n' : ''}❌ **Failed to apply follow-up changes** requested by ${authorsText}\n\n${pushFailure ? formatPushFailureMarkdown(pushFailure) : `An error occurred while processing your request:\n\n\`\`\`\n${sanitizedMessage}\n\`\`\``}\n\n---\nComment ID${unprocessedComments.length > 1 ? 's' : ''}: ${unprocessedComments.map(c => String(c.id) + '✓').join(', ')}\nPlease check the logs for more details.${failedEvidence ? `\n${failedEvidence}` : ''}`,
+                body: `${options.followupHandoff ? normalFailureHandoffMarkers(options.followupHandoff) + '\n\n' : ''}${options.publicationStatus ? options.publicationStatus + '\n\n' : ''}❌ **Failed to apply follow-up changes** requested by ${authorsText}\n\n${pushFailure ? formatPushFailureMarkdown(pushFailure) : `An error occurred while processing your request:\n\n\`\`\`\n${sanitizedMessage}\n\`\`\``}\n\n---\nComment ID${unprocessedComments.length > 1 ? 's' : ''}: ${unprocessedComments.map(c => String(c.id) + '✓').join(', ')}\nPlease check the logs for more details.${failedEvidence ? `\n${failedEvidence}` : ''}`,
             });
         } catch (commentError) {
             correlatedLogger.error({ error: (commentError as Error).message }, 'Failed to post error comment');

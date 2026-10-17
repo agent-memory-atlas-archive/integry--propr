@@ -23,3 +23,16 @@ export const HANDOFF_NORMAL_COMPLETION_MARKER = '<!-- propr-followup-handoff-del
 export function normalCompletionHandoffMarkers(record: MarkerRecord | null | undefined): string {
     return record ? `${handoffCommentMarker(record)}\n${HANDOFF_NORMAL_COMPLETION_MARKER}` : '';
 }
+
+/** Flags a marked comment as the normal path's own failure notice. */
+export const HANDOFF_NORMAL_FAILURE_MARKER = '<!-- propr-followup-handoff-delivery:normal-failure -->';
+
+/**
+ * Prefix for the normal error path's failure notice. The handoff settles only
+ * after the notice is delivered, so restart recovery finds a delivered failure
+ * by this marker and reconciles to the settlement's outcome instead of
+ * requeueing the answered request or overwriting the notice.
+ */
+export function normalFailureHandoffMarkers(record: MarkerRecord | null | undefined): string {
+    return record ? `${handoffCommentMarker(record)}\n${HANDOFF_NORMAL_FAILURE_MARKER}` : '';
+}

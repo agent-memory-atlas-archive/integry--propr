@@ -9049,6 +9049,10 @@ components:
           type: integer
           minimum: 0
           description: Interrupted runs that produced nothing; their requests were returned to the queue.
+        settled:
+          type: integer
+          minimum: 0
+          description: Runs whose no-change completion or failure the normal path had already delivered; recorded without republishing or requeueing.
         cleanupPending:
           type: integer
           minimum: 0
@@ -9074,6 +9078,7 @@ components:
         - inspected
         - published
         - noChanges
+        - settled
         - cleanupPending
         - skippedLiveAgent
         - failedClosed

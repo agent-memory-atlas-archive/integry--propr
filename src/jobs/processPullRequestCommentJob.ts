@@ -453,7 +453,7 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
         return await runWithExecutionAbortSignal(executionController.signal, () => executeProcessing({ job, context, llm, taskId, stateManager, state, lockKey, lockToken }), hashTaskAttemptToken(lockToken));
     } catch (error) {
         executionFailed = true;
-        const failJob = (failure: Error) => handleJobError(failure, job, { pullRequestNumber, repoOwner, repoName, authorsText: state.authorsText, unprocessedComments: state.unprocessedComments, octokit: state.octokit, startingWorkComment: state.startingWorkComment, claudeResult: state.claudeResult, correlationId, correlatedLogger, stateManager, taskId, retryComments: context.commentsToProcess, publicationStatus: state.publication?.status });
+        const failJob = (failure: Error) => handleJobError(failure, job, { pullRequestNumber, repoOwner, repoName, authorsText: state.authorsText, unprocessedComments: state.unprocessedComments, octokit: state.octokit, startingWorkComment: state.startingWorkComment, claudeResult: state.claudeResult, correlationId, correlatedLogger, stateManager, taskId, retryComments: context.commentsToProcess, publicationStatus: state.publication?.status, followupHandoff: state.followupHandoff });
         if (error instanceof RepositoryWorkflowCapacityError) {
             capacityRefused = true;
             // The delayed job keeps the claimed comments, command context and policy; store them before releasing

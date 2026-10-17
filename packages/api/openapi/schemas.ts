@@ -409,6 +409,7 @@ export const FollowupHandoffRecoverySummary = component('FollowupHandoffRecovery
   inspected: z.number().int().nonnegative(),
   published: z.number().int().nonnegative().describe('Interrupted work recovered and published exactly once.'),
   noChanges: z.number().int().nonnegative().describe('Interrupted runs that produced nothing; their requests were returned to the queue.'),
+  settled: z.number().int().nonnegative().describe('Runs whose no-change completion or failure the normal path had already delivered; recorded without republishing or requeueing.'),
   cleanupPending: z.number().int().nonnegative().describe('Publication settled but branch release still owed; retried on the next pass.'),
   skippedLiveAgent: z.number().int().nonnegative(),
   failedClosed: z.number().int().nonnegative().describe('Records whose container evidence was unavailable or ambiguous; left untouched.'),

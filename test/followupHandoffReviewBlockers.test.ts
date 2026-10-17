@@ -1012,7 +1012,8 @@ test('F23: recovery cleanup keeps the handoff while a removed worktree is still 
     // Once the registration itself is gone the branch is provably free.
     git(h.fx.local, 'worktree', 'prune');
     const retry = await resumeFollowupHandoff(trackedResumeParams(h, retained!));
-    assert.equal(retry.outcome, 'no_changes');
+    // S11: no request was returned to the queue by recovery, so it is not counted as no_changes.
+    assert.equal(retry.outcome, 'settled');
     assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
 });
 
@@ -1347,7 +1348,7 @@ test('F27: a delivered no-change completion is recorded as completed, never requ
     const mutations = trackMutations(h);
 
     const outcome = await resumeFollowupHandoff(trackedResumeParams(h, carrier.followupHandoff!));
-    assert.equal(outcome.outcome, 'no_changes');
+    assert.equal(outcome.outcome, 'settled', 'S11: a reconciled completion is not an interrupted request returned to the queue');
     assert.deepEqual(mutations, []);
     assert.equal(h.octokit.comments[0].body, normalBody);
     assert.deepEqual(h.restored, [], 'the answered request is not returned to the queue');

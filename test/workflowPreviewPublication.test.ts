@@ -26,6 +26,7 @@ const settingsLoads = mock.fn(async () => instanceSettings);
 const stopAfterPreviews = new Error('stop after preview preparation');
 const noOp = async () => undefined;
 const log = { debug() {}, info() {}, warn() {}, error() {} };
+const unreachableCoreExport = (name: string) => () => { throw new Error(`${name} is not used by these preview tests`); };
 
 await mock.module('@propr/core', {
     namedExports: {
@@ -62,6 +63,19 @@ await mock.module('@propr/core', {
         AI_COMMIT_AUTHOR: { name: 'ProPR AI', email: 'ai@propr.dev' },
         TaskStates: { CANCELLED: 'cancelled', COMPLETED: 'completed' },
         VISUAL_PREVIEW_SLOT: '<!-- slot -->',
+        // Reachable through the durable follow-up handoff checkpoints the PR
+        // post execution imports; these runs never record a handoff.
+        issueQueue: { add: unreachableCoreExport('issueQueue.add') },
+        inspectLegacyDockerContainerLivenessForTask: unreachableCoreExport('inspectLegacyDockerContainerLivenessForTask'),
+        logger: log,
+        inspectTaskContainerLivenessForTask: unreachableCoreExport('inspectTaskContainerLivenessForTask'),
+        getStateManager: unreachableCoreExport('getStateManager'),
+        getPendingPrCommentsKey: unreachableCoreExport('getPendingPrCommentsKey'),
+        releaseBranchFromSettledWorktree: unreachableCoreExport('releaseBranchFromSettledWorktree'),
+        getRepoUrl: unreachableCoreExport('getRepoUrl'),
+        ensureRepoCloned: unreachableCoreExport('ensureRepoCloned'),
+        createWorktreeFromExistingBranch: unreachableCoreExport('createWorktreeFromExistingBranch'),
+        createHooklessGit: unreachableCoreExport('createHooklessGit'),
     },
 });
 

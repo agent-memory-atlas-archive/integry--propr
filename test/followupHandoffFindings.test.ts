@@ -497,7 +497,9 @@ test('F4/F15: a handled failure with no unpublished work keeps the row until bra
     assert.equal(pending?.status, HANDOFF_ACTIVE);
     assert.equal(pending?.phase, 'cleanup_pending');
     const summary = await recoverInterruptedFollowupHandoffs(h.deps);
-    assert.equal(summary.noChanges, 1, 'recovery releases the branch without republishing');
+    // S11: a settled failure is not an interrupted request returned to the queue.
+    assert.equal(summary.settled, 1, 'recovery releases the branch without republishing');
+    assert.equal(summary.noChanges, 0);
     assert.equal(h.counters.released, 1);
     assert.equal(h.counters.pushes + h.octokit.comments.length, 0, 'nothing publishes during cleanup');
     assert.equal(await loadFollowupHandoff({ database }, KEY), undefined, 'the row retires once the branch is free');

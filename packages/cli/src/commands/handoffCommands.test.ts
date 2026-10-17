@@ -52,7 +52,7 @@ test("human handoff output shows phase, status, liveness, lineage, retained work
 
 test("recovery summaries render every counter", () => {
   const line = formatRecoverySummary({
-    inspected: 3, published: 1, noChanges: 1, cleanupPending: 1, skippedLiveAgent: 0,
+    inspected: 3, published: 1, noChanges: 1, settled: 0, cleanupPending: 1, skippedLiveAgent: 0,
     failedClosed: 0, awaitingOperator: 0, lockedByOtherWriter: 0, errors: 0,
   });
   assert.match(line, /inspected 3/);

@@ -58,7 +58,7 @@ export function formatHandoffStatus(status: FollowupHandoffStatus): string[] {
 export function formatRecoverySummary(summary: FollowupHandoffRecoverySummary): string {
   const parts = [
     `inspected ${summary.inspected}`, `published ${summary.published}`, `no changes ${summary.noChanges}`,
-    `cleanup pending ${summary.cleanupPending}`, `live agent ${summary.skippedLiveAgent}`,
+    `settled ${summary.settled}`, `cleanup pending ${summary.cleanupPending}`, `live agent ${summary.skippedLiveAgent}`,
     `failed closed ${summary.failedClosed}`, `awaiting operator ${summary.awaitingOperator}`,
     `locked ${summary.lockedByOtherWriter}`, `errors ${summary.errors}`,
   ];

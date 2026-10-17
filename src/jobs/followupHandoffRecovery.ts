@@ -40,6 +40,8 @@ export interface FollowupHandoffRecoverySummary {
     inspected: number;
     published: number;
     noChanges: number;
+    /** Completions or failures the normal path had already delivered; recorded without republishing or requeueing. */
+    settled: number;
     cleanupPending: number;
     skippedLiveAgent: number;
     failedClosed: number;
@@ -106,6 +108,7 @@ async function adoptAndResume(
 function countOutcome(summary: FollowupHandoffRecoverySummary, outcome: string): void {
     if (outcome === 'published') summary.published += 1;
     else if (outcome === 'no_changes') summary.noChanges += 1;
+    else if (outcome === 'settled') summary.settled += 1;
     else if (outcome === 'cleanup_pending') summary.cleanupPending += 1;
     else if (outcome === 'awaiting_operator') summary.awaitingOperator += 1;
     else if (outcome === 'locked' || outcome === 'ownership_lost') summary.lockedByOtherWriter += 1;
@@ -122,7 +125,7 @@ export async function recoverInterruptedFollowupHandoffs(
 ): Promise<FollowupHandoffRecoverySummary> {
     const resolved = await resolveRecoveryDeps(deps);
     const summary: FollowupHandoffRecoverySummary = {
-        inspected: 0, published: 0, noChanges: 0, cleanupPending: 0, skippedLiveAgent: 0,
+        inspected: 0, published: 0, noChanges: 0, settled: 0, cleanupPending: 0, skippedLiveAgent: 0,
         failedClosed: 0, awaitingOperator: 0, lockedByOtherWriter: 0, errors: 0,
     };
     try {
