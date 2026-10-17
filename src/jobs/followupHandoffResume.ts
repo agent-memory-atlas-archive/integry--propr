@@ -8,6 +8,7 @@ import {
 } from './followupHandoffStore.js';
 
 import { isNonFastForwardPushError } from './followupHandoffGitOps.js';
+import { handoffCommentMarker, HANDOFF_NORMAL_COMPLETION_MARKER } from './followupHandoffMarker.js';
 
 export { createFollowupHandoffGitOps, type FollowupHandoffGitOps, type WorktreeAttachment } from './followupHandoffGitOps.js';
 
@@ -88,9 +89,7 @@ export function splitHandoffRepository(repository: string): { owner: string; rep
     return { owner, repo };
 }
 
-export function handoffCommentMarker(record: Pick<FollowupHandoffRecord, 'repository' | 'pull_request' | 'incarnation'>): string {
-    return `<!-- propr-followup-handoff:${record.repository}:${record.pull_request}:${record.incarnation} -->`;
-}
+export { handoffCommentMarker } from './followupHandoffMarker.js';
 
 async function holdForOperator(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord, reason: string): Promise<ResumeOutcome> {
     const advanced = await advanceFollowupHandoff(params.store, record, {
@@ -221,21 +220,38 @@ function interruptedWithoutChangesBody(record: FollowupHandoffRecord): string {
     ].filter(Boolean).join('\n\n');
 }
 
+interface OwedCommentDelivery {
+    url: string | null;
+    /** The found comment is the normal path's own completion, delivered before its checkpoint. */
+    normalCompletion: boolean;
+}
+
 /**
  * Publishes the owed comment exactly once, keyed by the handoff's durable
- * marker. The lease can be lost — and the user can cancel — while any of these
- * GitHub requests is awaited, so both are re-checked immediately before each
- * mutation: the starting-comment PATCH and the fallback POST after pagination
- * (which also covers a PATCH that found its comment deleted).
+ * marker. Delivered evidence is reconciled first: the normal path publishes
+ * its completion (carrying the same marker) before checkpointing the URL, so a
+ * worker death in that window leaves a delivered comment this recovery must
+ * checkpoint unchanged, never overwrite through the starting comment or
+ * duplicate. The lease can be lost — and the user can cancel — while any of
+ * these GitHub requests is awaited, so both are re-checked immediately before
+ * each mutation: the starting-comment PATCH and the fallback POST (which also
+ * covers a PATCH that found its comment deleted).
  */
 async function publishOwedComment(
     params: ResumeFollowupHandoffParams,
     record: FollowupHandoffRecord,
     body: string,
-): Promise<{ url: string | null } | { done: ResumeOutcome }> {
-    if (record.completion_comment_url) return { url: record.completion_comment_url };
+): Promise<OwedCommentDelivery | { done: ResumeOutcome }> {
+    if (record.completion_comment_url) return { url: record.completion_comment_url, normalCompletion: false };
     const { owner, repo } = splitHandoffRepository(record.repository);
     const marker = handoffCommentMarker(record);
+    const comments = await params.octokit.paginate('GET /repos/{owner}/{repo}/issues/{issue_number}/comments', {
+        owner, repo, issue_number: record.pull_request, per_page: 100,
+    }) as IssueComment[];
+    const existing = comments.find(comment => comment.body?.includes(marker));
+    if (existing) {
+        return { url: existing.html_url ?? null, normalCompletion: Boolean(existing.body?.includes(HANDOFF_NORMAL_COMPLETION_MARKER)) };
+    }
     if (record.starting_comment_id) {
         const hold = await cancellationHold(params, record);
         if (hold) return { done: hold };
@@ -243,29 +259,44 @@ async function publishOwedComment(
             const { data } = await params.octokit.request('PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}', {
                 owner, repo, comment_id: record.starting_comment_id, body,
             });
-            return { url: (data as IssueComment).html_url ?? null };
+            return { url: (data as IssueComment).html_url ?? null, normalCompletion: false };
         } catch (error) {
             if ((error as { status?: number }).status !== 404) throw error;
         }
     }
-    const comments = await params.octokit.paginate('GET /repos/{owner}/{repo}/issues/{issue_number}/comments', {
-        owner, repo, issue_number: record.pull_request, per_page: 100,
-    }) as IssueComment[];
-    const existing = comments.find(comment => comment.body?.includes(marker));
-    if (existing) return { url: existing.html_url ?? null };
     const hold = await cancellationHold(params, record);
     if (hold) return { done: hold };
     const { data } = await params.octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
         owner, repo, issue_number: record.pull_request, body,
     });
-    return { url: (data as IssueComment).html_url ?? null };
+    return { url: (data as IssueComment).html_url ?? null, normalCompletion: false };
 }
 
 const terminalStates = (taskStates: HandoffTaskStates): Set<string> =>
     new Set([taskStates.COMPLETED, taskStates.FAILED, taskStates.CANCELLED]);
 
 /** Returns false, without touching the task, when the lease was lost during the state read. */
-async function finalizeRecoveredTask(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord, published: boolean): Promise<boolean> {
+type RecoveredTaskOutcome = 'published' | 'completion_delivered' | 'no_changes';
+
+const recoveredTaskRecaps: Record<RecoveredTaskOutcome, string> = {
+    published: 'Recovered and published the interrupted follow-up after a worker restart.',
+    completion_delivered: 'The follow-up completion was delivered before a worker restart; recovery recorded it without republishing.',
+    no_changes: 'A worker restart interrupted the follow-up before it produced changes; the request was returned to the queue.',
+};
+
+const recoveredTaskReasons: Record<RecoveredTaskOutcome, string> = {
+    published: 'Recovered interrupted follow-up publication after a worker restart',
+    completion_delivered: 'Recorded the follow-up completion delivered before a worker restart',
+    no_changes: 'Worker restart interrupted the follow-up before it produced changes',
+};
+
+/** A delivered completion comment is completion evidence even without a commit (a no-change completion). */
+function deliveredOutcome(record: FollowupHandoffRecord): RecoveredTaskOutcome {
+    if (record.commit_hash) return 'published';
+    return record.completion_comment_url ? 'completion_delivered' : 'no_changes';
+}
+
+async function finalizeRecoveredTask(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord, outcome: RecoveredTaskOutcome): Promise<boolean> {
     const { stateManager, taskStates } = params;
     const current = await stateManager.getTaskState(record.task_id);
     if (ownershipLost(params, record)) return false;
@@ -275,19 +306,15 @@ async function finalizeRecoveredTask(params: ResumeFollowupHandoffParams, record
             predecessorTaskIds: parseSourceTaskIds(record),
             ...(successorTaskId(params, record) ? { successorTaskId: successorTaskId(params, record) } : {}),
         },
-        notificationRecap: published
-            ? 'Recovered and published the interrupted follow-up after a worker restart.'
-            : 'A worker restart interrupted the follow-up before it produced changes; the request was returned to the queue.',
+        notificationRecap: recoveredTaskRecaps[outcome],
     };
     if (current && terminalStates(taskStates).has(current.state)) {
         await reportHandoffOnTaskTimeline(params, record, 'publication recovered; task already final');
         return true;
     }
-    await stateManager.updateTaskState(record.task_id, published ? taskStates.COMPLETED : taskStates.FAILED, {
-        reason: published
-            ? 'Recovered interrupted follow-up publication after a worker restart'
-            : 'Worker restart interrupted the follow-up before it produced changes',
-        ...(published && record.commit_hash ? { commitHash: record.commit_hash } : {}),
+    await stateManager.updateTaskState(record.task_id, outcome === 'no_changes' ? taskStates.FAILED : taskStates.COMPLETED, {
+        reason: recoveredTaskReasons[outcome],
+        ...(outcome === 'published' && record.commit_hash ? { commitHash: record.commit_hash } : {}),
         historyMetadata,
     });
     return true;
@@ -356,6 +383,12 @@ async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record:
     // cancelled request would be requeued (or a successor's raced).
     const notice = await publishOwedComment(params, record, interruptedWithoutChangesBody(record));
     if ('done' in notice) return notice.done;
+    if (notice.normalCompletion) {
+        // The normal path already delivered its (no-change) completion and the
+        // claimed comments were answered: record it, never requeue them.
+        const delivered = await advanceFollowupHandoff(params.store, record, { phase: 'comment_published', completion_comment_url: notice.url });
+        return delivered ? finishPublishedComment(params, delivered) : { outcome: 'superseded' };
+    }
     const hold = await cancellationHold(params, record);
     if (hold) return hold;
     const claimed = parseClaimedComments(record);
@@ -368,7 +401,7 @@ async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record:
     const lateHold = await cancellationHold(params, record, () => withdrawCancelledClaims(params, record, claimed));
     if (lateHold) return lateHold;
     await params.scheduleRestoredComments?.(record);
-    if (!await finalizeRecoveredTask(params, record, false)) return { outcome: 'ownership_lost' };
+    if (!await finalizeRecoveredTask(params, record, 'no_changes')) return { outcome: 'ownership_lost' };
     const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'cleanup_pending' });
     if (!advanced) return { outcome: 'superseded' };
     params.log.info({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request },
@@ -452,6 +485,18 @@ async function publishPushedCompletion(params: ResumeFollowupHandoffParams, reco
     return advanced ? { record: advanced } : { done: { outcome: 'superseded' } };
 }
 
+/** Finalizes the task for a recorded completion comment, then frees the branch while keeping the worktree. */
+async function finishPublishedComment(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
+    let current = record;
+    if (current.phase === 'comment_published') {
+        if (!await finalizeRecoveredTask(params, current, deliveredOutcome(current))) return { outcome: 'ownership_lost' };
+        const advanced = await advanceFollowupHandoff(params.store, current, { phase: 'cleanup_pending' });
+        if (!advanced) return { outcome: 'superseded' };
+        current = advanced;
+    }
+    return attemptHandoffCleanup(params, current);
+}
+
 /**
  * Called under the pull request's processing lease with a record whose agent
  * is proven exited/lost. Adopts the existing retained worktree in place; it
@@ -481,13 +526,6 @@ export async function resumeFollowupHandoff(params: ResumeFollowupHandoffParams)
         if ('done' in step) return step.done;
         record = step.record;
     }
-    if (record.phase === 'comment_published') {
-        if (!await finalizeRecoveredTask(params, record, Boolean(record.commit_hash))) return { outcome: 'ownership_lost' };
-        const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'cleanup_pending' });
-        if (!advanced) return { outcome: 'superseded' };
-        record = advanced;
-    }
-    if (record.phase !== 'cleanup_pending') return { outcome: 'superseded' };
-    // The push proved the branch settled; free it for later follow-ups while keeping the worktree.
-    return attemptHandoffCleanup(params, record);
+    if (record.phase === 'comment_published' || record.phase === 'cleanup_pending') return finishPublishedComment(params, record);
+    return { outcome: 'superseded' };
 }

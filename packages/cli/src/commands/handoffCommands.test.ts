@@ -73,6 +73,14 @@ test("refusal codes become actionable operator messages", () => {
     /--force/
   );
   assert.match(
+    handoffErrorMessage(conflict({ released: false, reason: "branch_still_registered" })),
+    /worktree registration still holds the branch/
+  );
+  assert.match(
+    handoffErrorMessage(conflict({ released: false, reason: "worktree_registrations_unavailable" })),
+    /could not be read/
+  );
+  assert.match(
     handoffErrorMessage(conflict({ error: "no", code: "cancellation_authorization_unavailable" })),
     /not granted/
   );

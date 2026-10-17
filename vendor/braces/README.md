@@ -4,10 +4,37 @@ This directory is a locally vendored build of `braces` that remediates
 [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)
 (high severity, stack-exhaustion denial of service through deeply nested
 brace patterns, affecting every published `braces` release `<= 3.0.3` with
-no upstream fix available). It is wired in through the root `package.json`
-`overrides` entry `"braces": "file:vendor/braces"` and replaces the
-temporary audit exception documented in
-`docs/dependency-audit-exceptions.md`, which expired on 2026-10-17.
+no upstream fix available). It replaces the temporary audit exception
+documented in `docs/dependency-audit-exceptions.md`, which expired on
+2026-10-17.
+
+## Wiring
+
+npm installs the packed tarball `vendor/braces-3.0.4-depthguard.1.tgz`, not
+this directory. The root `package.json` declares it as a direct dependency,
+`"braces": "file:vendor/braces-3.0.4-depthguard.1.tgz"`, and its `overrides`
+entry `"braces": "$braces"` points every transitive `braces` (micromatch,
+fast-glob, chokidar, …) at that direct dependency. (A plain `file:` override
+without the direct dependency is pruned silently by npm.) `package-lock.json`
+pins the tarball by integrity, and the Dockerfiles `COPY vendor` so image
+installs can resolve it.
+
+This directory is the reviewable source of the tarball and must stay
+byte-identical to it; `test/vendoredBraces.test.mjs` checks the source, the
+tarball, the lockfile integrity and the installed package against each
+other. After any change here (including this README, which is packed too),
+repack it and update the lockfile integrity. npm keeps (and never
+recomputes) the recorded integrity of an existing `file:` tarball entry, so
+it has to be set explicitly to the repacked tarball's sha512:
+
+```sh
+npm pack ./vendor/braces --pack-destination vendor
+node -e "const fs=require('fs'),c=require('crypto');const t='vendor/braces-3.0.4-depthguard.1.tgz';const l=JSON.parse(fs.readFileSync('package-lock.json'));l.packages['node_modules/braces'].integrity='sha512-'+c.createHash('sha512').update(fs.readFileSync(t)).digest('base64');fs.writeFileSync('package-lock.json',JSON.stringify(l,null,2)+'\\n')"
+rm -rf node_modules/braces && npm install
+```
+
+`npm pack` is reproducible, so an unchanged directory repacks to the
+committed bytes.
 
 ## Provenance
 
@@ -38,6 +65,15 @@ replaces) matches **both** advisories and fails GitHub dependency review.
 ## Maintenance
 
 If upstream `braces` publishes a release above `3.0.3` that fixes
-GHSA-vfj7-8cjw-p6xm, delete this directory, remove the `braces` override
-from the root `package.json`, regenerate `package-lock.json`, and re-run
-`npm run audit:runtime` and `npm run desktop:audit:packaging`.
+GHSA-vfj7-8cjw-p6xm:
+
+1. Remove both `braces` entries from the root `package.json`: the direct
+   `dependencies` entry `"braces": "file:vendor/braces-3.0.4-depthguard.1.tgz"`
+   and the `overrides` entry `"braces": "$braces"` (or pin the override to
+   the fixed release instead).
+2. Delete this directory, the tarball and `test/vendoredBraces.test.mjs`.
+3. Drop the `COPY vendor` lines from the Dockerfiles if nothing else is
+   vendored.
+4. Regenerate `package-lock.json` and confirm no `file:vendor/` resolution
+   remains in it.
+5. Re-run `npm run audit:runtime` and `npm run desktop:audit:packaging`.

@@ -183,6 +183,10 @@ export async function recordFollowupHandoff(
         job_data: JSON.stringify(params.jobData),
         llm: params.llm ?? null,
         phase: 'agent_running',
+        // Explicit, not omitted: taking over a released row updates only the
+        // columns written here, and a predecessor's agent success must never
+        // become evidence for this incarnation's agent.
+        agent_completed: null,
         status: HANDOFF_ACTIVE,
         status_reason: null,
         operator_authorized: 0,

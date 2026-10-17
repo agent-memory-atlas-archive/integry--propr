@@ -10,6 +10,7 @@ import {
     HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED,
     type FollowupHandoffKey, type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
 } from './followupHandoffStore.js';
+import type { FollowupHandoffGitOps } from './followupHandoffGitOps.js';
 
 /**
  * Operator actions over durable follow-up publication handoffs, exposed
@@ -58,10 +59,28 @@ export async function resumeOperatorHeldFollowupHandoff(
 }
 
 /**
+ * Refusal reason while any linked worktree registration still holds the
+ * branch, or when the registrations cannot be read; null once it is free.
+ */
+async function branchReleaseRefusal(
+    git: FollowupHandoffGitOps,
+    record: FollowupHandoffRecord,
+): Promise<'branch_still_registered' | 'worktree_registrations_unavailable' | null> {
+    try {
+        const holders = await git.branchWorktreeRegistrations(record.local_repo_path, record.branch_name);
+        return holders.length > 0 ? 'branch_still_registered' : null;
+    } catch {
+        return 'worktree_registrations_unavailable';
+    }
+}
+
+/**
  * Marks a handoff released so recovery stops attempting it. Never deletes the
  * worktree or any commits: it only detaches the worktree HEAD to free the
  * branch, and refuses even that while unpublished work exists unless the
  * operator forces it (files and commits stay in the worktree either way).
+ * The row is marked released only once no Git worktree registration holds the
+ * branch any more; otherwise the obligation stays and the refusal names why.
  * The mutation runs only with the recorded agent proven gone and under the
  * pull request's processing lease, so it can never detach a live writer.
  */
@@ -101,6 +120,12 @@ export async function releaseFollowupHandoffRecord(
                 const attachment = await resolved.git.worktreeAttachment(record.worktree_path, record.branch_name);
                 if (attachment === 'attached') await resolved.git.detachWorktreeHead(record.worktree_path);
             }
+            // Permission to attempt the release is not proof it happened: a
+            // removed directory whose Git registration survives still holds
+            // the branch, and admission ignores a released row. The
+            // repository's own registrations must show the branch free.
+            const refusal = await branchReleaseRefusal(resolved.git, record);
+            if (refusal) return { released: false, reason: refusal };
             const advanced = await advanceFollowupHandoff(resolved.store, record, {
                 status: HANDOFF_RELEASED, status_reason: options.force ? 'released_by_operator_force' : 'released_by_operator',
             });

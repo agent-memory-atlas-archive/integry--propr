@@ -79,6 +79,12 @@ export function handoffErrorMessage(error: unknown): string {
     if (code === "worktree_holds_unpublished_work") {
       return "Release refused: the retained worktree still holds unpublished work. Inspect it, then re-run with --force to detach anyway (files and commits are kept).";
     }
+    if (code === "branch_still_registered") {
+      return "Release refused: a Git worktree registration still holds the branch (for example a retained worktree whose directory is gone). Repair or remove that registration in the repository, then re-run release.";
+    }
+    if (code === "worktree_registrations_unavailable") {
+      return "Release refused: the repository's Git worktree registrations could not be read, so branch release is unproven. Restore repository access, then re-run release.";
+    }
     if (code) return `${error.message} (${code})`;
   }
   return (error as Error).message;

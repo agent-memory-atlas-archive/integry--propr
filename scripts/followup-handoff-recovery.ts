@@ -17,7 +17,8 @@
  * without it).
  * `release` stops tracking the handoff; it frees the branch only when the
  * worktree is settled, or detaches its HEAD in place with --force (all files
- * and commits stay in the worktree).
+ * and commits stay in the worktree). Either way it is refused while a Git
+ * worktree registration still holds the branch.
  */
 import {
     authorizeCancelledFollowupHandoff,
@@ -104,6 +105,10 @@ async function main(): Promise<void> {
             const key = parseKey(repository, pr);
             const result = await releaseFollowupHandoffRecord(key, { force: flag === '--force' });
             if (!result.released) {
+                if (result.reason === 'branch_still_registered' || result.reason === 'worktree_registrations_unavailable') {
+                    console.error(`Not released: ${result.reason}. A Git worktree registration still holds the branch, or the registrations could not be read; repair or remove the registration (or restore repository access), then re-run release.`);
+                    process.exit(1);
+                }
                 console.error(`Not released: ${result.reason}. Settle the reported condition first; when the worktree holds unpublished work you may re-run with --force to detach its HEAD in place (files and commits are kept).`);
                 process.exit(1);
             }

@@ -1178,3 +1178,190 @@ test('S8: the normal path records whether the agent exited with full success', a
     await markExecutionHandoffAgentExited(carrier, false);
     assert.equal((await loadFollowupHandoff({ database }, KEY))?.agent_completed, 0);
 });
+
+// --- Review 6229573230 F25: an operator release is recorded only once the
+// repository's worktree registrations prove the branch free.
+
+const { releaseFollowupHandoffRecord } = await import('../src/jobs/followupHandoffRecovery.js');
+const { HANDOFF_RELEASED } = await import('../src/jobs/followupHandoffStore.js');
+
+test('F25: a forced release of a removed but still-registered worktree is refused and the obligation kept', async () => {
+    const h = await createHarness();
+    await seedHandoff(h);
+    await agentEdit(h.fx);
+    await rm(h.fx.wt, { recursive: true, force: true });
+
+    const refused = await releaseFollowupHandoffRecord(KEY, { force: true }, h.deps);
+    assert.deepEqual(refused, { released: false, reason: 'branch_still_registered' });
+    const retained = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(retained?.status, HANDOFF_ACTIVE, 'admission keeps treating the branch as held');
+    assert.equal(h.redis.store.size, 0, 'the operator lease is released after the refusal');
+
+    // Once the stale registration itself is repaired, the release is proven.
+    git(h.fx.local, 'worktree', 'prune');
+    assert.equal((await releaseFollowupHandoffRecord(KEY, { force: true }, h.deps)).released, true);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_RELEASED);
+});
+
+test('F25: a release whose settled-release claim left the branch registered is refused', async () => {
+    const h = await createHarness();
+    await seedHandoff(h);
+    // The release reports success without actually freeing the branch.
+    h.gitOps.releaseSettledWorktree = async () => true;
+
+    for (const force of [false, true]) {
+        const refused = await releaseFollowupHandoffRecord(KEY, { force }, h.deps);
+        assert.deepEqual(refused, { released: false, reason: 'branch_still_registered' });
+    }
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_ACTIVE);
+});
+
+test('F25: unreadable worktree registrations refuse the release, forced or not', async () => {
+    const h = await createHarness();
+    await seedHandoff(h);
+    h.gitOps.branchWorktreeRegistrations = async () => { throw new Error('git unavailable'); };
+
+    assert.deepEqual(await releaseFollowupHandoffRecord(KEY, {}, h.deps),
+        { released: false, reason: 'worktree_registrations_unavailable' });
+    await agentEdit(h.fx);
+    assert.deepEqual(await releaseFollowupHandoffRecord(KEY, { force: true }, h.deps),
+        { released: false, reason: 'worktree_registrations_unavailable' });
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_ACTIVE);
+});
+
+test('F25: a forced detach that frees the branch is recorded as released', async () => {
+    const h = await createHarness();
+    await seedHandoff(h);
+    await agentEdit(h.fx);
+    assert.equal((await releaseFollowupHandoffRecord(KEY, { force: true }, h.deps)).released, true);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_RELEASED);
+    assert.deepEqual(await h.gitOps.branchWorktreeRegistrations(h.fx.local, BRANCH), []);
+    assert.ok(existsSync(path.join(h.fx.wt, 'feature.txt')), 'the retained files survive');
+});
+
+// --- Review 6229573230 F26: a replacement incarnation never inherits its
+// predecessor's recorded agent success.
+
+test('F26: a successor replacing a released successful handoff binds no accepted bodies after its own interruption', async () => {
+    const h = await createHarness({ taskStates: { 'task-1': 'completed', 'task-2': 'processing' } });
+    const predecessor = await seedCompletedPushed(h, 1);
+    const released = await advanceFollowupHandoff({ database }, predecessor, { status: HANDOFF_RELEASED, status_reason: 'released_by_operator' });
+    assert.ok(released);
+
+    const successor = await recordFollowupHandoff({
+        ref: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7 },
+        taskId: 'task-2', sourceTaskIds: [], correlationId: 'corr-2',
+        target: { repoOwner: 'acme', repoName: 'widgets', branchName: BRANCH, isFork: false },
+        worktreePath: h.fx.wt, localRepoPath: h.fx.local,
+        claimedComments: [{ id: 12, body: 'and the gadget', author: 'alice', type: 'issue', acceptedBodySha256: ACCEPTED_SHA }],
+        jobData: { pullRequestNumber: 7, repoOwner: 'acme', repoName: 'widgets', correlationId: 'corr-2' } as never,
+        llm: 'claude', lockKey: LOCK, lockToken: 'dead-successor-token',
+    }, { database });
+    assert.ok(successor);
+    const stored = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(stored?.task_id, 'task-2');
+    assert.equal(stored?.agent_completed, null, 'the replacement row resets the predecessor\'s agent success');
+
+    // The successor's agent leaves partial work and is lost before its exit checkpoint.
+    await writeFile(path.join(h.fx.wt, 'partial.txt'), 'partial successor work\n');
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, stored!));
+    assert.equal(outcome.outcome, 'published');
+    const completion = h.octokit.comments.at(-1)!;
+    assert.match(completion.body, /12✓/);
+    assert.doesNotMatch(completion.body, /propr:accepted-request/, 'no accepted-request evidence without the successor\'s own success');
+});
+
+// --- Review 6229573230 F27: recovery reconciles a completion the normal path
+// delivered before its durable checkpoint, without overwriting or duplicating it.
+
+const { normalCompletionHandoffMarkers } = await import('../src/jobs/followupHandoffMarker.js');
+
+function trackMutations(h: Harness): string[] {
+    const mutations: string[] = [];
+    const request = h.octokit.request.bind(h.octokit);
+    h.octokit.request = async (route: string, params?: Record<string, unknown>) => {
+        if (!route.startsWith('GET ')) mutations.push(route.split(' ')[0]);
+        return request(route, params);
+    };
+    return mutations;
+}
+
+async function withStartingComment(h: Harness, record: NonNullable<Awaited<ReturnType<typeof loadFollowupHandoff>>>) {
+    h.octokit.comments.push({ id: 500, body: '🤖 Starting work on the follow-up', html_url: 'https://example.test/comment/500' });
+    const linked = await advanceFollowupHandoff({ database }, record, { starting_comment_id: 500 });
+    assert.ok(linked);
+    return linked!;
+}
+
+test('F27: a completion delivered on the starting comment before its checkpoint is recorded unchanged', async () => {
+    const h = await createHarness();
+    const pushed = await withStartingComment(h, await seedPushed(h));
+    // Normal publication PATCHed the starting comment, then the worker died
+    // before markExecutionHandoffCommentPublished.
+    const normalBody = `${normalCompletionHandoffMarkers(pushed)}\n\n✅ Applied the follow-up changes (normal completion)`;
+    h.octokit.comments[0].body = normalBody;
+    const mutations = trackMutations(h);
+
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, pushed));
+    assert.equal(outcome.outcome, 'published');
+    assert.deepEqual(mutations, [], 'no PATCH or POST touches the delivered completion');
+    assert.equal(h.octokit.comments.length, 1);
+    assert.equal(h.octokit.comments[0].body, normalBody);
+    assert.equal(h.stateManager.states.get('task-1'), 'completed');
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined, 'the handoff retires once the branch is free');
+});
+
+test('F27: a completion delivered as a separate comment is recorded without announcing again on the starting comment', async () => {
+    const h = await createHarness();
+    const pushed = await withStartingComment(h, await seedPushed(h));
+    const normalBody = `${normalCompletionHandoffMarkers(pushed)}\n\n✅ Applied the follow-up changes (replacement comment)`;
+    h.octokit.comments.push({ id: 501, body: normalBody, html_url: 'https://example.test/comment/501' });
+    const mutations = trackMutations(h);
+    let checkpointedUrl: string | null | undefined;
+
+    const outcome = await resumeFollowupHandoff({
+        ...trackedResumeParams(h, pushed),
+        stateManager: {
+            ...h.stateManager,
+            async updateTaskState(taskId: string, state: string) {
+                checkpointedUrl = (await loadFollowupHandoff({ database }, KEY))?.completion_comment_url;
+                h.stateManager.states.set(taskId, state);
+            },
+        },
+    });
+    assert.equal(outcome.outcome, 'published');
+    assert.deepEqual(mutations, []);
+    assert.equal(h.octokit.comments[0].body, '🤖 Starting work on the follow-up', 'the starting comment is left alone');
+    assert.equal(h.octokit.comments.length, 2);
+    assert.equal(checkpointedUrl, 'https://example.test/comment/501', 'the delivered URL is checkpointed before finalization');
+});
+
+test('F27: a delivered no-change completion is recorded as completed, never requeued as interrupted', async () => {
+    const h = await createHarness();
+    const record = await withStartingComment(h, await seedHandoff(h));
+    const carrier = { followupHandoff: record };
+    await markExecutionHandoffAgentExited(carrier, true);
+    // Normal no-change completion was delivered; the worker died before its checkpoint.
+    const normalBody = `${normalCompletionHandoffMarkers(record)}\n\n✅ No changes were needed`;
+    h.octokit.comments[0].body = normalBody;
+    const mutations = trackMutations(h);
+
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, carrier.followupHandoff!));
+    assert.equal(outcome.outcome, 'no_changes');
+    assert.deepEqual(mutations, []);
+    assert.equal(h.octokit.comments[0].body, normalBody);
+    assert.deepEqual(h.restored, [], 'the answered request is not returned to the queue');
+    assert.equal(h.stateManager.states.get('task-1'), 'completed');
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+});
+
+test('F27: without delivered completion evidence recovery still publishes once on the starting comment', async () => {
+    const h = await createHarness();
+    const pushed = await withStartingComment(h, await seedPushed(h));
+    const mutations = trackMutations(h);
+
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, pushed));
+    assert.equal(outcome.outcome, 'published');
+    assert.deepEqual(mutations, ['PATCH']);
+    assert.match(h.octokit.comments[0].body, /Recovered and published follow-up changes/);
+});

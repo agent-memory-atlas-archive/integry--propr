@@ -55,7 +55,7 @@ export const ADMIN_ROUTE_DOCS: Record<string, RouteDoc> = {
       200: { description: 'The branch is free and the record retired.', schema: FollowupHandoffReleaseResult },
       400: { description: 'Invalid target or non-boolean flag.' },
       404: { description: 'No handoff is recorded for the pull request (code `not_found`).' },
-      409: { description: 'Refused; `reason` names why: `agent_still_running`, `liveness_unavailable`, `lease_held_by_live_writer` or `worktree_holds_unpublished_work`.', schema: FollowupHandoffReleaseResult },
+      409: { description: 'Refused; `reason` names why: `agent_still_running`, `liveness_unavailable`, `lease_held_by_live_writer`, `worktree_holds_unpublished_work`, `branch_still_registered` or `worktree_registrations_unavailable`.', schema: FollowupHandoffReleaseResult },
     },
   },
 };

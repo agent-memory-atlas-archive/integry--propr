@@ -39,6 +39,7 @@ import {
 } from '../github/visualPreviewAttachments.js';
 import type { PullRequestPublication, PublicationSalvage } from './prPublication.js';
 import type { FollowupHandoffRecord } from './followupHandoffStore.js';
+import { normalCompletionHandoffMarkers } from './followupHandoffMarker.js';
 import { markExecutionHandoffCommitted, markExecutionHandoffCommentPublished, markExecutionHandoffPushed } from './prCommentHandoffIntegration.js';
 import { recordPushSalvageEvent } from './pushSalvageTimeline.js';
 import { savePublicationCheckpoint } from './prContinuation.js';
@@ -236,7 +237,10 @@ async function publishCompletionComment(options: CompletionCommentPublicationOpt
         addressedFeedback,
         visualPreviewSection: hasVisualPreviewContent ? VISUAL_PREVIEW_SLOT : undefined
     }, state.claudeResult);
-    const prCommentTemplate = [context.publication.status, completionBody].filter(Boolean).join('\n\n');
+    // The handoff marker lets restart recovery recognize this completion if the
+    // worker dies before its durable checkpoint records the comment URL.
+    const prCommentTemplate = [normalCompletionHandoffMarkers(state.followupHandoff), context.publication.status, completionBody]
+        .filter(Boolean).join('\n\n');
     const prCommentBody = appendVisualPreviewSection(prCommentTemplate, visualPreviewSection);
 
     if (visualPreviewEvidence.assets.length === 0) {
