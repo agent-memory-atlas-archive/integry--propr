@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { assertOwnedLocalSetupRoot } from './connectIdentity.js';
-import type { SetupActions } from '@propr/local-setup';
+import type { GithubUserCredential, SetupActions } from '@propr/local-setup';
 import {
   evaluateProprApiCompatibility,
   parseProprDesktopDiscoveryJson,
@@ -249,7 +249,8 @@ export async function createDesktopSetupHost(options: {
   runtimeManifestPath?: string;
   authenticationHandoff: AuthenticationCommandHandoff;
   capturedCommand?: CapturedCommandRunner;
-  githubBrowserLogin?: (options: { signal?: AbortSignal; onLog?: (line: string) => void }) => Promise<string>;
+  githubBrowserLogin?: (options: { signal?: AbortSignal; onLog?: (line: string) => void }) => Promise<string | GithubUserCredential>;
+  refreshGithubCredential?: (refreshToken: string, options: { signal?: AbortSignal }) => Promise<GithubUserCredential>;
 }): Promise<DesktopSetupHost> {
   if (options.resourcesPath) {
     const root = realpathSync(options.resourcesPath);
@@ -267,6 +268,7 @@ export async function createDesktopSetupHost(options: {
     githubBrowserLogin: options.githubBrowserLogin ?? (async () => {
       throw new Error("GitHub browser sign-in is not configured. Install a desktop build with GitHub browser authentication configured.");
     }),
+    ...(options.refreshGithubCredential ? { refreshGithubCredential: options.refreshGithubCredential } : {}),
   });
   const actions: SetupActions = {
     ...baseActions,

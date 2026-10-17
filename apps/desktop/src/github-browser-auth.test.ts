@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { MessageBoxOptions } from 'electron';
 import { createGithubCodePresenter } from './github-code-presenter';
-import { createGithubBrowserLogin, type GithubBrowserAuthDependencies } from './github-browser-auth';
+import { createGithubBrowserLogin, createGithubTokenRefresher, type GithubBrowserAuthDependencies } from './github-browser-auth';
 
 const device = { device_code: 'a'.repeat(40), user_code: 'ABCD-EFGH', verification_uri: 'https://github.com/login/device', expires_in: 900, interval: 5 };
 const token = { access_token: 'fixture_token', token_type: 'bearer' };
@@ -26,7 +26,7 @@ function fixture(responses: unknown[] = [device, token, { login: 'propr-ultrafix
 
 test('browser sign-in verifies and confirms identity, keeping codes out of logs and browser URL', async () => {
   const f = fixture(); const logs: string[] = [];
-  assert.equal(await createGithubBrowserLogin(f.dependencies)({ onLog: line => logs.push(line) }), token.access_token);
+  assert.deepEqual(await createGithubBrowserLogin(f.dependencies)({ onLog: line => logs.push(line) }), { accessToken: token.access_token });
   assert.deepEqual(f.identities, ['propr-ultrafix']);
   assert.deepEqual(f.waits, [5000]);
   assert.equal(f.calls[2].url, 'https://api.github.com/user');
@@ -73,7 +73,7 @@ test('cancellation discards a late token response; a fresh attempt can retry', a
   assert.equal(f.calls.length, 1); assert.equal(f.closed(), 1);
   const fresh = fixture();
   Object.assign(f.dependencies, fresh.dependencies);
-  assert.equal(await login(), token.access_token);
+  assert.deepEqual(await login(), { accessToken: token.access_token });
 });
 
 test('superseded attempt cannot publish a late successful identity', async () => {
@@ -85,7 +85,7 @@ test('superseded attempt cannot publish a late successful identity', async () =>
   const old = login(); const rejected = assert.rejects(old);
   await ready;
   const fresh = fixture(); Object.assign(f.dependencies, fresh.dependencies);
-  assert.equal(await login(), token.access_token);
+  assert.deepEqual(await login(), { accessToken: token.access_token });
   release(); await rejected;
 });
 
@@ -182,11 +182,76 @@ test('browser launch failure discards an in-flight token before identity lookup'
   assert.deepEqual(f.identities, []);
 });
 
-test('unsupported expiring credentials fail clearly before storage or identity confirmation', async () => {
-  const f = fixture([device, { ...token, expires_in: 28800, refresh_token: 'fixture_refresh' }]);
-  await assert.rejects(createGithubBrowserLogin(f.dependencies)(), /non-expiring user tokens/);
+test('expiring device-flow credentials are accepted with absolute expiry after identity confirmation', async () => {
+  const expiring = { ...token, expires_in: 28800, refresh_token: 'ghr_fixture_refresh', refresh_token_expires_in: 15897600, scope: 'repo,read:org' };
+  const f = fixture([device, expiring, { login: 'propr-ultrafix', id: 123 }]);
+  f.dependencies.now = () => 1_000_000; const logs: string[] = [];
+  assert.deepEqual(await createGithubBrowserLogin(f.dependencies)({ onLog: line => logs.push(line) }), {
+    accessToken: token.access_token, expiresAt: 1_000_000 + 28_800_000,
+    refreshToken: 'ghr_fixture_refresh', refreshTokenExpiresAt: 1_000_000 + 15_897_600_000,
+  });
+  assert.deepEqual(f.identities, ['propr-ultrafix']);
+  assert.equal(new Headers(f.calls[2].options?.headers).get('Authorization'), `Bearer ${token.access_token}`);
+  assert.ok(!logs.join().includes('ghr_fixture_refresh'));
+});
+
+for (const [name, grant] of [
+  ['refresh token without expiry', { ...token, refresh_token: 'ghr_fixture_refresh' }],
+  ['expiry without refresh token', { ...token, expires_in: 28800 }],
+  ['malformed refresh token', { ...token, expires_in: 28800, refresh_token: 'bad token' }],
+  ['non-integer expiry', { ...token, expires_in: '28800', refresh_token: 'ghr_fixture_refresh' }],
+  ['refresh token equal to access token', { ...token, expires_in: 28800, refresh_token: token.access_token }],
+] as const) test(`rejects an invalid expiring grant (${name}) before identity confirmation`, async () => {
+  const f = fixture([device, grant]);
+  await assert.rejects(createGithubBrowserLogin(f.dependencies)(), /invalid expiring sign-in/);
   assert.deepEqual(f.identities, []);
+  assert.equal(f.calls.length, 2);
   assert.equal(f.closed(), 1);
+});
+
+function refreshFixture(response: unknown, status = 200) {
+  const calls: { url: string; options?: RequestInit }[] = [];
+  const refresh = createGithubTokenRefresher({
+    clientId: 'propr-client', now: () => 5_000,
+    fetch: async (url, options) => { calls.push({ url: String(url), options }); return Response.json(response, { status }); },
+  });
+  return { refresh, calls };
+}
+
+test('refresh rotates an expiring credential without a client secret', async () => {
+  const { refresh, calls } = refreshFixture({ access_token: 'ghu_rotated', token_type: 'bearer', expires_in: 28800, refresh_token: 'ghr_rotated', refresh_token_expires_in: 100 });
+  assert.deepEqual(await refresh('ghr_original'), { accessToken: 'ghu_rotated', expiresAt: 5_000 + 28_800_000, refreshToken: 'ghr_rotated', refreshTokenExpiresAt: 5_000 + 100_000 });
+  assert.equal(calls[0].url, 'https://github.com/login/oauth/access_token');
+  assert.equal(calls[0].options?.redirect, 'error');
+  const body = new URLSearchParams(calls[0].options?.body as URLSearchParams);
+  assert.deepEqual(Object.fromEntries(body), { client_id: 'propr-client', grant_type: 'refresh_token', refresh_token: 'ghr_original' });
+});
+
+for (const error of ['bad_refresh_token', 'invalid_grant']) test(`refresh reports ${error} as revoked without provider text`, async () => {
+  const { refresh } = refreshFixture({ error, error_description: 'secret-provider-text ghr_original' });
+  await assert.rejects(refresh('ghr_original'), failure => {
+    assert.match((failure as Error).message, /expired or was revoked/);
+    assert.ok(!(failure as Error).message.includes('secret-provider-text')); return true;
+  });
+});
+
+test('refresh transport, server, and non-rotating responses fail without revoking or leaking', async () => {
+  for (const [response, status] of [[{ error: 'server_error' }, 500], [{ access_token: 'ghu_rotated', token_type: 'bearer' }, 200]] as const) {
+    const { refresh } = refreshFixture(response, status);
+    await assert.rejects(refresh('ghr_original'), /could not be renewed|invalid expiring sign-in/);
+  }
+  const refresh = createGithubTokenRefresher({ clientId: 'propr-client', fetch: async () => { throw new Error('ghr_original socket detail'); } });
+  await assert.rejects(refresh('ghr_original'), failure => {
+    assert.match((failure as Error).message, /could not be renewed/);
+    assert.ok(!(failure as Error).message.includes('ghr_original')); return true;
+  });
+});
+
+test('refresh fails before network access without client configuration', async () => {
+  let called = false;
+  const refresh = createGithubTokenRefresher({ fetch: async () => { called = true; return Response.json({}); } });
+  await assert.rejects(refresh('ghr_original'), /PROPR_DESKTOP_GITHUB_CLIENT_ID/);
+  assert.equal(called, false);
 });
 
 for (const error of ['device_flow_disabled', 'incorrect_client_credentials']) test(`recognizes HTTP 400 ${error} without provider text`, async () => {
@@ -210,7 +275,7 @@ test('bounded opaque provider codes accept alternate printable formats', async (
   const f = fixture([alternate, token, { login: 'propr-ultrafix', id: 123 }]);
   f.dependencies.presentCode = async code => { assert.equal(code, alternate.user_code); return async () => {}; };
   f.dependencies.confirmIdentity = async () => true;
-  assert.equal(await createGithubBrowserLogin(f.dependencies)(), token.access_token);
+  assert.deepEqual(await createGithubBrowserLogin(f.dependencies)(), { accessToken: token.access_token });
   assert.equal(new URLSearchParams(f.calls[1].options?.body as URLSearchParams).get('device_code'), alternate.device_code);
 });
 for (const field of ['device_code', 'user_code']) for (const value of ['', 'a\nb', 'x'.repeat(field === 'device_code' ? 1025 : 129)]) test(`unsafe or oversized ${field} is rejected before presentation`, async () => {
@@ -268,7 +333,7 @@ for (const action of ['leave open', 'copy', 'open browser']) test(`real native p
   }
   // Approval in another browser needs no response from the open native dialog.
   approve();
-  assert.equal(await result, token.access_token);
+  assert.deepEqual(await result, { accessToken: token.access_token });
   assert.deepEqual(f.identities, ['propr-ultrafix']);
   assert.ok(f.dialogs.every(dialog => dialog.closed));
   assert.deepEqual(f.copied, action === 'copy' ? [device.user_code] : []);
@@ -296,7 +361,7 @@ for (const ending of ['native cancel', 'shutdown', 'deadline', 'provider expiry'
   assert.ok(f.dialogs.every(dialog => dialog.closed));
   assert.deepEqual(f.identities, []);
   const fresh = nativeFixture(); Object.assign(f.dependencies, fresh.dependencies);
-  assert.equal(await login(), token.access_token);
+  assert.deepEqual(await login(), { accessToken: token.access_token });
   assert.deepEqual(fresh.identities, ['propr-ultrafix']);
   assert.ok(fresh.dialogs.every(dialog => dialog.closed));
 });
@@ -308,7 +373,7 @@ test('repeated native attempts close superseded initial dialog before a fresh co
   await settle();
   assert.equal(f.dialogs[0].closed, false);
   const fresh = nativeFixture(); Object.assign(f.dependencies, fresh.dependencies);
-  assert.equal(await login(), token.access_token);
+  assert.deepEqual(await login(), { accessToken: token.access_token });
   await rejected;
   assert.ok(f.dialogs.every(dialog => dialog.closed));
   assert.deepEqual(f.identities, []);

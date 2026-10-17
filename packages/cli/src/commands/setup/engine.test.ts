@@ -1704,7 +1704,7 @@ test("prompts drive a full unattended run to completion", async () => {
   );
 });
 
-test("failed account change retains chooser identity and installations, then retry succeeds", async () => {
+test("failed account change is reported against the old saved identity, then retry succeeds", async () => {
   let username = "first-user"; let attempts = 0; let choices = 0;
   const result = await runSetup({ root: "/stack", prompts: relayPrompts({
     chooseInstallation: async context => {
@@ -1713,13 +1713,19 @@ test("failed account change retains chooser identity and installations, then ret
       if (choices <= 3) {
         assert.equal(context.username, "first-user");
         assert.deepEqual(context.installations, [inst(100, "first-user")]);
-        assert.equal(context.selectedInstallationId, "100");
-        if (choices === 3) assert.match(context.enrollmentPermissionError ?? "", /Try again or keep the current account/);
+        if (choices === 2) assert.equal(context.selectedInstallationId, "100");
+        if (choices === 3) {
+          // The old identity is not preselected and the failure is not an enrollment error.
+          assert.equal(context.selectedInstallationId, undefined);
+          assert.equal(context.enrollmentPermissionError, undefined);
+          assert.match(context.reauthenticationFailure?.detail ?? "", /GitHub authentication did not complete/);
+        }
         return { action: "reauthenticate" };
       }
       assert.equal(context.username, "second-user");
       assert.equal(context.selectedInstallationId, undefined);
       assert.equal(context.enrollmentPermissionError, undefined);
+      assert.equal(context.reauthenticationFailure, undefined);
       return { action: "select", installationId: "200" };
     },
   }), actions: mockActions({
@@ -1733,6 +1739,53 @@ test("failed account change retains chooser identity and installations, then ret
   }) });
   assert.equal(choices, 4); assert.equal(attempts, 2);
   assert.equal(statusOf(result.state, "github-auth"), "done");
+});
+
+test("after a failed account change the old identity is enrolled only after explicit keep-account", async () => {
+  const contexts: Array<{ failure?: string; error?: string }> = [];
+  const enrolled: string[] = [];
+  const result = await runSetup({ root: "/stack", prompts: relayPrompts({
+    chooseInstallation: async context => {
+      contexts.push({ failure: context.reauthenticationFailure?.detail, error: context.enrollmentPermissionError });
+      switch (contexts.length) {
+        case 1: return { action: "reauthenticate" };
+        case 2: return { action: "select", installationId: "100" };
+        case 3: return { action: "refresh" };
+        case 4: return { action: "keep-account" };
+        default: return { action: "select", installationId: "100" };
+      }
+    },
+  }), actions: mockActions({
+    hasGithubToken: () => true,
+    loginWithGithub: async () => false,
+    githubLoginRecovery: () => ({ detail: "GitHub sign-in was declined. Retry and approve the intended account.", nextAction: "Retry" }),
+    fetchRelayInstallations: async () => ({ username: "integry", installations: [inst(100, "integry")] }),
+    enrollRelay: async ({ installationId }) => { enrolled.push(installationId); return { relayUrl: DEFAULT_PROPR_GH_RELAY_URL, token: "fixture-relay-token" }; },
+  }) });
+  assert.deepEqual(contexts.map(item => item.failure), [
+    undefined,
+    "GitHub sign-in was declined. Retry and approve the intended account.",
+    "GitHub sign-in was declined. Retry and approve the intended account.",
+    "GitHub sign-in was declined. Retry and approve the intended account.",
+    undefined,
+  ]);
+  assert.match(contexts[2].error ?? "", /@integry is still the saved account/);
+  assert.deepEqual(enrolled, ["100"]);
+  assert.equal(statusOf(result.state, "github-auth"), "done");
+});
+
+test("a failed account change that leaves no saved credential stops with sign-in recovery", async () => {
+  let token = true;
+  const result = await runSetup({ root: "/stack", prompts: relayPrompts({
+    chooseInstallation: async () => ({ action: "reauthenticate" }),
+  }), actions: mockActions({
+    hasGithubToken: () => token,
+    loginWithGithub: async () => { token = false; return false; },
+    githubLoginRecovery: () => ({ detail: "Saved GitHub sign-in expired or was revoked. Sign in to GitHub again to continue.", nextAction: "Choose Retry setup." }),
+    fetchRelayInstallations: async () => ({ username: "integry", installations: [inst(100, "integry")] }),
+    enrollRelay: async () => assert.fail("no enrollment without a saved credential"),
+  }) });
+  assert.match(getStep(result.state, "github-auth")?.detail ?? "", /expired or was revoked/);
 });
 
 test("incomplete initial browser login stops before enrollment and backend startup", async () => {

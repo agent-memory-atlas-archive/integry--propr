@@ -281,11 +281,29 @@ const browserSignInMessages = [
   "GitHub sign-in expired. Retry to request a new sign-in.",
   "GitHub sign-in was declined. Retry and approve the intended account.",
   "GitHub sign-in failed. Retry or check the OAuth app configuration.",
-  "The ProPR desktop OAuth app must issue non-expiring user tokens. Contact the desktop distributor to correct its configuration.",
+  "GitHub returned an invalid expiring sign-in. Retry or check the OAuth app configuration.",
+  "Saved GitHub sign-in expired or was revoked. Sign in to GitHub again to continue.",
+  "GitHub sign-in could not be renewed. Check your connection and retry.",
   "GitHub identity could not be verified. Retry sign-in.",
   "GitHub account was not confirmed. Retry sign-in and choose the intended account in GitHub.",
   "GitHub browser sign-in could not complete. Check your browser and connection, then retry."
 ] as const;
+
+/** The saved refresh grant is unusable; only a new device authorization can recover. */
+export const GITHUB_SIGN_IN_REVOKED_MESSAGE = "Saved GitHub sign-in expired or was revoked. Sign in to GitHub again to continue.";
+
+/**
+ * A GitHub OAuth App user credential issued by device flow. Non-expiring tokens
+ * carry only `accessToken`. Expiring tokens also carry epoch-millisecond expiry
+ * times and a single-use refresh token that rotates on every refresh. Never
+ * place any field other than the expiry times in logs, IPC, or renderer state.
+ */
+export interface GithubUserCredential {
+  accessToken: string;
+  expiresAt?: number;
+  refreshToken?: string;
+  refreshTokenExpiresAt?: number;
+}
 
 export class GithubBrowserSignInError extends Error {
   #safeMessage: string;

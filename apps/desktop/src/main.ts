@@ -21,7 +21,7 @@ import {
 } from '@propr/cli/desktop-discovery';
 import { createDesktopSetupHost } from '@propr/cli/desktop-local-setup';
 import type { SetupActions } from '@propr/local-setup';
-import { createGithubBrowserLogin } from './github-browser-auth';
+import { createGithubBrowserLogin, createGithubTokenRefresher } from './github-browser-auth';
 import { launchDesktopAuthentication } from './authentication-handoff';
 import { DesktopConnectDiscoveryService } from './connect-discovery';
 import { requestDesktopMicrophoneConsent } from './microphone-consent';
@@ -1894,12 +1894,14 @@ if (!hasSingleInstanceLock) {
       // macOS can only abort an asynchronous message box when it has a parent.
       return dialog.showMessageBox(mainWindow, options);
     };
+    const githubClientId = resolveGithubClientId(app.isPackaged, __PROPR_DESKTOP_GITHUB_CLIENT_ID__, process.env.PROPR_DESKTOP_GITHUB_CLIENT_ID);
     const setupHost = (process.platform === 'linux' || process.platform === 'darwin')
       ? await createDesktopSetupHost({
           configDir: join(app.getPath('userData'), 'local-setup', 'cli'),
           authenticationHandoff: launchDesktopAuthentication,
+          refreshGithubCredential: createGithubTokenRefresher({ clientId: githubClientId }),
           githubBrowserLogin: createGithubBrowserLogin({
-            clientId: resolveGithubClientId(app.isPackaged, __PROPR_DESKTOP_GITHUB_CLIENT_ID__, process.env.PROPR_DESKTOP_GITHUB_CLIENT_ID),
+            clientId: githubClientId,
             presentCode: createGithubCodePresenter({
               showDialog: showGithubDialog,
               copy: code => clipboard.writeText(code),

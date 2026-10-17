@@ -5,6 +5,7 @@ import { hostname } from "node:os";
 import { isAbsolute, normalize } from "node:path";
 import { DEFAULT_PROPR_GH_RELAY_URL } from "@propr/shared";
 import {
+  GITHUB_SIGN_IN_REVOKED_MESSAGE,
   GithubBrowserSignInError,
   applyEnvSelection,
   clearEnvKeys,
@@ -13,11 +14,12 @@ import {
   inspectDatastoreAdministrators,
   inspectStackInit,
   readEnvVars,
+  type GithubUserCredential,
   type PullImagesResult,
   type SetupActions,
 } from "@propr/local-setup";
 import type { ConfigManager } from "../../config/index.js";
-import type { RelayClientOptions } from "../../api/relay.js";
+import { RelayApiError, type RelayClientOptions } from "../../api/relay.js";
 import type { OrchestratorConfig, OrchestratorModule } from "../../orchestrator/types.js";
 import { dockerPublishedHostPort, localhostServiceUrl } from "../../utils/dockerPort.js";
 import { createDefaultAgentSetupActions } from "./agentHostActions.js";
@@ -35,6 +37,9 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> => new Promise((
   if (signal?.aborted) abort();
   else signal?.addEventListener("abort", abort, { once: true });
 });
+
+/** Refresh expiring GitHub tokens this long before GitHub's stated expiry. */
+const GITHUB_TOKEN_REFRESH_MARGIN_MS = 5 * 60_000;
 
 function assertSafeAgentCredentialDir(path: string, name = "Agent credential path"): void {
   if (!isAbsolute(path) || normalize(path) === "/" || path.includes(":") || /[\u0000-\u001f\u007f-\u009f]/.test(path)) {
@@ -90,10 +95,88 @@ async function managedUiLoopbackHosts(orch: OrchestratorModule, cfg: Orchestrato
 export function createDefaultActions(configManager?: ConfigManager, options: {
   authenticationHandoff?: AuthenticationCommandHandoff;
   capturedCommand?: CapturedCommandRunner;
-  githubBrowserLogin?: (options: { signal?: AbortSignal; onLog?: (line: string) => void }) => Promise<string>;
+  githubBrowserLogin?: (options: { signal?: AbortSignal; onLog?: (line: string) => void }) => Promise<string | GithubUserCredential>;
+  /** Rotate an expiring GitHub OAuth credential. Errors must be GithubBrowserSignInError. */
+  refreshGithubCredential?: (refreshToken: string, options: { signal?: AbortSignal }) => Promise<GithubUserCredential>;
+  now?: () => number;
 } = {}): SetupActions {
   let browserLoginFailure: string | undefined;
   let browserTokenSaveFailed = false;
+  let refreshing: Promise<string> | undefined;
+  const now = options.now ?? Date.now;
+
+  /** An expiring credential remains usable while its access token or refresh grant is live. */
+  const githubCredentialUsable = (credential: GithubUserCredential | undefined): boolean => {
+    if (!credential) return false;
+    if (credential.expiresAt === undefined || credential.expiresAt - now() > GITHUB_TOKEN_REFRESH_MARGIN_MS) return true;
+    return Boolean(credential.refreshToken && options.refreshGithubCredential
+      && (credential.refreshTokenExpiresAt === undefined || credential.refreshTokenExpiresAt > now()));
+  };
+
+  const discardRevokedGithubCredential = async (): Promise<never> => {
+    browserLoginFailure = GITHUB_SIGN_IN_REVOKED_MESSAGE;
+    // A revoked or expired grant cannot recover; remove it so setup asks for a
+    // new sign-in instead of repeatedly presenting a dead identity.
+    try { await configManager?.clearGithubToken(); } catch { browserTokenSaveFailed = true; }
+    throw new Error(GITHUB_SIGN_IN_REVOKED_MESSAGE);
+  };
+
+  const rotateGithubCredential = async (credential: GithubUserCredential): Promise<string> => {
+    if (!credential.refreshToken || !options.refreshGithubCredential
+      || (credential.refreshTokenExpiresAt !== undefined && credential.refreshTokenExpiresAt <= now())) {
+      return discardRevokedGithubCredential();
+    }
+    let rotated: GithubUserCredential;
+    try {
+      rotated = await options.refreshGithubCredential(credential.refreshToken, {});
+    } catch (error) {
+      // Provider/transport errors may contain credentials. Only fixed copy escapes.
+      const message = GithubBrowserSignInError.safeMessage(error);
+      if (message === GITHUB_SIGN_IN_REVOKED_MESSAGE) return discardRevokedGithubCredential();
+      throw new Error(message);
+    }
+    // A sign-in confirmed while the refresh was in flight wins; never let the
+    // previous account's rotated grant overwrite the newly confirmed identity.
+    const current = configManager?.getGithubCredential();
+    if (current?.refreshToken !== credential.refreshToken) {
+      if (!current) throw new Error("Not logged in to GitHub. Run `propr login` first.");
+      return current.accessToken;
+    }
+    try {
+      // GitHub has already invalidated the previous pair: persist before use.
+      await configManager!.setGithubCredential(rotated);
+    } catch {
+      browserTokenSaveFailed = true;
+      browserLoginFailure = "GitHub sign-in was renewed, but ProPR could not save it on this computer. Check available storage, then sign in again.";
+      throw new Error(browserLoginFailure);
+    }
+    return rotated.accessToken;
+  };
+
+  /** Return a live GitHub user token, refreshing an expiring credential once across concurrent callers. */
+  const currentGithubToken = async ({ forceRefresh = false }: { forceRefresh?: boolean } = {}): Promise<string> => {
+    if (browserTokenSaveFailed) throw new Error("GitHub sign-in could not be saved. Choose Retry setup to sign in again.");
+    if (refreshing) return refreshing;
+    const credential = configManager?.getGithubCredential();
+    if (!credential) throw new Error("Not logged in to GitHub. Run `propr login` first.");
+    if (credential.expiresAt === undefined) return credential.accessToken;
+    if (!forceRefresh && credential.expiresAt - now() > GITHUB_TOKEN_REFRESH_MARGIN_MS) return credential.accessToken;
+    refreshing = rotateGithubCredential(credential).finally(() => { refreshing = undefined; });
+    return refreshing;
+  };
+
+  /** Run a relay call with a live token; an expiring token rejected early is refreshed once. */
+  const withRelayClient = async <T>(relayUrl: string | undefined, call: (client: RelayClientOptions) => Promise<T>): Promise<T> => {
+    const client = relayClient(relayUrl, await currentGithubToken());
+    try {
+      return await call(client);
+    } catch (error) {
+      const credential = configManager?.getGithubCredential();
+      if (!(error instanceof RelayApiError) || error.status !== 401 || credential?.accessToken !== client.githubToken
+        || credential.expiresAt === undefined) throw error;
+      return call(relayClient(relayUrl, await currentGithubToken({ forceRefresh: true })));
+    }
+  };
   /** A client pointed at the local stack's API port (not the saved remote URL). */
   const localApiClient = async (rootDir: string): Promise<import("../../api/client.js").ApiClient> => {
     const { getHostConfig } = await import("../../orchestrator/index.js");
@@ -443,27 +526,29 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
       } : undefined;
     },
     hasGithubToken() {
-      return !browserTokenSaveFailed && Boolean(configManager?.getGithubToken());
+      return !browserTokenSaveFailed && githubCredentialUsable(configManager?.getGithubCredential());
     },
     async fetchRelayInstallations({ relayUrl }) {
       const { fetchAuthenticatedUser } = await import("../../api/relay.js");
-      const me = await fetchAuthenticatedUser(relayClient(relayUrl));
+      const me = await withRelayClient(relayUrl, fetchAuthenticatedUser);
       return { username: me.username, installations: me.installations };
     },
     async enrollRelay({ relayUrl, installationId, label }) {
       const { enrollRelayToken } = await import("../../api/relay.js");
-      const client = relayClient(relayUrl);
       // Default the token label to the hostname, mirroring `propr relay enroll`.
-      const result = await enrollRelayToken(client, { installationId, label: label ?? hostname() });
-      return { relayUrl: client.baseUrl, token: result.token };
+      return withRelayClient(relayUrl, async client => {
+        const result = await enrollRelayToken(client, { installationId, label: label ?? hostname() });
+        return { relayUrl: client.baseUrl, token: result.token };
+      });
     },
     async loginWithGithub({ onLog, signal, force } = {}) {
       if (!configManager) return false;
       if (options.githubBrowserLogin) {
         browserLoginFailure = undefined;
-        let token: string;
+        let credential: GithubUserCredential;
         try {
-          token = await options.githubBrowserLogin({ signal, onLog });
+          const result = await options.githubBrowserLogin({ signal, onLog });
+          credential = typeof result === "string" ? { accessToken: result } : result;
         } catch (error) {
           signal?.throwIfAborted();
           // Injected providers/transport errors may contain credentials. Never log them.
@@ -473,7 +558,9 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
         }
         signal?.throwIfAborted();
         try {
-          await configManager.setGithubToken(token);
+          // Replace the whole credential so a previous account's refresh token
+          // can never be paired with the newly confirmed identity.
+          await configManager.setGithubCredential(credential);
           browserTokenSaveFailed = false;
         } catch {
           browserTokenSaveFailed = true;
@@ -501,12 +588,7 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
    * Build a relay client bound to the stored GitHub token. The hosted relay is
    * the default base URL; an explicit `relayUrl` (self-hosted) overrides it.
    */
-  function relayClient(relayUrl?: string): RelayClientOptions {
-    if (browserTokenSaveFailed) throw new Error("GitHub sign-in could not be saved. Choose Retry setup to sign in again.");
-    const githubToken = configManager?.getGithubToken();
-    if (!githubToken) {
-      throw new Error("Not logged in to GitHub. Run `propr login` first.");
-    }
+  function relayClient(relayUrl: string | undefined, githubToken: string): RelayClientOptions {
     return { baseUrl: relayUrl ?? DEFAULT_PROPR_GH_RELAY_URL, githubToken };
   }
 }

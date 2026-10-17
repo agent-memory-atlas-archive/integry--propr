@@ -510,3 +510,70 @@ test("configuration writes refuse symbolic-link destinations", async () => {
     cleanupTempDir(tempDir);
   }
 });
+
+test("expiring GitHub credentials round-trip and are replaced as a whole", async () => {
+  const tempDir = createTempDir();
+  try {
+    const manager = new ConfigManager(tempDir);
+    await manager.init();
+    await manager.setRemoteUrl("https://remote.example.com");
+    const credential = { accessToken: "ghu_one", expiresAt: 1_000, refreshToken: "ghr_one", refreshTokenExpiresAt: 2_000 };
+    await manager.setGithubCredential(credential);
+
+    const reloaded = new ConfigManager(tempDir);
+    await reloaded.init();
+    assert.deepEqual(reloaded.getGithubCredential(), credential);
+    assert.equal(reloaded.getGithubToken(), "ghu_one");
+
+    // A plain token, a generic set, and a profile patch must not inherit the old refresh grant.
+    await reloaded.setGithubToken("gho_plain");
+    assert.deepEqual(reloaded.getGithubCredential(), { accessToken: "gho_plain" });
+    await reloaded.setGithubCredential(credential);
+    await reloaded.set("githubToken", "gho_generic");
+    assert.deepEqual(reloaded.getGithubCredential(), { accessToken: "gho_generic" });
+    await reloaded.setGithubCredential(credential);
+    await reloaded.setRemoteProfile("default", { githubToken: "gho_patch" });
+    assert.deepEqual(reloaded.getGithubCredential(), { accessToken: "gho_patch" });
+    await reloaded.setGithubCredential(credential);
+    await reloaded.setRemoteProfile("default", {}, ["githubToken"]);
+    assert.equal(reloaded.getGithubCredential(), undefined);
+    assert.deepEqual(reloaded.getRemoteProfiles().default, { remoteUrl: "https://remote.example.com" });
+
+    await reloaded.setGithubCredential(credential);
+    await reloaded.clearGithubToken();
+    assert.equal(reloaded.getGithubCredential(), undefined);
+    assert.deepEqual(JSON.parse(readFileSync(join(tempDir, "config.json"), "utf8")).profiles.default, { remoteUrl: "https://remote.example.com" });
+  } finally {
+    cleanupTempDir(tempDir);
+  }
+});
+
+test("orphaned or malformed GitHub expiry metadata is ignored on load", async () => {
+  const tempDir = createTempDir();
+  try {
+    writeFileSync(join(tempDir, "config.json"), JSON.stringify({ profiles: {
+      default: { githubRefreshToken: "ghr_orphan", githubTokenExpiresAt: 5 },
+      other: { githubToken: "ghu_x", githubTokenExpiresAt: "soon", githubRefreshToken: "ghr_x", githubRefreshTokenExpiresAt: -1 },
+    } }));
+    const manager = new ConfigManager(tempDir);
+    await manager.init();
+    assert.equal(manager.getGithubCredential(), undefined);
+    assert.deepEqual(manager.getRemoteProfiles().other, { githubToken: "ghu_x", githubRefreshToken: "ghr_x" });
+  } finally {
+    cleanupTempDir(tempDir);
+  }
+});
+
+test("a failed credential write leaves the previous credential in memory", async t => {
+  const tempDir = createTempDir();
+  try {
+    const manager = new ConfigManager(tempDir);
+    await manager.init();
+    await manager.setGithubCredential({ accessToken: "ghu_one", expiresAt: 1_000, refreshToken: "ghr_one" });
+    t.mock.method(manager, "save", async () => { throw new Error("disk full"); });
+    await assert.rejects(manager.setGithubCredential({ accessToken: "ghu_two", expiresAt: 2_000, refreshToken: "ghr_two" }), /disk full/);
+    assert.deepEqual(manager.getGithubCredential(), { accessToken: "ghu_one", expiresAt: 1_000, refreshToken: "ghr_one" });
+  } finally {
+    cleanupTempDir(tempDir);
+  }
+});
