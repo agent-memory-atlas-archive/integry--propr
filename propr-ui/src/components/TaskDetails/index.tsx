@@ -313,8 +313,9 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
     stopFailed: taskData.stopFailed,
     deletingTask: taskData.deletingTask,
     onStopExecution: taskData.handleStopExecution,
-    onViewPrompt: promptData.fetchPrompt,
-    onViewLogs: logFilesData.fetchLogFilesData,
+    // One viewer at a time: opening either closes the other and abandons its pending request.
+    onViewPrompt: (promptPath: string) => { logFilesData.closeLogFiles(); void promptData.fetchPrompt(promptPath); },
+    onViewLogs: (logsPath: string) => { promptData.closePrompt(); void logFilesData.fetchLogFilesData(logsPath); },
     onDeleteTask: handleDeleteTask,
     // A merged pull request takes no more follow-ups, so none are offered until the PR is known to be unmerged.
     // A task with no issue or pull request (an automation run's) has no thread to comment on.
@@ -451,7 +452,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
       <PromptModal
         prompt={promptData.selectedPrompt}
         loading={promptData.loadingPrompt}
-        onClose={() => promptData.setSelectedPrompt(null)}
+        onClose={promptData.closePrompt}
       />
 
       <LogFilesModal

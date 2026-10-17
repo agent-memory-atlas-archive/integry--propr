@@ -15,6 +15,8 @@ export const useLogFilesData = () => {
   const [searchMatches, setSearchMatches] = useState<RegExpMatchArray[]>([]);
   const [currentMatchIndex, setCurrentMatchIndex] = useState<number>(0);
   const logContentRef = useRef<HTMLPreElement | null>(null);
+  // Only the latest list request may open the viewer; closing it abandons any request still pending.
+  const viewerRequestRef = useRef(0);
 
   useEffect(() => {
     if (selectedLogFile && searchQuery) {
@@ -33,10 +35,13 @@ export const useLogFilesData = () => {
   }, [currentMatchIndex, searchMatches]);
 
   const fetchLogFilesData = async (logsPath: string) => {
+    const request = ++viewerRequestRef.current;
+    const isCurrent = () => request === viewerRequestRef.current;
     try {
       setLoadingLogFile(true);
       setSelectedLogFile(null);
       const logsData = await apiFetchLogFiles(logsPath);
+      if (!isCurrent()) return;
       if (!isLogFilesData(logsData)) throw new Error('Invalid log files response');
       
       if (logsData.files) {
@@ -54,15 +59,18 @@ export const useLogFilesData = () => {
         setLogFiles(logsData);
       }
     } catch (err) {
+      if (!isCurrent()) return;
       console.error('Error fetching log files:', err);
       setLogFiles({ error: 'Failed to load log files.' });
     } finally {
-      setLoadingLogFile(false);
+      if (isCurrent()) setLoadingLogFile(false);
     }
   };
 
   const fetchLogFile = async (fileName: string) => {
     if (!logFiles?.logFiles) return;
+    const request = viewerRequestRef.current;
+    const isCurrent = () => request === viewerRequestRef.current;
 
     try {
       setLoadingLogFile(true);
@@ -72,6 +80,7 @@ export const useLogFilesData = () => {
       }
 
       const content = await apiFetchLogFile(fileInfo.path);
+      if (!isCurrent()) return;
       const isJson = fileName.endsWith('.json');
 
       setSelectedLogFile({
@@ -81,6 +90,7 @@ export const useLogFilesData = () => {
       });
       setSearchQuery('');
     } catch (err) {
+      if (!isCurrent()) return;
       console.error('Error fetching log file:', err);
       setSelectedLogFile({
         name: fileName,
@@ -88,11 +98,13 @@ export const useLogFilesData = () => {
         isJson: false
       });
     } finally {
-      setLoadingLogFile(false);
+      if (isCurrent()) setLoadingLogFile(false);
     }
   };
 
   const closeLogFiles = () => {
+    viewerRequestRef.current++;
+    setLoadingLogFile(false);
     setLogFiles(null);
     setSelectedLogFile(null);
     setSearchQuery('');

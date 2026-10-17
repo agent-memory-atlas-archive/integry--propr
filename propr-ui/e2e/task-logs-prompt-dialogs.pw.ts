@@ -1,5 +1,5 @@
 /** The task header's Prompt and Logs viewers: usable on phones, literal log search, and proper dialog semantics. */
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
 import { ago, capture, fixture } from './task-list-desktop.fixture';
 import { expectClearOfChrome, expectWorkspaceInert, installWindowActions, type Shell } from './native-chrome.fixture';
 
@@ -265,6 +265,48 @@ test('phone 320x640: keyboard users can reach and scroll to the end of a long pr
   await page.keyboard.press('Shift+Tab');
   await expect(details).toBeFocused();
 });
+
+for (const first of ['Prompt', 'Logs'] as const) {
+  test(`phone 320x640: Prompt then Logs while both load opens only Logs (${first} response first)`, async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 640 });
+    await stubTask(page);
+    // Hold both responses until each viewer has been requested.
+    const held: Record<'Prompt' | 'Logs', () => Promise<void>> = { Prompt: async () => {}, Logs: async () => {} };
+    const requested = { Prompt: false, Logs: false };
+    const hold = (label: 'Prompt' | 'Logs', url: string, body: Parameters<Route['fulfill']>[0]) =>
+      page.route(url, route => {
+        requested[label] = true;
+        held[label] = () => route.fulfill(body);
+      });
+    await hold('Prompt', `**/api/execution/${sessionId}/prompt`, { contentType: 'application/json', body: JSON.stringify(prompt) });
+    await hold('Logs', `**/api/execution/${sessionId}/logs`, { json: {
+      sessionId, files: { conversation: `/var/log/propr/${fileName}` },
+    } });
+    await page.goto(`/tasks/${taskId}`);
+    await expect(page.getByRole('heading', { name: title }).first()).toBeVisible();
+
+    await open(page, 'Prompt');
+    await expect.poll(() => requested.Prompt).toBe(true);
+    const opener = await open(page, 'Logs');
+    await expect.poll(() => requested.Logs).toBe(true);
+    await held[first]();
+    await held[first === 'Prompt' ? 'Logs' : 'Prompt']();
+
+    const logs = page.getByRole('dialog', { name: 'Log Files' });
+    await expect(logs).toBeVisible();
+    await expect(logs.getByRole('button', { name: new RegExp(fileName) })).toBeVisible();
+    // The abandoned Prompt request never mounts a second dialog.
+    await expect(page.getByRole('dialog')).toHaveCount(1);
+    await expect(logs.getByRole('button', { name: 'Close log files' })).toBeFocused();
+    await expectWorkspaceInert(page, logs, [page.getByRole('heading', { name: title })]);
+
+    // Escape dismisses the active Logs dialog and the workspace is usable again.
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    expect(await page.getByRole('heading', { name: title }).first().evaluate(element => Boolean(element.closest('[inert]')))).toBe(false);
+  });
+}
 
 test('native Linux 1280x820: Logs keeps clear of the titlebar and side-by-side', async ({ page }) => {
   const shell: Shell = { platform: 'linux' };
