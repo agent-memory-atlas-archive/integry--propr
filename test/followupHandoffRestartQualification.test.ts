@@ -190,6 +190,12 @@ test('a worker restart recovers the persisted handoff and publishes the retained
             if (!existsSync(worktreePath)) return 'missing' as const;
             return git(worktreePath, 'branch', '--show-current') === branchName ? 'attached' as const : 'not_on_branch' as const;
         },
+        async branchWorktreeRegistrations(localRepoPath: string, branchName: string) {
+            return git(localRepoPath, 'worktree', 'list', '--porcelain').split('\n\n')
+                .filter(entry => entry.split('\n').includes(`branch refs/heads/${branchName}`))
+                .map(entry => entry.split('\n')[0].slice('worktree '.length))
+                .filter(holder => holder !== localRepoPath);
+        },
         async hasUncommittedChanges(worktreePath: string) {
             return git(worktreePath, 'status', '--porcelain', '--untracked-files=all') !== '';
         },
@@ -429,6 +435,12 @@ test('same-task redelivery is admitted through the real gate, continues checkpoi
         async worktreeAttachment(worktreePath: string, branchName: string) {
             if (!existsSync(worktreePath)) return 'missing' as const;
             return git(worktreePath, 'branch', '--show-current') === branchName ? 'attached' as const : 'not_on_branch' as const;
+        },
+        async branchWorktreeRegistrations(localRepoPath: string, branchName: string) {
+            return git(localRepoPath, 'worktree', 'list', '--porcelain').split('\n\n')
+                .filter(entry => entry.split('\n').includes(`branch refs/heads/${branchName}`))
+                .map(entry => entry.split('\n')[0].slice('worktree '.length))
+                .filter(holder => holder !== localRepoPath);
         },
         async hasUncommittedChanges(worktreePath: string) { return git(worktreePath, 'status', '--porcelain', '--untracked-files=all') !== ''; },
         async commitWork() { throw new Error('nothing to commit after the checkpointed publication'); },

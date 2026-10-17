@@ -273,6 +273,7 @@ const modules: Record<string, Record<string, unknown>> = {
     },
     prPendingComments: {
         restorePendingComments: async (comments: unknown[]) => { restoredComments.push(...comments); },
+        withdrawPendingComments: noOp,
         pickUpPendingCommentsWithClaim: async (comments: unknown[]) => ({ commentsToProcess: [...comments, ...pendingComments], pickedUpComments: pendingComments }),
         applyPendingCommentCommandContext: noOp,
     },

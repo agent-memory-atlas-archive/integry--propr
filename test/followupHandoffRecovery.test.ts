@@ -101,6 +101,12 @@ function createGitOps(counters: GitCounters) {
             if (!existsSync(worktreePath)) return 'missing' as const;
             return git(worktreePath, 'branch', '--show-current') === branchName ? 'attached' as const : 'not_on_branch' as const;
         },
+        async branchWorktreeRegistrations(localRepoPath: string, branchName: string) {
+            return git(localRepoPath, 'worktree', 'list', '--porcelain').split('\n\n')
+                .filter(entry => entry.split('\n').includes(`branch refs/heads/${branchName}`))
+                .map(entry => entry.split('\n')[0].slice('worktree '.length))
+                .filter(holder => holder !== localRepoPath);
+        },
         async hasUncommittedChanges(worktreePath: string) { return !clean(worktreePath); },
         async commitWork(worktreePath: string, message: string) {
             git(worktreePath, 'add', '-A');

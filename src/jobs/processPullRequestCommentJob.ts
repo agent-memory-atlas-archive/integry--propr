@@ -316,7 +316,7 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
             onContainerInfo: containerId => markExecutionHandoffContainer(state, containerId),
         });
         state.claudeResult = claudeResult;
-        await markExecutionHandoffAgentExited(state);
+        await markExecutionHandoffAgentExited(state, claudeResult.success === true);
 
         checkTerminalStateAfterExecution(await stateManager.getTaskState(taskId), taskId, correlatedLogger);
 

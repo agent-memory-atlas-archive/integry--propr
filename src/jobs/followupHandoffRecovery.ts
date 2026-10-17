@@ -89,7 +89,7 @@ async function adoptAndResume(
         try {
             return await resumeFollowupHandoff({
                 record: owned, octokit: await deps.getOctokit(), git: deps.git,
-                stateManager: deps.stateManager, restoreComments: deps.restoreComments,
+                stateManager: deps.stateManager, restoreComments: deps.restoreComments, withdrawRestoredComments: deps.withdrawRestoredComments,
                 store: deps.store, log: deps.log, taskStates: deps.taskStates, recoveredBy,
                 isOwnershipLost: () => leaseLost,
                 // No job drains the pending list after a standalone pass.
@@ -226,7 +226,7 @@ export async function adoptPredecessorFollowupHandoff(
         // the adopting job's own cleanup, which queues the pending follow-up.
         const resumed = await resumeFollowupHandoff({
             record: adopted, octokit: await resolved.getOctokit(), git: resolved.git,
-            stateManager: resolved.stateManager, restoreComments: resolved.restoreComments,
+            stateManager: resolved.stateManager, restoreComments: resolved.restoreComments, withdrawRestoredComments: resolved.withdrawRestoredComments,
             store: resolved.store, log: resolved.log, taskStates: resolved.taskStates, recoveredBy,
             isOwnershipLost: params.isOwnershipLost,
         });
@@ -309,7 +309,9 @@ export async function settleFollowupHandoffAfterFailure(
         const attachment = await git.worktreeAttachment(record.worktree_path, record.branch_name);
         if (attachment === 'missing') {
             unpublished = false;
-            branchHeld = false;
+            // A missing directory does not free the branch: Git keeps the
+            // worktree registration (and its claim) until it is removed.
+            branchHeld = (await git.branchWorktreeRegistrations(record.local_repo_path, record.branch_name)).length > 0;
         } else if (attachment === 'not_on_branch' || record.phase === 'committed' || record.phase === 'pushed') {
             unpublished = true;
         } else {

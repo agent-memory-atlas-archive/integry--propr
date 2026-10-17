@@ -3,7 +3,7 @@ import { after, beforeEach, mock, test } from 'node:test';
 import knex from 'knex';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { up } from '../packages/core/src/db/migrations/20261017000000_add_pr_followup_handoffs.js';
@@ -23,6 +23,14 @@ import { up } from '../packages/core/src/db/migrations/20261017000000_add_pr_fol
  * publication re-checks the lease before every PATCH/POST including the
  * pagination fallback (F18), and unavailable remote evidence fails closed in
  * the default git ops, the recovery pass and the admission gate (F20).
+ *
+ * Also regressions for review 6229380750: a missing worktree directory never
+ * proves branch release — every retirement path checks the repository's Git
+ * worktree registrations and access errors are not "missing" (F23); a
+ * cancellation during comment restoration withdraws the restored claims and
+ * holds the handoff instead of scheduling replacement work (F24); recovered
+ * completion comments bind accepted request bodies only when the agent's full
+ * success was recorded (S8).
  */
 
 const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
@@ -126,7 +134,7 @@ const { recordFailedClosed, resolveRecoveryDeps } = await import('../src/jobs/fo
 const { recoverInterruptedFollowupHandoffs } = await import('../src/jobs/followupHandoffRecovery.js');
 const {
     FollowupHandoffOwnershipLostError, gatePredecessorHandoff,
-    markExecutionHandoffCleanupPending, markExecutionHandoffCommitted, markExecutionHandoffPushed,
+    markExecutionHandoffAgentExited, markExecutionHandoffCleanupPending, markExecutionHandoffCommitted, markExecutionHandoffPushed,
     recordExecutionHandoff, retireExecutionHandoffAfterCleanup,
 } = await import('../src/jobs/prCommentHandoffIntegration.js');
 const { createFollowupHandoffGitOps } = await import('../src/jobs/followupHandoffGitOps.js');
@@ -166,6 +174,12 @@ function createGitOps(counters: GitCounters) {
         async worktreeAttachment(worktreePath: string, branchName: string) {
             if (!existsSync(worktreePath)) return 'missing' as const;
             return git(worktreePath, 'branch', '--show-current') === branchName ? 'attached' as const : 'not_on_branch' as const;
+        },
+        async branchWorktreeRegistrations(localRepoPath: string, branchName: string) {
+            return git(localRepoPath, 'worktree', 'list', '--porcelain').split('\n\n')
+                .filter(entry => entry.split('\n').includes(`branch refs/heads/${branchName}`))
+                .map(entry => entry.split('\n')[0].slice('worktree '.length))
+                .filter(holder => holder !== localRepoPath);
         },
         async hasUncommittedChanges(worktreePath: string) { return !clean(worktreePath); },
         async commitWork(worktreePath: string, message: string) {
@@ -951,4 +965,216 @@ test('F22: lease loss during the branch release leaves the row for the successor
     const outcome = await resumeFollowupHandoff(trackedResumeParams(h, pending, () => lost));
     assert.equal(outcome.outcome, 'ownership_lost');
     assert.equal((await loadFollowupHandoff({ database }, KEY))?.phase, 'cleanup_pending');
+});
+
+// --- Review 6229380750 F23: release proof comes from Git's worktree
+// registrations, never from a missing directory.
+
+test('F23: the default git ops report missing only for absent paths and reject access errors', async () => {
+    const h = await createHarness();
+    const ops = createFollowupHandoffGitOps(async () => 'token');
+    assert.equal(await ops.worktreeAttachment(path.join(h.fx.dir, 'absent'), BRANCH), 'missing');
+    const guarded = path.join(h.fx.dir, 'guarded');
+    await mkdir(path.join(guarded, 'wt'), { recursive: true });
+    await chmod(guarded, 0o000);
+    try {
+        await assert.rejects(ops.worktreeAttachment(path.join(guarded, 'wt'), BRANCH), /EACCES/);
+    } finally {
+        await chmod(guarded, 0o755);
+    }
+});
+
+test('F23: the default git ops read branch holders from the registrations, including removed directories', async () => {
+    const h = await createHarness();
+    const ops = createFollowupHandoffGitOps(async () => 'token');
+    assert.deepEqual(await ops.branchWorktreeRegistrations(h.fx.local, BRANCH), [h.fx.wt]);
+    await rm(h.fx.wt, { recursive: true, force: true });
+    assert.deepEqual(await ops.branchWorktreeRegistrations(h.fx.local, BRANCH), [h.fx.wt],
+        'a removed directory still holds the branch until its registration is gone');
+    git(h.fx.local, 'worktree', 'prune');
+    assert.deepEqual(await ops.branchWorktreeRegistrations(h.fx.local, BRANCH), []);
+    await assert.rejects(ops.branchWorktreeRegistrations(path.join(h.fx.dir, 'absent'), BRANCH));
+});
+
+test('F23: recovery cleanup keeps the handoff while a removed worktree is still registered on the branch', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const pending = await advanceFollowupHandoff({ database }, record, { phase: 'cleanup_pending' });
+    assert.ok(pending);
+    await rm(h.fx.wt, { recursive: true, force: true });
+
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, pending));
+    assert.equal(outcome.outcome, 'cleanup_pending');
+    const retained = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(retained?.phase, 'cleanup_pending', 'the stranded branch stays discoverable');
+    assert.equal(retained?.status, HANDOFF_ACTIVE);
+
+    // Once the registration itself is gone the branch is provably free.
+    git(h.fx.local, 'worktree', 'prune');
+    const retry = await resumeFollowupHandoff(trackedResumeParams(h, retained!));
+    assert.equal(retry.outcome, 'no_changes');
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+});
+
+test('F23: recovery cleanup keeps the handoff when worktree registrations are unreadable', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const pending = await advanceFollowupHandoff({ database }, record, { phase: 'cleanup_pending' });
+    assert.ok(pending);
+    git(h.fx.wt, 'checkout', '--detach');
+    h.gitOps.branchWorktreeRegistrations = async () => { throw new Error('git unavailable'); };
+
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, pending));
+    assert.equal(outcome.outcome, 'cleanup_pending');
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.phase, 'cleanup_pending');
+});
+
+test('F23: recovery cleanup keeps the handoff when the worktree path is inaccessible', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const pending = await advanceFollowupHandoff({ database }, record, { phase: 'cleanup_pending' });
+    assert.ok(pending);
+    const ops = createFollowupHandoffGitOps(async () => 'token');
+    await chmod(h.fx.dir, 0o000);
+    try {
+        const outcome = await resumeFollowupHandoff({ ...trackedResumeParams(h, pending), git: ops as never });
+        assert.equal(outcome.outcome, 'cleanup_pending', 'an access error is not release evidence');
+    } finally {
+        await chmod(h.fx.dir, 0o755);
+    }
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.phase, 'cleanup_pending');
+});
+
+test('F23: normal retirement keeps the handoff while a removed worktree is still registered on the branch', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const pending = await advanceFollowupHandoff({ database }, record, { phase: 'cleanup_pending' });
+    assert.ok(pending);
+    await rm(h.fx.wt, { recursive: true, force: true });
+
+    await retireExecutionHandoffAfterCleanup({ followupHandoff: pending }, silentLog as never);
+    const retained = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(retained?.phase, 'cleanup_pending', 'a missing directory is not release proof');
+
+    git(h.fx.local, 'worktree', 'prune');
+    await retireExecutionHandoffAfterCleanup({ followupHandoff: retained! }, silentLog as never);
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+});
+
+// --- Review 6229380750 F24: a cancellation during comment restoration never
+// schedules replacement work.
+
+test('F24: cancellation during restoration withdraws the restored claims and holds instead of scheduling', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const pending: number[] = [];
+    const scheduled: unknown[] = [];
+    const outcome = await resumeFollowupHandoff({
+        ...trackedResumeParams(h, record),
+        restoreComments: async (_record: unknown, claimed: Array<{ id: number }>) => {
+            pending.push(...claimed.map(comment => comment.id));
+            // The user cancels while the restoration is awaited.
+            h.stateManager.states.set('task-1', 'cancelled');
+        },
+        withdrawRestoredComments: async (_record: unknown, claimed: Array<{ id: number }>) => {
+            for (const comment of claimed) pending.splice(pending.indexOf(comment.id), 1);
+        },
+        scheduleRestoredComments: async (scheduledRecord: unknown) => { scheduled.push(scheduledRecord); },
+    });
+
+    assert.equal(outcome.outcome, 'awaiting_operator');
+    assert.deepEqual(scheduled, [], 'no replacement follow-up job is queued');
+    assert.deepEqual(pending, [], 'the restored claims cannot trigger automatic execution');
+    assert.equal(h.stateManager.states.get('task-1'), 'cancelled', 'the task is never marked failed');
+    const held = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(held?.status, HANDOFF_AWAITING_OPERATOR, 'the handoff stays for an operator decision');
+    assert.equal(held?.status_reason, 'cancelled_by_user');
+    assert.notEqual(held?.phase, 'cleanup_pending');
+    assert.equal(git(h.fx.wt, 'branch', '--show-current'), BRANCH, 'the branch is not released');
+});
+
+test('F24: a failed withdrawal still holds the cancelled handoff and schedules nothing', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const scheduled: unknown[] = [];
+    const outcome = await resumeFollowupHandoff({
+        ...trackedResumeParams(h, record),
+        restoreComments: async () => { h.stateManager.states.set('task-1', 'cancelled'); },
+        withdrawRestoredComments: async () => { throw new Error('redis unavailable'); },
+        scheduleRestoredComments: async (scheduledRecord: unknown) => { scheduled.push(scheduledRecord); },
+    });
+    assert.equal(outcome.outcome, 'awaiting_operator');
+    assert.deepEqual(scheduled, []);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
+});
+
+test('F24: a standalone recovery pass cancelled during restoration queues no follow-up job', async () => {
+    const h = await createHarness();
+    await seedHandoff(h);
+    const withdrawn: number[] = [];
+    queuedRecoveryJobs.length = 0;
+    const summary = await recoverInterruptedFollowupHandoffs({
+        ...h.deps,
+        restoreComments: async () => { h.stateManager.states.set('task-1', 'cancelled'); },
+        withdrawRestoredComments: async (_record: unknown, claimed: Array<{ id: number }>) => { withdrawn.push(...claimed.map(comment => comment.id)); },
+    } as never);
+    assert.equal(summary.awaitingOperator, 1);
+    assert.deepEqual(withdrawn, [11], 'the recovery pass wires the withdrawal through');
+    assert.deepEqual(queuedRecoveryJobs, [], 'the default scheduler never queued replacement work');
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
+});
+
+// --- Review 6229380750 S8: accepted-request evidence on recovered completions.
+
+const ACCEPTED_SHA = 'a'.repeat(64);
+
+async function seedCompletedPushed(h: Harness, agentCompleted: number | null) {
+    const record = await recordFollowupHandoff({
+        ref: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7 },
+        taskId: 'task-1', sourceTaskIds: [], correlationId: 'corr-1',
+        target: { repoOwner: 'acme', repoName: 'widgets', branchName: BRANCH, isFork: false },
+        worktreePath: h.fx.wt, localRepoPath: h.fx.local,
+        claimedComments: [{ id: 11, body: 'please fix the widget', author: 'alice', type: 'issue', acceptedBodySha256: ACCEPTED_SHA }],
+        jobData: { pullRequestNumber: 7, repoOwner: 'acme', repoName: 'widgets', correlationId: 'corr-1' } as never,
+        llm: 'claude', lockKey: LOCK, lockToken: 'dead-worker-token',
+    }, { database });
+    assert.ok(record);
+    await agentEdit(h.fx);
+    const head = commitInWorktree(h.fx);
+    git(h.fx.wt, 'push', 'origin', `HEAD:refs/heads/${BRANCH}`);
+    const pushed = await advanceFollowupHandoff({ database }, record!, { phase: 'pushed', commit_hash: head, agent_completed: agentCompleted });
+    assert.ok(pushed);
+    return pushed!;
+}
+
+test('S8: a recovered completion of a fully successful agent binds the accepted request bodies', async () => {
+    const h = await createHarness();
+    const pushed = await seedCompletedPushed(h, 1);
+    const outcome = await resumeFollowupHandoff(trackedResumeParams(h, pushed));
+    assert.equal(outcome.outcome, 'published');
+    assert.equal(h.octokit.comments.length, 1);
+    assert.match(h.octokit.comments[0].body, new RegExp(`<!-- propr:accepted-request comment-id=11 body-sha256=${ACCEPTED_SHA} -->`));
+});
+
+for (const agentCompleted of [0, null]) {
+    test(`S8: a recovered completion without recorded full success (${agentCompleted}) binds no accepted bodies`, async () => {
+        const h = await createHarness();
+        const pushed = await seedCompletedPushed(h, agentCompleted);
+        const outcome = await resumeFollowupHandoff(trackedResumeParams(h, pushed));
+        assert.equal(outcome.outcome, 'published');
+        assert.equal(h.octokit.comments.length, 1);
+        assert.doesNotMatch(h.octokit.comments[0].body, /propr:accepted-request/);
+        assert.match(h.octokit.comments[0].body, /11✓/, 'the completed comment IDs are still reported');
+    });
+}
+
+test('S8: the normal path records whether the agent exited with full success', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const carrier = { followupHandoff: record };
+    await markExecutionHandoffAgentExited(carrier, true);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.agent_completed, 1);
+    assert.equal(carrier.followupHandoff?.phase, 'agent_exited');
+    await markExecutionHandoffAgentExited(carrier, false);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.agent_completed, 0);
 });

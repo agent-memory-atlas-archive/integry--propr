@@ -22,7 +22,14 @@ export function isNonFastForwardPushError(error: unknown): boolean {
 }
 
 export interface FollowupHandoffGitOps {
+    /** 'missing' only when the path provably does not exist; any other access failure rejects. */
     worktreeAttachment(worktreePath: string, branchName: string): Promise<WorktreeAttachment>;
+    /**
+     * Linked worktrees the repository's Git registrations still record as
+     * holding the branch — including registrations whose directory is gone.
+     * Rejects when the registrations cannot be read.
+     */
+    branchWorktreeRegistrations(localRepoPath: string, branchName: string): Promise<string[]>;
     hasUncommittedChanges(worktreePath: string): Promise<boolean>;
     commitWork(worktreePath: string, message: string, pullRequestNumber: number): Promise<{ commitHash: string } | null>;
     hasUnpushedCommits(worktreePath: string, branchName: string): Promise<boolean>;
@@ -53,11 +60,25 @@ export function createFollowupHandoffGitOps(getToken: () => Promise<string>): Fo
         async worktreeAttachment(worktreePath, branchName) {
             try {
                 await access(worktreePath);
-            } catch {
-                return 'missing';
+            } catch (error) {
+                // A permission or I/O failure is unavailable evidence, not
+                // proof the worktree (or its branch registration) is gone.
+                const code = (error as NodeJS.ErrnoException).code;
+                if (code === 'ENOENT' || code === 'ENOTDIR') return 'missing';
+                throw error;
             }
             const current = (await createHooklessGit(worktreePath).raw(['branch', '--show-current'])).trim();
             return current === branchName ? 'attached' : 'not_on_branch';
+        },
+        async branchWorktreeRegistrations(localRepoPath, branchName) {
+            // Git keeps a worktree's registration (and its claim on the branch)
+            // separately from the directory, so a removed directory can still
+            // hold the branch until the registration itself is gone.
+            const listing = await createHooklessGit(localRepoPath).raw(['worktree', 'list', '--porcelain']);
+            return listing.split('\n\n').map(entry => entry.split('\n'))
+                .filter(lines => lines.includes(`branch refs/heads/${branchName}`))
+                .map(lines => lines.find(line => line.startsWith('worktree '))?.slice('worktree '.length) ?? '')
+                .filter(holder => holder !== localRepoPath);
         },
         async hasUncommittedChanges(worktreePath) {
             const status = await createHooklessGit(worktreePath).raw(['status', '--porcelain', '--untracked-files=all']);

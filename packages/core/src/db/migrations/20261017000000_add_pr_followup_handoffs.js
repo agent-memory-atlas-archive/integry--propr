@@ -22,6 +22,10 @@ export async function up(knex) {
         table.string('llm', 255);
         // agent_running | agent_exited | committed | pushed | comment_published | cleanup_pending
         table.string('phase', 32).notNullable().defaultTo('agent_running');
+        // 1 when the agent exited reporting full success, 0 when it stopped
+        // short, null until it exits. Only a recorded full success lets a
+        // recovered completion comment bind the accepted request bodies.
+        table.integer('agent_completed');
         // active | awaiting_operator | released
         table.string('status', 32).notNullable().defaultTo('active');
         table.string('status_reason', 255);

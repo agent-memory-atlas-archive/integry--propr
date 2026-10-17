@@ -108,9 +108,13 @@ export async function markExecutionHandoffContainer(state: HandoffCarrier, conta
     await advanceExecutionHandoff(state, { container_id: containerId });
 }
 
-/** Marks the agent exited so recovery knows execution itself finished. */
-export async function markExecutionHandoffAgentExited(state: HandoffCarrier): Promise<void> {
-    await advanceExecutionHandoff(state, { phase: 'agent_exited' });
+/**
+ * Marks the agent exited so recovery knows execution itself finished, and
+ * whether it reported full success — the only evidence that lets a recovered
+ * completion comment bind the accepted request bodies.
+ */
+export async function markExecutionHandoffAgentExited(state: HandoffCarrier, agentCompleted: boolean): Promise<void> {
+    await advanceExecutionHandoff(state, { phase: 'agent_exited', agent_completed: agentCompleted ? 1 : 0 });
 }
 
 /** Records the normal path's commit so restart recovery resumes from the push, not from scratch. */
@@ -147,7 +151,8 @@ export async function markExecutionHandoffCleanupPending(state: HandoffCarrier, 
 
 /**
  * Retires the handoff only once the worktree cleanup proved branch release
- * (the worktree is gone or detached). A still-attached branch keeps the row at
+ * (no Git worktree registration holds the branch any more). A still-held
+ * branch — or unreadable registrations — keeps the row at
  * cleanup_pending, blocking successors until recovery releases it durably.
  */
 export async function retireExecutionHandoffAfterCleanup(state: HandoffCarrier, correlatedLogger: Logger): Promise<void> {
@@ -164,9 +169,12 @@ export async function retireExecutionHandoffAfterCleanup(state: HandoffCarrier, 
         const git = createFollowupHandoffGitOps(async () => {
             throw new Error('Branch-release evidence needs no push token');
         });
-        if (await git.worktreeAttachment(fresh.worktree_path, fresh.branch_name) === 'attached') {
-            correlatedLogger.warn({ worktreePath: fresh.worktree_path, branchName: fresh.branch_name },
-                'The follow-up branch is still attached after cleanup; the handoff is retained for recovery to release it');
+        // The repository's worktree registrations are the release proof: a
+        // removed directory whose registration survives still holds the branch.
+        const holders = await git.branchWorktreeRegistrations(fresh.local_repo_path, fresh.branch_name);
+        if (holders.length > 0) {
+            correlatedLogger.warn({ worktreePath: fresh.worktree_path, branchName: fresh.branch_name, holders },
+                'The follow-up branch is still registered to a worktree after cleanup; the handoff is retained for recovery to release it');
             return;
         }
         await finalizeFollowupHandoff({}, fresh);

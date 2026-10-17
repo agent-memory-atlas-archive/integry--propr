@@ -1,5 +1,5 @@
 import type { UnprocessedComment } from '@propr/core';
-import { buildWorkEvidenceMarker, filterRealComments } from '../shared/workEvidenceMarker.js';
+import { buildAcceptedRequestMarkers, buildWorkEvidenceMarker, filterRealComments } from '../shared/workEvidenceMarker.js';
 import type { FollowupHandoffGitOps } from './followupHandoffGitOps.js';
 import {
     advanceFollowupHandoff, finalizeFollowupHandoff, parseClaimedComments, parseSourceTaskIds,
@@ -67,6 +67,12 @@ export interface ResumeFollowupHandoffParams {
      * it because the adopting job's own cleanup queues that follow-up.
      */
     scheduleRestoredComments?(record: FollowupHandoffRecord): Promise<void>;
+    /**
+     * Removes restored claimed comments from the pending list again when the
+     * originating task was cancelled while they were being restored, so they
+     * cannot trigger automatic execution without an operator decision.
+     */
+    withdrawRestoredComments?(record: FollowupHandoffRecord, comments: UnprocessedComment[]): Promise<void>;
 }
 
 export type ResumeOutcome =
@@ -139,11 +145,16 @@ function ownershipLost(params: ResumeFollowupHandoffParams, record: FollowupHand
  * step. The task-state read is itself awaited, so a lease loss it observed is
  * reported too — neither an operator hold nor the caller's mutation may follow.
  */
-async function cancellationHold(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome | null> {
+async function cancellationHold(
+    params: ResumeFollowupHandoffParams,
+    record: FollowupHandoffRecord,
+    beforeHold?: () => Promise<void>,
+): Promise<ResumeOutcome | null> {
     if (record.operator_authorized) return ownershipLost(params, record) ? { outcome: 'ownership_lost' } : null;
     const taskState = await params.stateManager.getTaskState(record.task_id);
     if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
     if (taskState?.state !== params.taskStates.CANCELLED) return null;
+    await beforeHold?.();
     return holdForOperator(params, record, 'cancelled_by_user');
 }
 
@@ -189,6 +200,11 @@ function recoveredCompletionBody(record: FollowupHandoffRecord): string {
         record.commit_hash ? `Commit: \`${record.commit_hash}\`` : '',
         ids.length ? `---\nComment ID${ids.length > 1 ? 's' : ''}: ${ids.map(id => `${id}✓`).join(', ')}` : '',
         buildWorkEvidenceMarker('completed', ids),
+        // Like the normal completion footer, accepted request bodies are bound
+        // only when full completion is substantiated: the agent itself exited
+        // reporting success. A lost or stopped-short agent keeps the completed
+        // marker but binds nothing.
+        record.agent_completed === 1 ? buildAcceptedRequestMarkers(comments) : '',
     ].filter(Boolean).join('\n\n');
 }
 
@@ -286,15 +302,18 @@ async function attemptHandoffCleanup(params: ResumeFollowupHandoffParams, record
     if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
     let released = false;
     try {
-        // A worktree that normal cleanup already removed or detached before the
-        // row could retire no longer holds the branch — that is the release
-        // proof this phase owes, so the row must not stay pending forever.
         const attachment = await params.git.worktreeAttachment(record.worktree_path, record.branch_name);
         // The lease can be lost while the attachment is inspected; the branch
         // release then belongs to the successor that now owns the handoff.
         if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
-        released = attachment !== 'attached'
-            || await params.git.releaseSettledWorktree(record.local_repo_path, record.branch_name, record.worktree_path);
+        if (attachment !== 'attached'
+            || await params.git.releaseSettledWorktree(record.local_repo_path, record.branch_name, record.worktree_path)) {
+            // Release proof is the repository's own worktree registrations, not
+            // the directory: a worktree removed (or detached) by normal cleanup
+            // is free, but a removed directory whose registration survives
+            // still holds the branch, and the row must stay discoverable.
+            released = (await params.git.branchWorktreeRegistrations(record.local_repo_path, record.branch_name)).length === 0;
+        }
     } catch (error) {
         params.log.warn({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, error: (error as Error).message },
             'Branch release from the settled worktree failed; the handoff is retained to retry cleanup');
@@ -314,6 +333,22 @@ async function attemptHandoffCleanup(params: ResumeFollowupHandoffParams, record
     return record.commit_hash ? { outcome: 'published', commitHash: record.commit_hash } : { outcome: 'no_changes' };
 }
 
+/**
+ * Best effort by necessity: the operator hold that follows is the durable
+ * obligation, and a withdrawal failure is logged rather than letting it skip
+ * that hold. A crash before the hold leaves the row active, and the next pass
+ * holds it on its initial cancellation check.
+ */
+async function withdrawCancelledClaims(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord, claimed: UnprocessedComment[]): Promise<void> {
+    if (!params.withdrawRestoredComments) return;
+    try {
+        await params.withdrawRestoredComments(record, claimed);
+    } catch (error) {
+        params.log.error({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, error: (error as Error).message },
+            'Could not withdraw restored comments of a cancelled follow-up from the pending list');
+    }
+}
+
 async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
     // Cancellation or lease loss may land while the Git evidence or the notice
     // request is awaited: publication re-checks both before its mutation, and
@@ -323,9 +358,15 @@ async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record:
     if ('done' in notice) return notice.done;
     const hold = await cancellationHold(params, record);
     if (hold) return hold;
-    await params.restoreComments(record, parseClaimedComments(record));
-    // A successor that adopts this phase restores (deduplicated) and schedules again.
-    if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
+    const claimed = parseClaimedComments(record);
+    await params.restoreComments(record, claimed);
+    // A successor that adopts this phase restores (deduplicated) and schedules
+    // again. A cancellation that landed while the restoration was awaited must
+    // not schedule replacement work: the restored claims are withdrawn from
+    // the pending list (so no follow-up job picks them up) before the handoff
+    // is held for an explicit operator decision.
+    const lateHold = await cancellationHold(params, record, () => withdrawCancelledClaims(params, record, claimed));
+    if (lateHold) return lateHold;
     await params.scheduleRestoredComments?.(record);
     if (!await finalizeRecoveredTask(params, record, false)) return { outcome: 'ownership_lost' };
     const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'cleanup_pending' });

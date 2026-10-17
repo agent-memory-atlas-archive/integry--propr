@@ -37,6 +37,8 @@ export interface FollowupHandoffRecord {
     job_data: string;
     llm: string | null;
     phase: string;
+    /** 1 = agent exited with full success, 0 = stopped short, null = unknown (not exited, or lost). */
+    agent_completed?: number | null;
     status: string;
     status_reason: string | null;
     operator_authorized: number;
@@ -239,7 +241,7 @@ async function insertHandoff(deps: FollowupHandoffStoreDeps, record: FollowupHan
 }
 
 export type FollowupHandoffChanges = Partial<Pick<FollowupHandoffRecord,
-    'phase' | 'status' | 'status_reason' | 'operator_authorized'
+    'phase' | 'agent_completed' | 'status' | 'status_reason' | 'operator_authorized'
     | 'commit_hash' | 'completion_comment_url' | 'starting_comment_id' | 'lock_token'
     | 'container_id' | 'successor_task_id'>>;
 

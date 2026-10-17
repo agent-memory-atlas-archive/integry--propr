@@ -4,7 +4,7 @@ import {
 } from '@propr/core';
 import type { UnprocessedComment } from '@propr/core';
 import type { PRProcessingLockRedisClient } from './prProcessingLock.js';
-import { restorePendingComments } from './prPendingComments.js';
+import { restorePendingComments, withdrawPendingComments } from './prPendingComments.js';
 import { createFollowupHandoffGitOps, type FollowupHandoffGitOps } from './followupHandoffGitOps.js';
 import { splitHandoffRepository, type HandoffOctokit, type HandoffStateManager, type HandoffTaskStates, type LoggerLike } from './followupHandoffResume.js';
 import {
@@ -29,6 +29,8 @@ export interface FollowupHandoffRecoveryDeps {
     inspectLiveness?: (taskId: string) => Promise<TaskContainerInspection>;
     git?: FollowupHandoffGitOps;
     restoreComments?: (record: FollowupHandoffRecord, comments: UnprocessedComment[]) => Promise<void>;
+    /** Removes restored comments of a cancelled no-change recovery from the pending list again. */
+    withdrawRestoredComments?: (record: FollowupHandoffRecord, comments: UnprocessedComment[]) => Promise<void>;
     /** Queues the follow-up job that picks up comments a standalone no-change recovery restored. */
     scheduleRestoredComments?: (record: FollowupHandoffRecord) => Promise<void>;
     taskStates?: HandoffTaskStates;
@@ -46,6 +48,7 @@ export interface ResolvedRecoveryDeps {
     inspectLiveness: (taskId: string) => Promise<TaskContainerInspection>;
     git: FollowupHandoffGitOps;
     restoreComments: (record: FollowupHandoffRecord, comments: UnprocessedComment[]) => Promise<void>;
+    withdrawRestoredComments: (record: FollowupHandoffRecord, comments: UnprocessedComment[]) => Promise<void>;
     scheduleRestoredComments: (record: FollowupHandoffRecord) => Promise<void>;
     taskStates: HandoffTaskStates;
     heartbeatIntervalMs?: number;
@@ -109,6 +112,13 @@ export async function resolveRecoveryDeps(deps: FollowupHandoffRecoveryDeps): Pr
             await restorePendingComments(comments, {
                 repoOwner: owner, repoName: repo, pullRequestNumber: record.pull_request,
                 redisClient: resolvedRedis as Parameters<typeof restorePendingComments>[1]['redisClient'],
+            });
+        }),
+        withdrawRestoredComments: deps.withdrawRestoredComments ?? (async (record, comments) => {
+            const { owner, repo } = splitHandoffRepository(record.repository);
+            await withdrawPendingComments(comments.map(comment => comment.id), {
+                repoOwner: owner, repoName: repo, pullRequestNumber: record.pull_request,
+                redisClient: resolvedRedis as Parameters<typeof withdrawPendingComments>[1]['redisClient'],
             });
         }),
         scheduleRestoredComments: deps.scheduleRestoredComments ?? queueRestoredCommentFollowup,

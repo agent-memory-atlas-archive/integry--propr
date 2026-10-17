@@ -112,6 +112,12 @@ function createGitOps(counters: GitCounters) {
             if (!existsSync(worktreePath)) return 'missing' as const;
             return git(worktreePath, 'branch', '--show-current') === branchName ? 'attached' as const : 'not_on_branch' as const;
         },
+        async branchWorktreeRegistrations(localRepoPath: string, branchName: string) {
+            return git(localRepoPath, 'worktree', 'list', '--porcelain').split('\n\n')
+                .filter(entry => entry.split('\n').includes(`branch refs/heads/${branchName}`))
+                .map(entry => entry.split('\n')[0].slice('worktree '.length))
+                .filter(holder => holder !== localRepoPath);
+        },
         async hasUncommittedChanges(worktreePath: string) { return !clean(worktreePath); },
         async commitWork(worktreePath: string, message: string) {
             git(worktreePath, 'add', '-A');
@@ -497,15 +503,45 @@ test('F4/F15: a handled failure with no unpublished work keeps the row until bra
     assert.equal(await loadFollowupHandoff({ database }, KEY), undefined, 'the row retires once the branch is free');
 });
 
-test('F4/F15: a handled failure whose worktree is already gone retires the handoff', async () => {
+test('F23: a handled failure whose worktree directory is gone but still registered keeps the handoff', async () => {
     const h = await createHarness();
     await seedHandoff(h);
     await rm(h.fx.wt, { recursive: true, force: true });
+    assert.ok(git(h.fx.local, 'worktree', 'list', '--porcelain').includes(`branch refs/heads/${BRANCH}`),
+        'Git still records the removed worktree as holding the branch');
+    await settleFollowupHandoffAfterFailure(
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, taskId: 'task-1', cancelled: false },
+        { store: { database }, git: h.gitOps as never, log: silentLog },
+    );
+    const kept = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(kept?.status, HANDOFF_ACTIVE, 'the branch obligation stays discoverable');
+    assert.equal(kept?.phase, 'cleanup_pending');
+});
+
+test('F4/F15/F23: a handled failure whose worktree registration is gone retires the handoff', async () => {
+    const h = await createHarness();
+    await seedHandoff(h);
+    await rm(h.fx.wt, { recursive: true, force: true });
+    git(h.fx.local, 'worktree', 'prune');
     await settleFollowupHandoffAfterFailure(
         { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, taskId: 'task-1', cancelled: false },
         { store: { database }, git: h.gitOps as never, log: silentLog },
     );
     assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+});
+
+test('F23: unreadable worktree registrations after a failure keep the handoff', async () => {
+    const h = await createHarness();
+    await seedHandoff(h);
+    await rm(h.fx.wt, { recursive: true, force: true });
+    const blindGit = { ...h.gitOps, branchWorktreeRegistrations: async () => { throw new Error('git unavailable'); } };
+    await settleFollowupHandoffAfterFailure(
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, taskId: 'task-1', cancelled: false },
+        { store: { database }, git: blindGit as never, log: silentLog },
+    );
+    const kept = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(kept?.status, HANDOFF_ACTIVE);
+    assert.equal(kept?.status_reason, 'publication_failed');
 });
 
 test('F4: unreadable publication evidence after a failure fails closed and keeps the handoff', async () => {
