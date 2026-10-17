@@ -72,6 +72,11 @@ function answerOpening(text: string, length: number): string {
 }
 
 const MIN_RESTART_OPENING = 16;
+/**
+ * Only the answer's structural opening is compared: a restart repeats it
+ * (`{"action":"modified","summary":"`) but may reword the text after it.
+ */
+const RESTART_OPENING = 32;
 
 /**
  * Index of the block where the model last started its answer over. After the
@@ -81,7 +86,7 @@ const MIN_RESTART_OPENING = 16;
  * resumes mid-text and does not repeat the answer's opening.
  */
 function restartIndex(parts: string[]): number {
-    const opening = answerOpening(parts[0] ?? '', 64);
+    const opening = answerOpening(parts[0] ?? '', RESTART_OPENING);
     if (opening.length < MIN_RESTART_OPENING) return 0;
     for (let index = parts.length - 1; index > 0; index--) {
         const candidate = answerOpening(parts[index], opening.length);

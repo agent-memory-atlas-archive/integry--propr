@@ -83,3 +83,11 @@ test('a short or non-repeating continuation is still joined', () => {
   // An opening too short to identify a restart is not treated as one.
   assert.equal(getFinalAnswerText([assistant('m1', text('[')), assistant('m2', text('[1]]'))]), '[[1]]');
 });
+
+test('a restart that rewords the answer after its opening is still recognised', () => {
+  // Seen with Opus 5: both attempts open the same way, then the summary differs.
+  const first = '{\n  "action": "modified",\n  "summary": "Dropped the JSON history file completely and';
+  const restart = '{\n  "action": "modified",\n  "summary": "Dropped the JSON history backend.",\n  "plan": []\n}';
+  const conversationLog = [assistant('msg_1', text(first)), assistant('msg_2', text(restart))];
+  assert.equal(getClaudeAnalysisText({ finalResult: { result: restart }, conversationLog }), restart);
+});
