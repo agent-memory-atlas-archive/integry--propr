@@ -83,6 +83,40 @@ async function handleWorktreeConflict(): Promise<void> {
     throw new Error('Existing worktree retained; branch is in use');
 }
 
+/** The worktree path named by Git when a branch is checked out elsewhere. */
+export function worktreeHoldingBranch(message: string): string | null {
+    return /already (?:used by worktree|checked out) at '([^']+)'/.exec(message)?.[1] ?? null;
+}
+
+/**
+ * Frees a branch held by a worktree that has nothing left to lose: no
+ * uncommitted or untracked changes, and a HEAD already contained in the
+ * freshly fetched remote branch. Such a holder is typically left by an attempt
+ * that was killed before cleanup (a worker restart), and would otherwise block
+ * every later job on the branch. Like failure cleanup, the worktree is kept and
+ * only its HEAD is detached. Returns false, changing nothing, when it is unsafe.
+ */
+export async function releaseBranchFromSettledWorktree(git: SimpleGit, branchName: string, holderPath: string): Promise<boolean> {
+    if (!await fs.pathExists(holderPath)) return false;
+    const holderGit = createHooklessGit(holderPath);
+    const holder = (args: string[]) => holderGit.raw(['-c', `safe.directory=${holderPath}`, ...args]);
+    try {
+        if ((await holder(['branch', '--show-current'])).trim() !== branchName) return false;
+        if ((await holder(['status', '--porcelain', '--untracked-files=all'])).trim()) return false;
+        const head = (await holder(['rev-parse', 'HEAD'])).trim();
+        // Read a count rather than an exit status: simple-git can resolve a
+        // nonzero exit without stderr, as `merge-base --is-ancestor` produces.
+        const unpushed = (await git.raw(['rev-list', '--count', head, '--not', `refs/remotes/origin/${branchName}`])).trim();
+        if (unpushed !== '0') return false;
+        await holder(['checkout', '--detach']);
+        logger.warn({ branchName, holderPath, head }, 'Released branch from a settled worktree left by an earlier attempt; the worktree is kept with a detached HEAD');
+        return true;
+    } catch (error) {
+        logger.warn({ branchName, holderPath, error: redactAuthenticatedGitUrl((error as Error).message) }, 'Could not check whether the worktree holding the branch is settled');
+        return false;
+    }
+}
+
 async function handleImproperWorktree(_worktreePath: string, _branchName: string, error: Error): Promise<void> {
     throw error;
 }
@@ -120,12 +154,20 @@ async function createWorktreeFromRemote(git: SimpleGit, worktreePath: string, br
             logger.warn({ error: (listError as Error).message }, 'Failed to list existing worktrees');
         }
 
-        const worktreeAddResult = await addWorktreeWithoutTracking(
+        const addWorktree = () => addWorktreeWithoutTracking(
             git,
             worktreePath,
             branchName,
             { startPoint: `origin/${branchName}`, resetBranch: true },
         );
+        let worktreeAddResult: string;
+        try {
+            worktreeAddResult = await addWorktree();
+        } catch (error) {
+            const holderPath = worktreeHoldingBranch((error as Error).message || '');
+            if (!holderPath || !await releaseBranchFromSettledWorktree(git, branchName, holderPath)) throw error;
+            worktreeAddResult = await addWorktree();
+        }
         logger.info({ branchName, worktreePath, gitOutput: worktreeAddResult.trim() }, 'Git worktree add command completed');
 
     } catch (error) {
