@@ -40,7 +40,7 @@ VIBE_CLI_VERSION="${VIBE_CLI_VERSION:-2.25.8}"
 # mismatch here would ship a different Agent Tank build under an existing tag.
 # `assert_agent_tank_version_matches_pin` enforces that, including for an
 # environment override, rather than trusting the convention.
-AGENT_TANK_CLI_VERSION="${AGENT_TANK_CLI_VERSION:-0.9.11}"
+AGENT_TANK_CLI_VERSION="${AGENT_TANK_CLI_VERSION:-0.10.0}"
 PUSH_LATEST="${PUSH_LATEST:-true}"
 
 VERSION="$(node -p "require('./package.json').version")"
@@ -55,7 +55,7 @@ AGENT_BUNDLE_CONTENT_FILES=(
   Dockerfile.agent
   scripts/agent-entrypoint.sh
   scripts/agent-tank-runtime.mjs
-  patches/agent-tank-0.9.11.patch
+  patches/agent-tank-0.10.0.patch
   scripts/claude-entrypoint.sh
   scripts/codex-entrypoint.sh
   scripts/antigravity-entrypoint.sh

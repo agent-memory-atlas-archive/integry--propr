@@ -38,11 +38,21 @@ const integrationScript = readFileSync('scripts/integration-test-images.sh', 'ut
 const smokeScript = readFileSync('scripts/smoke-test-images.sh', 'utf8');
 const releaseImageWorkflow = readFileSync('.github/workflows/docker-images.yml', 'utf8');
 const prBuildWorkflow = readFileSync('.github/workflows/pr-build-check.yml', 'utf8');
-const fixturePath = new URL('./fixtures/agent-tank-verifier-pinned-0.9.11.json', import.meta.url)
+const fixturePath = new URL('./fixtures/agent-tank-verifier-pinned-0.10.0.json', import.meta.url)
     .pathname;
 const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
     cliVersion: string;
-    status: Record<string, { name: string; usage: Record<string, unknown> }>;
+    /** The 0.10.0 canonical `--once --json` envelope. */
+    status: {
+        providers: {
+            id: string;
+            provider: string;
+            status: string;
+            error: string | null;
+            windows: Record<string, unknown>[];
+            raw: { name: string; usage: Record<string, unknown>; error: string | null };
+        }[];
+    };
 };
 
 const PINNED_VERSION = fixture.cliVersion;
@@ -54,7 +64,15 @@ interface VerificationOptions {
     /** What `agent-tank --version` reports from inside the image. */
     bundledVersion?: 'pinned' | 'older' | 'missing';
     /** What the Agent Tank run prints. */
-    usage?: 'canonical' | 'banner' | 'error' | 'empty-usage' | 'missing-provider' | 'unparseable' | 'crash';
+    usage?:
+        | 'canonical'
+        | 'legacy-map'
+        | 'banner'
+        | 'error'
+        | 'empty-usage'
+        | 'missing-provider'
+        | 'unparseable'
+        | 'crash';
     /** What the read-only mount probe reports. */
     mounts?: 'read-only' | 'writable' | 'silent' | 'root-user';
     /** Simulates a mount that was not actually read-only. */
@@ -135,20 +153,34 @@ if (evidence === 'unparseable') {
   process.exit(0);
 }
 
-const status = {};
+// Agent Tank 0.10.0 canonical envelope: { providers: [...] }, keyed by the
+// configured id, with the 0.9.x payload under \`raw\`.
+const providers = [];
 for (const provider of mounted) {
   if (evidence === 'missing-provider' && provider === 'codex') continue;
-  const reported = JSON.parse(JSON.stringify(fixture.status[provider]));
+  const canonical = fixture.status.providers.find(entry => entry.id === provider);
+  const reported = JSON.parse(JSON.stringify(canonical));
   if (evidence === 'error') {
-    reported.usage = {};
+    reported.status = 'error';
     reported.error = 'Timeout waiting for usage data';
+    reported.windows = [];
+    reported.raw.usage = {};
+    reported.raw.error = reported.error;
   }
-  if (evidence === 'empty-usage') reported.usage = {};
-  status[provider] = reported;
+  if (evidence === 'empty-usage') {
+    reported.windows = [];
+    reported.raw.usage = {};
+  }
+  providers.push(reported);
 }
 
+// 0.9.x printed a map keyed by provider id holding what is now \`raw\`.
+const document = evidence === 'legacy-map'
+  ? Object.fromEntries(providers.map(entry => [entry.id, entry.raw]))
+  : { providers };
+
 const banner = evidence === 'banner' ? 'Agent Tank starting\\u2026\\n' : '';
-process.stdout.write(\`\${banner}\${JSON.stringify(status, null, 2)}\\n\`);
+process.stdout.write(\`\${banner}\${JSON.stringify(document, null, 2)}\\n\`);
 `;
 
 function runVerification(options: VerificationOptions = {}): VerificationRun {
@@ -417,6 +449,26 @@ test('leading banner output is tolerated exactly as the production parser tolera
 
     assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
     assert.match(result.stdout, /claude: session\.percent=42/);
+});
+
+test('the legacy 0.9.x provider map is still accepted', () => {
+    const result = runVerification({ usage: 'legacy-map' });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(result.stdout, /claude: session\.percent=42, weeklyAll\.percent=31/);
+    assert.match(result.stdout, /codex: fiveHour\.percentUsed=9/);
+    assert.match(result.stdout, /agy: models\[Gemini 3\.8 Flash\]\.percentUsed=16/);
+    // Canonical windows only exist in the 0.10.0 envelope.
+    assert.doesNotMatch(result.stdout, /windows\[/);
+});
+
+test('canonical windows count as usage evidence and Antigravity is matched by id', () => {
+    const result = runVerification();
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(result.stdout, /claude: session\.percent=42, weeklyAll\.percent=31, windows\[session\/0\]\.used_percent=42/);
+    // The canonical provider is "antigravity"; the configured id "agy" is the key.
+    assert.match(result.stdout, /agy: models\[Gemini 3\.8 Flash\]\.percentUsed=16.*windows\[session\/Gemini 3\.8 Flash\]\.used_percent=16/);
 });
 
 test('a credential mount that is not read-only fails the verification', async t => {

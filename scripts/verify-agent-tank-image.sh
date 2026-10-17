@@ -317,7 +317,34 @@ if ! usage_summary="$(
         process.stderr.write(`Agent Tank produced unparseable JSON: ${error.message}\n`);
         process.exit(1);
       }
-      const agents = parsed && parsed.agents && typeof parsed.agents === "object" ? parsed.agents : parsed;
+      // Agent Tank 0.10.0+ emits the canonical { providers: [...] } envelope,
+      // with the 0.9.x per-provider payload kept unchanged under `raw`. The
+      // legacy map ({ claude: {...} } or { agents: {...} }) is still accepted.
+      // Canonical entries are indexed by `id` (ProPR pins it to the provider
+      // key), falling back to `provider`; for Antigravity the canonical
+      // `provider` is "antigravity", so `id` must win.
+      const byProvider = {};
+      if (parsed && Array.isArray(parsed.providers)) {
+        for (const entry of parsed.providers) {
+          if (!entry || typeof entry !== "object") continue;
+          const raw = entry.raw && typeof entry.raw === "object" ? entry.raw : {};
+          const key = typeof entry.id === "string" && entry.id
+            ? entry.id
+            : (typeof entry.provider === "string" ? entry.provider : null);
+          if (!key || byProvider[key]) continue;
+          byProvider[key] = {
+            error: typeof entry.error === "string" ? entry.error : raw.error,
+            usage: raw.usage,
+            windows: Array.isArray(entry.windows) ? entry.windows : [],
+          };
+        }
+      } else {
+        const agents = parsed && parsed.agents && typeof parsed.agents === "object" ? parsed.agents : parsed;
+        for (const [key, status] of Object.entries(agents || {})) {
+          if (!status || typeof status !== "object") continue;
+          byProvider[key] = { error: status.error, usage: status.usage, windows: [] };
+        }
+      }
       // Only metric names and numbers are printed: a status payload can carry
       // account metadata, which has no place in CI logs.
       const metrics = value => {
@@ -336,10 +363,17 @@ if ! usage_summary="$(
         }
         return found;
       };
+      const windowMetrics = windows => windows
+        .filter(window => window && typeof window === "object" && typeof window.used_percent === "number")
+        .map((window, index) => {
+          const type = typeof window.type === "string" ? window.type : "window";
+          const model = typeof window.model === "string" ? window.model : String(index);
+          return `windows[${type}/${model}].used_percent=${window.used_percent}`;
+        });
       const lines = [];
       for (const provider of expected) {
-        const status = agents?.[provider];
-        if (!status || typeof status !== "object") {
+        const status = byProvider[provider];
+        if (!status) {
           process.stderr.write(`Agent Tank reported nothing for provider ${provider}\n`);
           process.exit(1);
         }
@@ -347,7 +381,7 @@ if ! usage_summary="$(
           process.stderr.write(`Agent Tank reported an error for provider ${provider}: ${status.error}\n`);
           process.exit(1);
         }
-        const found = metrics(status.usage);
+        const found = [...metrics(status.usage), ...windowMetrics(status.windows)];
         if (found.length === 0) {
           process.stderr.write(`Agent Tank reported no usage numbers for provider ${provider}\n`);
           process.exit(1);

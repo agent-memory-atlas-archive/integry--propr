@@ -29,9 +29,9 @@ info:
     name: Apache-2.0
     identifier: Apache-2.0
   x-route-coverage:
-    total: 303
+    total: 304
     documented: 68
-    undocumented: 235
+    undocumented: 236
 servers:
   - url: "{origin}"
     description: Your ProPR API origin, for example the value of `API_PUBLIC_URL`.
@@ -2192,6 +2192,32 @@ paths:
     get:
       operationId: getApiConfigAgentTankDetect
       summary: GET /api/config/agent-tank/detect
+      description: |-
+        This route is registered but not documented yet.
+
+        Requires the `instance.manage_agents` instance permission.
+      tags:
+        - Configuration
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Success. The response body is not documented yet.
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_agents
+      x-undocumented: true
+      x-legacy-error: true
+  /api/config/agent-tank/history:
+    get:
+      operationId: getApiConfigAgentTankHistory
+      summary: GET /api/config/agent-tank/history
       description: |-
         This route is registered but not documented yet.
 

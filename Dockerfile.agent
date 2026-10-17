@@ -155,12 +155,12 @@ RUN case "${VIBE_CLI_VERSION}" in \
 
 FROM agent-base AS agent-tank-cli
 # Local upstream fixes until the next Agent Tank release includes them.
-COPY patches/agent-tank-0.9.11.patch /tmp/agent-tank.patch
+COPY patches/agent-tank-0.10.0.patch /tmp/agent-tank.patch
 # Pinned here, not in CI: this literal is part of the Dockerfile content that
 # feeds the agent bundle content hash, so bumping it produces a new image tag.
 # An env-only override in CI would NOT change the tag and would silently ship a
 # different binary under an existing tag - do not do that.
-ARG AGENT_TANK_CLI_VERSION=0.9.11
+ARG AGENT_TANK_CLI_VERSION=0.10.0
 USER root
 # node-pty compiles against the toolchain already present in agent-base
 # (build-essential + python3), which is why this needs no extra apt packages.
@@ -215,7 +215,7 @@ ARG CODEX_CLI_VERSION=0.160.0
 ARG ANTIGRAVITY_CLI_VERSION=1.4.0
 ARG OPENCODE_CLI_VERSION=1.18.31
 ARG VIBE_CLI_VERSION=2.25.8
-ARG AGENT_TANK_CLI_VERSION=0.9.11
+ARG AGENT_TANK_CLI_VERSION=0.10.0
 
 LABEL dev.propr.agent-bundle="true" \
       dev.propr.agent.claude.version="${CLAUDE_CLI_VERSION}" \

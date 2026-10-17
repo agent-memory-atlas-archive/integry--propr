@@ -11,6 +11,8 @@ import {
 import {
     normalizeAgentTankAgents,
     normalizeAgentTankStatus,
+    parseAgentTankStatus,
+    parseAgentTankStatusMap,
     toAgentTankAgent,
     type AgentStatusResponse,
 } from './agentTankTypes.js';
@@ -23,10 +25,12 @@ export {
     isUsableAgentTankStatus,
     normalizeAgentTankAgents,
     normalizeAgentTankStatus,
+    parseAgentTankStatus,
+    parseAgentTankStatusMap,
     toAgentTankAgent,
     toProprAgent,
 } from './agentTankTypes.js';
-export type { AgentStatusResponse } from './agentTankTypes.js';
+export type { AgentStatusResponse, AgentTankUsageWindow } from './agentTankTypes.js';
 
 // Refresh can take 15-20 seconds when CLI agent needs cold start
 const DEFAULT_TIMEOUT_MS = 25000;
@@ -146,7 +150,10 @@ export async function getStatus(
         if (!response.ok) {
             throw new Error(`Agent Tank returned HTTP ${response.status}: ${response.statusText}`);
         }
-        const data = (await response.json()) as AgentStatusResponse;
+        // `/status/:id` answers one canonical provider object from 0.10 on,
+        // and the bare legacy payload before that.
+        const data = parseAgentTankStatus(await response.json(), tankAgent);
+        if (!data) throw new Error('Agent Tank returned an unreadable status document');
         const normalized = normalizeAgentTankStatus(data);
         // Published here rather than on a timer: this is the only component that
         // reads the external service, so it is the only one that can tell a
@@ -211,6 +218,22 @@ export async function getStatusForAlias(
 export async function getAllStatuses(
     options: { refresh?: boolean } = {}
 ): Promise<Record<string, AgentStatusResponse> | undefined> {
+    const agents = await readAllStatuses(options);
+    // Every aggregate read - the sidebar, the usage watcher, the MCP tool - is
+    // also a history sample, which is the only history bundled mode has. The
+    // recorder is loaded lazily so the database stays out of this module's
+    // static graph: per-call usage tracking imports this router in processes
+    // (and tests) that never open the database.
+    if (agents) {
+        const { recordAgentTankUsageHistory } = await import('./agentTankUsageHistory.js');
+        await recordAgentTankUsageHistory(agents);
+    }
+    return agents;
+}
+
+async function readAllStatuses(
+    options: { refresh?: boolean }
+): Promise<Record<string, AgentStatusResponse> | undefined> {
     const settings = await loadAgentTankSettings();
     if (settings.mode === 'disabled') return undefined;
     if (settings.mode === 'bundled') {
@@ -223,8 +246,7 @@ export async function getAllStatuses(
     try {
         const response = await fetch(`${settings.url}/status`, { signal: controller.signal });
         if (!response.ok) return undefined;
-        const data = await response.json() as Record<string, AgentStatusResponse>;
-        return normalizeAgentTankAgents(data);
+        return normalizeAgentTankAgents(parseAgentTankStatusMap(await response.json()));
     } catch {
         return undefined;
     } finally {

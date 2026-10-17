@@ -18,7 +18,7 @@ import { executeDockerCommand } from '../claude/docker/dockerExecutor.js';
 import { loadAgents, resolveConfigPath, resolveCodexConfigPath } from '../config/configManager.js';
 import { CONTAINER_CONFIG_PATHS } from '../agents/types.js';
 import type { AgentConfig } from '../agents/types.js';
-import { toAgentTankAgent, type AgentStatusResponse } from './agentTankTypes.js';
+import { parseAgentTankStatusMap, toAgentTankAgent, type AgentStatusResponse } from './agentTankTypes.js';
 
 /**
  * A bundled refresh starts a container and drives interactive `/usage` calls
@@ -263,10 +263,11 @@ export function buildBundledAgentTankConfig(entries: BundledAgentTankEntry[]): s
 }
 
 /**
- * ONE OF TWO PLACES that know the Agent Tank output schema. Upstream
- * `--once --json` prints `watcher.getStatus()`, a bare map keyed by agent id;
- * we also accept an `{ agents: {...} }` envelope so a minor upstream wrapper
- * change does not break the integration.
+ * ONE OF TWO PLACES that know the Agent Tank output schema. Agent Tank 0.10
+ * `--once --json` prints `{ providers: [...] }` in its canonical shape, keyed
+ * here by the pinned `id`; 0.9.x printed a bare map keyed by agent id, and an
+ * `{ agents: {...} }` envelope is accepted too, so an image built against
+ * either release keeps working (see `parseAgentTankStatusMap`).
  */
 export function parseBundledAgentTankOutput(stdout: string): Record<string, AgentStatusResponse> {
     const trimmed = stdout.trim();
@@ -275,31 +276,14 @@ export function parseBundledAgentTankOutput(stdout: string): Record<string, Agen
     // rather than assuming the whole buffer parses.
     const start = trimmed.indexOf('{');
     if (start < 0) return {};
-    let parsed: Record<string, unknown>;
+    let parsed: unknown;
     try {
-        parsed = JSON.parse(trimmed.slice(start)) as Record<string, unknown>;
+        parsed = JSON.parse(trimmed.slice(start));
     } catch (error) {
         logger.warn({ error: (error as Error).message }, 'Bundled Agent Tank produced unparseable JSON');
         return {};
     }
-    const source = (parsed.agents && typeof parsed.agents === 'object')
-        ? parsed.agents as Record<string, unknown>
-        : parsed;
-    const agents: Record<string, AgentStatusResponse> = {};
-    for (const [key, value] of Object.entries(source)) {
-        if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
-        const status = value as Partial<AgentStatusResponse>;
-        agents[key] = {
-            name: typeof status.name === 'string' ? status.name : key,
-            usage: (status.usage && typeof status.usage === 'object')
-                ? status.usage as Record<string, unknown>
-                : {},
-            metadata: status.metadata,
-            lastUpdated: status.lastUpdated,
-            error: typeof status.error === 'string' ? status.error : null,
-        };
-    }
-    return agents;
+    return parseAgentTankStatusMap(parsed);
 }
 
 /**

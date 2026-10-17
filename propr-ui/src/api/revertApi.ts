@@ -3,11 +3,13 @@ import {
   AGENT_TANK_LEGACY_BACKEND_MESSAGE,
   buildAgentTankSettingsRequest,
   supportsAgentTankModes,
+  type AgentTankHistoryResponse,
   type AgentTankMode,
 } from '@propr/shared';
 import type { PostFollowupResponse, SummarizationSettings } from './proprTypes';
 
 export type { SummarizationSettings };
+export type { AgentTankHistoryAgent, AgentTankHistoryPoint, AgentTankHistoryResponse, AgentTankHistorySeries } from '@propr/shared';
 
 export interface RevertParams {
   repo: string;
@@ -141,7 +143,9 @@ export interface AgentUsageData {
     weeklySonnet?: AgentUsageMetric;
     weeklyFable?: AgentUsageMetric;
     weekly?: AgentUsageMetric;
-    models?: Array<{ model: string; percentUsed: number; resetsIn?: string }>;
+    // `group`/`cycle` arrive from Agent Tank 0.9.9+ for grouped Antigravity
+    // pools, including the separately tracked Gemini 4 Argon quota.
+    models?: Array<{ model: string; percentUsed: number; resetsIn?: string; group?: string; cycle?: string }>;
     fiveHour?: { percentUsed: number; resetsIn?: string };
   } | null;
   error?: string | null;
@@ -160,6 +164,30 @@ export const getAgentTankUsage = async (
   const response = await apiFetch(`${API_BASE_URL}/api/config/agent-tank/usage`, {
     credentials: 'include',
     signal: options.signal,
+  });
+  await handleApiResponse(response);
+  return response.json();
+};
+
+export interface AgentTankHistoryQuery {
+  /** Inclusive range, epoch ms. */
+  since: number;
+  until?: number;
+  /** ProPR-facing agent names; all agents when omitted. */
+  agents?: string[];
+  /** Only this Agent Tank metric key (e.g. `session`, `model:Gemini 4 Argon Weekly Limit`). */
+  metric?: string;
+  signal?: AbortSignal;
+}
+
+export const getAgentTankHistory = async (query: AgentTankHistoryQuery): Promise<AgentTankHistoryResponse> => {
+  const params = new URLSearchParams({ since: String(Math.floor(query.since)) });
+  if (query.until !== undefined) params.set('until', String(Math.floor(query.until)));
+  if (query.agents?.length) params.set('agent', query.agents.join(','));
+  if (query.metric) params.set('metric', query.metric);
+  const response = await apiFetch(`${API_BASE_URL}/api/config/agent-tank/history?${params}`, {
+    credentials: 'include',
+    signal: query.signal,
   });
   await handleApiResponse(response);
   return response.json();

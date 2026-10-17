@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 
 process.env.NODE_ENV = 'test';
 
-const { hasAgentTankStatuses, hasUsableAgentTankStatuses } = await import('../../core/src/services/agentTankTypes.js');
+const { hasAgentTankStatuses, hasUsableAgentTankStatuses, parseAgentTankStatusMap } = await import('../../core/src/services/agentTankTypes.js');
 
 let snapshot: Record<string, unknown> | undefined;
 const refreshCalls: Array<{ force?: boolean }> = [];
@@ -34,6 +34,8 @@ await mock.module('@propr/core', {
     canRunBundledAgentTank: async () => false,
     hasAgentTankStatuses,
     hasUsableAgentTankStatuses,
+    parseAgentTankStatusMap,
+    readAgentTankUsageHistory: async () => ({ enabled: true, source: 'propr', agents: [] }),
   },
 });
 

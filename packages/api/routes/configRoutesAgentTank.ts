@@ -5,9 +5,10 @@ import {
   getAgentTankStatuses,
   hasAgentTankStatuses,
   hasUsableAgentTankStatuses,
+  parseAgentTankStatusMap,
   refreshBundledStatuses
 } from '@propr/core';
-import { AGENT_TANK_MODES, isAgentTankMode, normalizeAgentTankMode } from '@propr/shared';
+import { AGENT_TANK_HISTORY_RETENTION_DAYS, AGENT_TANK_MODES, isAgentTankMode, normalizeAgentTankMode } from '@propr/shared';
 
 /**
  * Tells every open tab that capacity may have moved.
@@ -24,6 +25,41 @@ function publishUsageChanged(): void {
   } catch {
     // Freshness only; the write that caused this already succeeded.
   }
+}
+
+const DEFAULT_HISTORY_RANGE_MS = 24 * 60 * 60 * 1000;
+
+/** Epoch ms or an ISO 8601 string; undefined when absent, NaN when unreadable. */
+function parseTime(value: unknown): number | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (typeof value !== 'string') return Number.NaN;
+  return /^\d+$/.test(value) ? Number(value) : Date.parse(value);
+}
+
+/**
+ * `?since=&until=` (epoch ms or ISO 8601), `?agent=claude,codex`, `?metric=`.
+ * The range defaults to the last day and is clamped to what history retains.
+ */
+export function parseHistoryQuery(
+  query: Record<string, unknown>,
+  now: number = Date.now()
+): { since: number; until: number; agents?: string[]; metric?: string } | { error: string } {
+  const until = parseTime(query.until) ?? now;
+  const since = parseTime(query.since) ?? until - DEFAULT_HISTORY_RANGE_MS;
+  if (!Number.isFinite(since) || !Number.isFinite(until)) {
+    return { error: 'since and until must be epoch milliseconds or ISO 8601 timestamps' };
+  }
+  if (since > until) return { error: 'since must not be after until' };
+  const agents = typeof query.agent === 'string'
+    ? query.agent.split(',').map(agent => agent.trim()).filter(Boolean)
+    : undefined;
+  const metric = typeof query.metric === 'string' && query.metric ? query.metric : undefined;
+  return {
+    since: Math.max(since, now - AGENT_TANK_HISTORY_RETENTION_DAYS * DEFAULT_HISTORY_RANGE_MS),
+    until,
+    ...(agents?.length ? { agents } : {}),
+    ...(metric ? { metric } : {}),
+  };
 }
 
 export function createAgentTankRoutes() {
@@ -153,6 +189,20 @@ export function createAgentTankRoutes() {
     }
   }
 
+  async function getAgentTankHistory(req: Request, res: Response): Promise<void> {
+    try {
+      const query = parseHistoryQuery(req.query as Record<string, unknown>);
+      if ('error' in query) {
+        res.status(400).json({ error: query.error });
+        return;
+      }
+      res.json(await configManager.readAgentTankUsageHistory(query));
+    } catch (error) {
+      console.error('Error in /api/config/agent-tank/history GET:', error);
+      res.status(500).json({ error: 'Failed to read Agent Tank usage history' });
+    }
+  }
+
   async function postAgentTankRefresh(_req: Request, res: Response): Promise<void> {
     try {
       const settings = await configManager.loadAgentTankSettings();
@@ -226,9 +276,9 @@ export function createAgentTankRoutes() {
         const response = await fetch(`${DEFAULT_URL}/status`, { signal: controller.signal });
         clearTimeout(timer);
         if (response.ok) {
-          const data = await response.json();
-          // Check if we got valid agent data
-          const hasAgents = data && typeof data === 'object' && Object.keys(data).length > 0;
+          // Either response generation: 0.10's `{ providers: [...] }` or the
+          // 0.9.x map. An empty `providers` list is not an installation to offer.
+          const hasAgents = hasAgentTankStatuses(parseAgentTankStatusMap(await response.json()));
           if (hasAgents) {
             res.json({ detected: true, mode: 'external', url: DEFAULT_URL });
             return;
@@ -252,6 +302,7 @@ export function createAgentTankRoutes() {
     postAgentTankSettings,
     getAgentTankStatus,
     getAgentTankUsage,
+    getAgentTankHistory,
     postAgentTankRefresh,
     getAgentTankDetect
   };
