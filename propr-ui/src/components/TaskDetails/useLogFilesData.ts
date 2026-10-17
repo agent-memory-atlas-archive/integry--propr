@@ -5,6 +5,7 @@ import {
 } from '../../api/proprApi';
 import { LogFilesData, SelectedLogFileData } from './types';
 import { isLogFilesData } from './apiDataGuards';
+import { findLogMatches, logSearchText } from './logSearch';
 
 export const useLogFilesData = () => {
   const [logFiles, setLogFiles] = useState<LogFilesData | null>(null);
@@ -17,25 +18,17 @@ export const useLogFilesData = () => {
 
   useEffect(() => {
     if (selectedLogFile && searchQuery) {
-      const content = selectedLogFile.isJson
-        ? JSON.stringify(selectedLogFile.content, null, 2)
-        : selectedLogFile.content;
-      const regex = new RegExp(searchQuery, 'gi');
-      const matches = [...(content as string).matchAll(regex)];
-      setSearchMatches(matches);
-      setCurrentMatchIndex(0);
+      setSearchMatches(findLogMatches(logSearchText(selectedLogFile.content, selectedLogFile.isJson), searchQuery));
     } else {
       setSearchMatches([]);
     }
+    setCurrentMatchIndex(0);
   }, [searchQuery, selectedLogFile]);
 
   useEffect(() => {
     if (searchMatches.length > 0 && logContentRef.current) {
-      const highlightId = `match-${currentMatchIndex}`;
-      const element = document.getElementById(highlightId);
-      if (element) {
-        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
+      const element = logContentRef.current.querySelector(`[data-match-index="${currentMatchIndex}"]`);
+      element?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
     }
   }, [currentMatchIndex, searchMatches]);
 
@@ -102,6 +95,7 @@ export const useLogFilesData = () => {
   const closeLogFiles = () => {
     setLogFiles(null);
     setSelectedLogFile(null);
+    setSearchQuery('');
   };
 
   return {
