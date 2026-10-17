@@ -276,6 +276,28 @@ export async function advanceFollowupHandoff(
 }
 
 /**
+ * Records a diagnostic status reason without advancing the record's
+ * generation. Discovery-time diagnostics run before any lease is held, so they
+ * must never invalidate a live owner's generation-fenced publication
+ * checkpoints; the incarnation match still keeps the write off a newer row.
+ */
+export async function recordFollowupHandoffDiagnostic(
+    deps: FollowupHandoffStoreDeps,
+    record: Pick<FollowupHandoffRecord, 'repository' | 'pull_request' | 'task_id' | 'incarnation'>,
+    statusReason: string,
+): Promise<boolean> {
+    const updated = await database(deps)(PR_FOLLOWUP_HANDOFFS_TABLE)
+        .where({
+            repository: record.repository,
+            pull_request: record.pull_request,
+            task_id: record.task_id,
+            incarnation: record.incarnation,
+        })
+        .update({ status_reason: statusReason, updated_at: nowMs(deps) });
+    return updated > 0;
+}
+
+/**
  * Deletes the handoff only while it is still the one the caller read, so a
  * stale finalizer can never drop a newer task's obligation.
  */

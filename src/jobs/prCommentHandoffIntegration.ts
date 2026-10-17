@@ -3,7 +3,7 @@ import type { Logger } from 'pino';
 import type { Redis } from 'ioredis';
 import { createHooklessGit } from '@propr/core';
 import type { CommentJobData, JobResult, UnprocessedComment, WorkerStateManager } from '@propr/core';
-import { advanceFollowupHandoff, finalizeFollowupHandoff, recordFollowupHandoff, type FollowupHandoffRecord } from './followupHandoffStore.js';
+import { advanceFollowupHandoff, finalizeFollowupHandoff, loadFollowupHandoff, recordFollowupHandoff, HANDOFF_ACTIVE, type FollowupHandoffRecord } from './followupHandoffStore.js';
 import { adoptPredecessorFollowupHandoff, settleFollowupHandoffAfterFailure } from './followupHandoffRecovery.js';
 import { schedulePRCommentRecovery } from './prCommentCollisionRecovery.js';
 import { releasePRProcessingLock, startPRProcessingLockHeartbeat } from './prProcessingLock.js';
@@ -49,7 +49,7 @@ async function worktreeHeadSha(worktreePath: string): Promise<string | null> {
 
 /** Persists the handoff right before the agent launches. */
 export async function recordExecutionHandoff(params: RecordExecutionHandoffParams): Promise<void> {
-    const { state, job, ref, correlatedLogger } = params;
+    const { state, job, ref } = params;
     const worktreeInfo = state.worktreeInfo!;
     state.followupHandoff = await recordFollowupHandoff({
         ref, taskId: params.taskId,
@@ -62,13 +62,44 @@ export async function recordExecutionHandoff(params: RecordExecutionHandoffParam
         binding: { ...params.binding, headSha: await worktreeHeadSha(worktreeInfo.worktreePath) },
     });
     if (!state.followupHandoff) {
-        correlatedLogger.warn({ pullRequestNumber: ref.pullRequestNumber }, 'Could not record the follow-up publication handoff; restart recovery is unavailable for this attempt');
+        // An unresolved different-task row still owns the publication
+        // obligation for this pull request; launching an untracked agent on
+        // top of it would recreate the unrecoverable-restart failure.
+        throw new Error(`Follow-up publication handoff for PR #${ref.pullRequestNumber} could not be recorded because an unresolved previous attempt still owns it; the agent launch is refused`);
+    }
+}
+
+/** Thrown when the durable handoff moved on without this writer; continuing untracked would let recovery republish or restore already-addressed work. */
+export class FollowupHandoffOwnershipLostError extends Error {
+    constructor(reason: string) {
+        super(`Follow-up publication handoff ownership was lost (${reason}); stopping before further publication`);
+        this.name = 'FollowupHandoffOwnershipLostError';
     }
 }
 
 async function advanceExecutionHandoff(state: HandoffCarrier, changes: Parameters<typeof advanceFollowupHandoff>[2]): Promise<void> {
     if (!state.followupHandoff) return;
-    state.followupHandoff = await advanceFollowupHandoff({}, state.followupHandoff, changes);
+    const record = state.followupHandoff;
+    const advanced = await advanceFollowupHandoff({}, record, changes);
+    if (advanced) {
+        state.followupHandoff = advanced;
+        return;
+    }
+    // A bare generation conflict can come from a benign concurrent write; it is
+    // retried once from a re-read that proves this writer still owns the row.
+    // Anything else is lost ownership, and the publication fails closed rather
+    // than continuing without durable tracking.
+    const fresh = await loadFollowupHandoff({}, record);
+    if (fresh && fresh.task_id === record.task_id && fresh.incarnation === record.incarnation
+        && fresh.status === HANDOFF_ACTIVE && fresh.lock_token === record.lock_token) {
+        const retried = await advanceFollowupHandoff({}, fresh, changes);
+        if (retried) {
+            state.followupHandoff = retried;
+            return;
+        }
+    }
+    state.followupHandoff = null;
+    throw new FollowupHandoffOwnershipLostError(fresh ? 'handoff_record_changed' : 'handoff_record_missing');
 }
 
 /** Binds the launched agent container's immutable identity to the handoff. */
@@ -119,9 +150,14 @@ function predecessorBlockReason(adoption: Awaited<ReturnType<typeof adoptPredece
     if ('blocked' in adoption && adoption.blocked) return adoption.blocked;
     // An operator hold produced by the inline resume itself (or a lost lease)
     // equally blocks this writer: the unresolved obligation must not be raced
-    // or overwritten by a fresh worktree and handoff.
+    // or overwritten by a fresh worktree and handoff. A cleanup_pending outcome
+    // blocks too — publication settled but the branch is still attached to the
+    // retained worktree, so preparing another worktree on it would fail. An
+    // unresolved superseded outcome (the row kept moving under re-reads) is
+    // equally unsafe to race.
     if ('resumed' in adoption && adoption.resumed
-        && (adoption.resumed.outcome === 'awaiting_operator' || adoption.resumed.outcome === 'ownership_lost')) {
+        && (adoption.resumed.outcome === 'awaiting_operator' || adoption.resumed.outcome === 'ownership_lost'
+            || adoption.resumed.outcome === 'cleanup_pending' || adoption.resumed.outcome === 'superseded')) {
         return `predecessor_${adoption.resumed.outcome}`;
     }
     return undefined;
@@ -144,10 +180,16 @@ export async function gatePredecessorHandoff(params: PredecessorHandoffGateParam
     });
     let adoption: Awaited<ReturnType<typeof adoptPredecessorFollowupHandoff>>;
     try {
-        adoption = await adoptPredecessorFollowupHandoff(
-            { ...ref, currentTaskId: taskId, log: correlatedLogger, isOwnershipLost: () => leaseLost },
-            { redis: redisClient, stateManager },
-        );
+        // A superseded outcome means the row moved on mid-adoption; re-read and
+        // resolve it before admitting this writer instead of racing an unknown
+        // state. Persistent supersession falls through as a blocking reason.
+        for (let attempt = 0; ; attempt += 1) {
+            adoption = await adoptPredecessorFollowupHandoff(
+                { ...ref, currentTaskId: taskId, log: correlatedLogger, isOwnershipLost: () => leaseLost },
+                { redis: redisClient, stateManager },
+            );
+            if (attempt >= 2 || !('resumed' in adoption) || adoption.resumed?.outcome !== 'superseded') break;
+        }
     } finally {
         await stopHeartbeat();
     }

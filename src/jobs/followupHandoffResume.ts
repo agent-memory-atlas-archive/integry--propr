@@ -7,6 +7,8 @@ import {
     type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
 } from './followupHandoffStore.js';
 
+import { isNonFastForwardPushError } from './followupHandoffGitOps.js';
+
 export { createFollowupHandoffGitOps, type FollowupHandoffGitOps, type WorktreeAttachment } from './followupHandoffGitOps.js';
 
 /**
@@ -273,6 +275,11 @@ async function attemptHandoffCleanup(params: ResumeFollowupHandoffParams, record
 }
 
 async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
+    // Cancellation may have landed while the Git evidence was being awaited:
+    // re-check before publishing the notice or restoring the claimed comments,
+    // or the cancelled request would be requeued for another follow-up.
+    const hold = await cancellationHold(params, record);
+    if (hold) return hold;
     if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
     await publishOwedComment(params, record, interruptedWithoutChangesBody(record));
     await params.restoreComments(record, parseClaimedComments(record));
@@ -313,15 +320,35 @@ async function collectAgentOutput(
 
 type ResumeStep = { record: FollowupHandoffRecord } | { done: ResumeOutcome };
 
-/** Pushes the committed work after revalidating cancellation, binding and lease ownership. */
+/** Pushes the committed work after revalidating cancellation, binding, worktree identity and lease ownership. */
 async function pushCommittedWork(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeStep> {
     const { git } = params;
     const hold = await cancellationHold(params, record) ?? await validatePublicationBinding(params, record);
     if (hold) return { done: hold };
+    // A committed handoff publishes exactly the recorded worktree, branch and
+    // commit. A detached/switched worktree or a replaced HEAD (for example
+    // during manual recovery) is held for an operator, never pushed.
+    const attachment = await git.worktreeAttachment(record.worktree_path, record.branch_name);
+    if (attachment !== 'attached') {
+        return { done: await holdForOperator(params, record, attachment === 'missing' ? 'worktree_missing' : 'worktree_not_on_branch') };
+    }
+    if (!record.commit_hash || await git.head(record.worktree_path) !== record.commit_hash) {
+        return { done: await holdForOperator(params, record, 'recorded_commit_mismatch') };
+    }
     if (ownershipLost(params, record)) return { done: { outcome: 'ownership_lost' } };
     const { owner, repo } = splitHandoffRepository(record.target_repository);
-    const pushed = await git.push(record.worktree_path, { repoOwner: owner, repoName: repo, branchName: record.branch_name });
-    const commitHash = (pushed && typeof pushed === 'object' && pushed.commitHash) || await git.head(record.worktree_path);
+    let pushed: Awaited<ReturnType<typeof git.push>>;
+    try {
+        pushed = await git.push(record.worktree_path, { repoOwner: owner, repoName: repo, branchName: record.branch_name });
+    } catch (error) {
+        // An externally advanced head rejects the stale push; fail closed for
+        // an operator instead of rebasing over the other actor's work.
+        if (isNonFastForwardPushError(error)) {
+            return { done: await holdForOperator(params, record, 'head_advanced_externally') };
+        }
+        throw error;
+    }
+    const commitHash = (pushed && typeof pushed === 'object' && pushed.commitHash) || record.commit_hash;
     const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'pushed', commit_hash: commitHash });
     return advanced ? { record: advanced } : { done: { outcome: 'superseded' } };
 }

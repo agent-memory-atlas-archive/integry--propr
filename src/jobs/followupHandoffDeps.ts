@@ -6,7 +6,7 @@ import type { PRProcessingLockRedisClient } from './prProcessingLock.js';
 import { restorePendingComments } from './prPendingComments.js';
 import { createFollowupHandoffGitOps, type FollowupHandoffGitOps } from './followupHandoffGitOps.js';
 import { splitHandoffRepository, type HandoffOctokit, type HandoffStateManager, type HandoffTaskStates, type LoggerLike } from './followupHandoffResume.js';
-import { advanceFollowupHandoff, type FollowupHandoffRecord, type FollowupHandoffStoreDeps } from './followupHandoffStore.js';
+import { recordFollowupHandoffDiagnostic, type FollowupHandoffRecord, type FollowupHandoffStoreDeps } from './followupHandoffStore.js';
 
 /** Shared dependency resolution for follow-up handoff recovery and operator actions. */
 
@@ -50,12 +50,13 @@ export async function resolveRecoveryDeps(deps: FollowupHandoffRecoveryDeps): Pr
     let redis = deps.redis;
     let ownRedis = false;
     if (!redis) {
-        const { Redis } = await import('ioredis');
-        redis = new Redis({
-            host: process.env.REDIS_HOST || '127.0.0.1',
-            port: parseInt(process.env.REDIS_PORT || '6379', 10),
-            maxRetriesPerRequest: null, enableReadyCheck: false,
-        }) as unknown as HandoffRedis;
+        // Recovery must read the same Redis the workers use for leases and
+        // pending comments: the shared runtime configuration carries the URL,
+        // credentials, TLS and database selection, not just host and port.
+        // (Lazy imports: test suites replace @propr/core with enumerated mocks.)
+        const [{ Redis }, { buildRedisRuntimeConfig }] = await Promise.all([import('ioredis'), import('@propr/core')]);
+        const { url, options } = buildRedisRuntimeConfig();
+        redis = (url ? new Redis(url, options) : new Redis(options)) as unknown as HandoffRedis;
         ownRedis = true;
     }
     let octokit: Promise<HandoffOctokit> | undefined;
@@ -110,6 +111,8 @@ export async function recordFailedClosed(
     deps.log.warn({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, reason },
         'Agent container evidence is unavailable or ambiguous; failing closed and leaving the handoff untouched');
     if (record.status_reason !== reason) {
-        await advanceFollowupHandoff(deps.store, record, { status_reason: reason });
+        // Diagnostic only: this runs without the PR lease, so it must not
+        // advance the generation and invalidate a live owner's checkpoints.
+        await recordFollowupHandoffDiagnostic(deps.store, record, reason);
     }
 }

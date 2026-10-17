@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
+import knex from 'knex';
 import type { AddressInfo } from 'node:net';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { up as createFollowupHandoffsTable } from '../../core/src/db/migrations/20261017000000_add_pr_followup_handoffs.js';
 import {
   createFollowupHandoffRoutes,
   followupHandoffTargetKey,
@@ -19,6 +21,26 @@ test('the default deps module path points at the real recovery job source', () =
   const routesDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../routes');
   const source = path.resolve(routesDirectory, FOLLOWUP_HANDOFF_RECOVERY_MODULE.replace(/\.js$/, '.ts'));
   assert.ok(existsSync(source), `${source} should exist; the lazy import would fail at runtime`);
+});
+
+test('the default deps actually import the recovery module and run against the real import graph', async () => {
+  // Packaged-runtime smoke: unlike the path assertion above, this executes the
+  // production lazy import (and the recovery module's full dependency graph,
+  // including the real @propr/core surface) through the default dependencies.
+  process.env.NODE_ENV = 'test';
+  const { createDefaultFollowupHandoffDeps } = await import('../routes/followupHandoffRoutes.js');
+  const deps = createDefaultFollowupHandoffDeps();
+  const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  try {
+    await createFollowupHandoffsTable(database);
+    const statuses = await deps.inspectFollowupHandoffs({ store: { database } });
+    assert.deepEqual(statuses, [], 'the loaded module answers with the injected empty store');
+  } finally {
+    await database.destroy();
+    // The real core import holds a knex pool open; release it so the runner exits.
+    const { db } = await import('@propr/core');
+    await (db as { destroy(): Promise<void> }).destroy();
+  }
 });
 
 const summary: FollowupHandoffRecoverySummary = {

@@ -10,6 +10,17 @@ import { pushPullRequestHeadBranch } from './prGitOperations.js';
 
 export type WorktreeAttachment = 'missing' | 'not_on_branch' | 'attached';
 
+/**
+ * Matches core pushBranch's non-fast-forward rejection messages. Kept local so
+ * the enumerated @propr/core test mocks of the handoff suites stay valid.
+ */
+export function isNonFastForwardPushError(error: unknown): boolean {
+    const message = (error as Error).message || '';
+    return message.includes('[rejected] (fetch first)')
+        || message.includes('non-fast-forward')
+        || message.includes('Updates were rejected because the remote contains work that you do not');
+}
+
 export interface FollowupHandoffGitOps {
     worktreeAttachment(worktreePath: string, branchName: string): Promise<WorktreeAttachment>;
     hasUncommittedChanges(worktreePath: string): Promise<boolean>;
@@ -89,6 +100,9 @@ export function createFollowupHandoffGitOps(getToken: () => Promise<string>): Fo
                 worktreePath,
                 target: { ...target, isFork: false },
                 authToken: await getToken(),
+                // Recovery must fail closed when another actor advanced the PR
+                // head: the rejection is held for an operator, never rebased over.
+                rebaseOnNonFastForward: false,
             }) as Promise<{ commitHash?: string } | void>;
         },
         async releaseSettledWorktree(localRepoPath, branchName, worktreePath) {

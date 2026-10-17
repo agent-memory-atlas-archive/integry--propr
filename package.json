@@ -12,6 +12,7 @@
   "overrides": {
     "@electron/packager": "20.3.0",
     "@electron/rebuild": "4.2.0",
+    "braces": "npm:@dieub/braces-depth-guard@3.0.3-pn.3",
     "hono": "4.13.12",
     "postcss-selector-parser": "7.1.6",
     "react": "19.2.7"

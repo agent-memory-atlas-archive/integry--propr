@@ -1,0 +1,593 @@
+import assert from 'node:assert/strict';
+import { after, beforeEach, mock, test } from 'node:test';
+import knex from 'knex';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { up } from '../packages/core/src/db/migrations/20261017000000_add_pr_followup_handoffs.js';
+
+/**
+ * Regressions for review 6228423740 (F9–F14): liveness diagnostics must not
+ * invalidate the live writer and failed normal checkpoints fail closed (F9),
+ * cleanup_pending and unrecordable handoffs block successor admission (F10),
+ * committed recovery verifies worktree attachment and the exact recorded HEAD
+ * (F11), recovery never rebases over an externally advanced head (F12),
+ * no-change recovery re-checks cancellation (F13), and self-provisioned Redis
+ * uses the shared runtime configuration (F14).
+ */
+
+const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+await up(database);
+const root = await mkdtemp(path.join(tmpdir(), 'followup-handoff-blockers-'));
+after(async () => { await database.destroy(); await rm(root, { recursive: true, force: true }); });
+
+const silentLog = { debug() {}, info() {}, warn() {}, error() {} };
+
+const git = (cwd: string, ...args: string[]) => execFileSync('git', [
+    '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Test', '-c', 'user.email=test@example.test',
+    '-c', 'protocol.file.allow=always', ...args,
+], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+
+// The admission-gate tests run the production default dependencies end to end,
+// so the core git/GitHub/queue surface is functional here instead of throwing.
+let currentLiveness = 'not_found';
+let refuseBranchRelease = false;
+const pushBranchCalls: Array<Record<string, unknown>> = [];
+const queuedRecoveryJobs: Array<Record<string, unknown>> = [];
+const redisRuntimeConfig: { url?: string; options: Record<string, unknown> } = {
+    url: 'rediss://user:secret@redis.example.test:6380/2',
+    options: { host: 'redis.example.test', port: 6380, db: 2, maxRetriesPerRequest: null, enableReadyCheck: false },
+};
+let octokitForDefaults: unknown;
+
+const BRANCH = 'propr/pr-head';
+const KEY = { repository: 'acme/widgets', pull_request: 7 };
+const LOCK = 'lock:pr:acme:widgets:7';
+
+await mock.module('@propr/core', {
+    namedExports: {
+        db: database,
+        logger: silentLog,
+        TaskStates: {
+            PENDING: 'pending', PROCESSING: 'processing', CLAUDE_EXECUTION: 'claude_execution',
+            POST_PROCESSING: 'post_processing', COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled',
+        },
+        AI_COMMIT_AUTHOR: { name: 'ProPR Test', email: 'propr@example.test' },
+        getAuthenticatedOctokit: async () => octokitForDefaults,
+        getStateManager: () => { throw new Error('tests must inject their own state manager'); },
+        getIssueQueue: async () => ({ add: async () => undefined, getJob: async () => null }),
+        issueQueue: {
+            add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
+                queuedRecoveryJobs.push({ name, data, opts });
+                return { id: `recovery-${queuedRecoveryJobs.length}` };
+            },
+            getJob: async () => null,
+        },
+        inspectTaskContainerLivenessForTask: async () => ({ liveness: currentLiveness }),
+        inspectLegacyDockerContainerLivenessForTask: async () => 'not_found',
+        buildRedisRuntimeConfig: () => redisRuntimeConfig,
+        commitChanges: async (worktreePath: string, message: string) => {
+            git(worktreePath, 'add', '-A');
+            git(worktreePath, 'commit', '-m', message);
+            return { commitHash: git(worktreePath, 'rev-parse', 'HEAD') };
+        },
+        createHooklessGit: (cwd: string) => ({
+            raw: async (args: string[]) => git(cwd, ...args),
+        }),
+        releaseBranchFromSettledWorktree: async (_git: unknown, branchName: string, worktreePath: string) => {
+            if (refuseBranchRelease) return false;
+            if (git(worktreePath, 'status', '--porcelain', '--untracked-files=all') !== '') return false;
+            git(worktreePath, 'fetch', 'origin', `+refs/heads/${branchName}:refs/remotes/origin/${branchName}`);
+            if (git(worktreePath, 'rev-list', '--count', 'HEAD', '--not', `refs/remotes/origin/${branchName}`) !== '0') return false;
+            git(worktreePath, 'checkout', '--detach');
+            return true;
+        },
+        cleanupWorktree: async () => undefined,
+        createWorktreeFromExistingBranch: async () => { throw new Error('unexpected worktree creation'); },
+        ensureRepoCloned: async () => { throw new Error('unexpected clone'); },
+        getRepoUrl: () => 'https://example.test/repo.git',
+        pushBranch: async (worktreePath: string, branchName: string, options: Record<string, unknown>) => {
+            pushBranchCalls.push({ branchName, ...options });
+            git(worktreePath, 'push', 'origin', `HEAD:refs/heads/${branchName}`);
+            return { rebased: false, commitHash: git(worktreePath, 'rev-parse', 'HEAD') };
+        },
+        getPendingPrCommentsKey: (owner: string, repo: string, pr: number) => `pending:${owner}:${repo}:${pr}`,
+    },
+});
+
+class FakeRuntimeRedis {
+    static constructed: unknown[][] = [];
+    constructor(...args: unknown[]) { FakeRuntimeRedis.constructed.push(args); }
+    async quit() { return 'OK'; }
+    async set() { return 'OK'; }
+    async eval() { return 1; }
+}
+// Shaped so both this module's `import('ioredis')` destructuring and bullmq's
+// CJS require keep working under the mock.
+await mock.module('ioredis', {
+    defaultExport: { Redis: FakeRuntimeRedis, default: FakeRuntimeRedis },
+    namedExports: { Redis: FakeRuntimeRedis },
+});
+
+const {
+    recordFollowupHandoff, advanceFollowupHandoff, loadFollowupHandoff, PR_FOLLOWUP_HANDOFFS_TABLE,
+    HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR,
+} = await import('../src/jobs/followupHandoffStore.js');
+const { recordFailedClosed, resolveRecoveryDeps } = await import('../src/jobs/followupHandoffDeps.js');
+const { recoverInterruptedFollowupHandoffs } = await import('../src/jobs/followupHandoffRecovery.js');
+const {
+    FollowupHandoffOwnershipLostError, gatePredecessorHandoff,
+    markExecutionHandoffCommitted, markExecutionHandoffPushed, recordExecutionHandoff,
+} = await import('../src/jobs/prCommentHandoffIntegration.js');
+const { createFollowupHandoffGitOps } = await import('../src/jobs/followupHandoffGitOps.js');
+
+let fixtureIndex = 0;
+interface Fixture { dir: string; origin: string; local: string; wt: string }
+
+async function createFixture(): Promise<Fixture> {
+    const dir = path.join(root, `fx-${fixtureIndex++}`);
+    await mkdir(dir, { recursive: true });
+    git(dir, 'init', '--bare', 'origin.git');
+    git(dir, 'clone', 'origin.git', 'local');
+    const local = path.join(dir, 'local');
+    await writeFile(path.join(local, 'base.txt'), 'base\n');
+    git(local, 'add', '.');
+    git(local, 'commit', '-m', 'Base');
+    git(local, 'branch', '-M', BRANCH);
+    git(local, 'push', '-u', 'origin', BRANCH);
+    git(local, 'checkout', '--detach');
+    const wt = path.join(dir, 'wt');
+    git(local, 'worktree', 'add', wt, BRANCH);
+    return { dir, origin: path.join(dir, 'origin.git'), local, wt };
+}
+
+const originHead = (fx: Fixture) => git(fx.origin, 'rev-parse', `refs/heads/${BRANCH}`);
+
+interface GitCounters { commits: number; pushes: number; released: number }
+
+function createGitOps(counters: GitCounters) {
+    const clean = (wt: string) => git(wt, 'status', '--porcelain', '--untracked-files=all') === '';
+    const unpushed = (wt: string) => {
+        git(wt, 'fetch', 'origin', `+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}`);
+        return git(wt, 'rev-list', '--count', 'HEAD', '--not', `refs/remotes/origin/${BRANCH}`) !== '0';
+    };
+    return {
+        async worktreeAttachment(worktreePath: string, branchName: string) {
+            if (!existsSync(worktreePath)) return 'missing' as const;
+            return git(worktreePath, 'branch', '--show-current') === branchName ? 'attached' as const : 'not_on_branch' as const;
+        },
+        async hasUncommittedChanges(worktreePath: string) { return !clean(worktreePath); },
+        async commitWork(worktreePath: string, message: string) {
+            git(worktreePath, 'add', '-A');
+            git(worktreePath, 'commit', '-m', message);
+            counters.commits += 1;
+            return { commitHash: git(worktreePath, 'rev-parse', 'HEAD') };
+        },
+        async hasUnpushedCommits(worktreePath: string) { return unpushed(worktreePath); },
+        async head(worktreePath: string) { return git(worktreePath, 'rev-parse', 'HEAD'); },
+        async remoteBranchHead(worktreePath: string, branchName: string) {
+            try {
+                git(worktreePath, 'fetch', 'origin', `+refs/heads/${branchName}:refs/remotes/origin/${branchName}`);
+                return git(worktreePath, 'rev-parse', `refs/remotes/origin/${branchName}`);
+            } catch {
+                return null;
+            }
+        },
+        async isAncestorOfHead(worktreePath: string, sha: string) {
+            try {
+                git(worktreePath, 'merge-base', '--is-ancestor', sha, 'HEAD');
+                return true;
+            } catch {
+                return false;
+            }
+        },
+        async push(worktreePath: string) {
+            git(worktreePath, 'push', 'origin', `HEAD:refs/heads/${BRANCH}`);
+            counters.pushes += 1;
+            return { commitHash: git(worktreePath, 'rev-parse', 'HEAD') };
+        },
+        async releaseSettledWorktree(_localRepoPath: string, _branchName: string, worktreePath: string) {
+            if (!existsSync(worktreePath) || !clean(worktreePath) || unpushed(worktreePath)) return false;
+            git(worktreePath, 'checkout', '--detach');
+            counters.released += 1;
+            return true;
+        },
+        async detachWorktreeHead(worktreePath: string) { git(worktreePath, 'checkout', '--detach'); },
+    };
+}
+
+function createFakeLockRedis() {
+    const store = new Map<string, { value: string; ttl: number }>();
+    const restoredJson: string[] = [];
+    return {
+        store, restoredJson,
+        async set(key: string, value: string, _ex: string, ttl: number, nx?: string) {
+            if (nx === 'NX' && store.has(key)) return null;
+            store.set(key, { value, ttl: Number(ttl) });
+            return 'OK';
+        },
+        async eval(script: string, _numKeys: number, key: string, ...args: Array<string | number>) {
+            if (script.includes('cjson')) { // restore pending comments
+                restoredJson.push(...args.slice(1).map(String));
+                return 1;
+            }
+            const current = store.get(key);
+            if (script.includes('ttl')) { // adopt
+                const [predecessor, successor, ttlSeconds, floor] = args;
+                if (!current) { store.set(key, { value: String(successor), ttl: Number(ttlSeconds) }); return 1; }
+                if (current.value !== String(predecessor)) return 0;
+                if (current.ttl > Number(floor)) return -1;
+                store.set(key, { value: String(successor), ttl: Number(ttlSeconds) });
+                return 1;
+            }
+            if (script.includes('del')) { // release
+                if (current?.value === String(args[0])) { store.delete(key); return 1; }
+                return 0;
+            }
+            if (script.includes('expire')) { // renew
+                if (current?.value === String(args[0])) { current.ttl = Number(args[1]); return 1; }
+                return 0;
+            }
+            throw new Error('Unknown lock script');
+        },
+        async quit() { return 'OK'; },
+    };
+}
+
+function createStateManager(initial: Record<string, string> = {}) {
+    const states = new Map(Object.entries(initial));
+    return {
+        states,
+        async getTaskState(taskId: string) { return states.has(taskId) ? { state: states.get(taskId)! } : null; },
+        async updateTaskState(taskId: string, state: string) { states.set(taskId, state); },
+        async updateHistoryMetadata() { return undefined; },
+    };
+}
+
+interface FakeComment { id: number; body: string; html_url: string }
+
+function createOctokit(pull: { head: { ref: string }; base: { ref: string } }) {
+    const comments: FakeComment[] = [];
+    let nextId = 1000;
+    return {
+        comments, pull,
+        async request(route: string, params?: Record<string, unknown>) {
+            if (route.startsWith('GET ') && route.includes('/pulls/')) return { data: this.pull };
+            if (route.startsWith('PATCH ')) {
+                const found = comments.find(comment => comment.id === params?.comment_id);
+                if (!found) throw Object.assign(new Error('Not Found'), { status: 404 });
+                found.body = String(params?.body ?? '');
+                return { data: found };
+            }
+            if (route.startsWith('POST ')) {
+                const created = { id: nextId++, body: String(params?.body ?? ''), html_url: `https://example.test/comment/${nextId}` };
+                comments.push(created);
+                return { data: created };
+            }
+            throw new Error(`Unexpected request: ${route}`);
+        },
+        async paginate() { return [...comments]; },
+        async auth() { return { token: 'installation-token' }; },
+    };
+}
+
+interface Harness {
+    fx: Fixture;
+    counters: GitCounters;
+    gitOps: ReturnType<typeof createGitOps>;
+    redis: ReturnType<typeof createFakeLockRedis>;
+    stateManager: ReturnType<typeof createStateManager>;
+    octokit: ReturnType<typeof createOctokit>;
+    restored: Array<{ id: number }>;
+    deps: Record<string, unknown>;
+}
+
+async function createHarness(options: { taskStates?: Record<string, string> } = {}): Promise<Harness> {
+    const fx = await createFixture();
+    const counters: GitCounters = { commits: 0, pushes: 0, released: 0 };
+    const gitOps = createGitOps(counters);
+    const redis = createFakeLockRedis();
+    const stateManager = createStateManager(options.taskStates ?? { 'task-1': 'processing' });
+    const octokit = createOctokit({ head: { ref: BRANCH }, base: { ref: 'main' } });
+    const restored: Array<{ id: number }> = [];
+    const deps = {
+        store: { database }, redis, log: silentLog, stateManager,
+        getOctokit: async () => octokit,
+        inspectLiveness: async () => ({ liveness: 'not_found' }),
+        git: gitOps,
+        restoreComments: async (_record: unknown, claimed: Array<{ id: number }>) => { restored.push(...claimed); },
+        taskStates: { COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled' },
+    };
+    return { fx, counters, gitOps, redis, stateManager, octokit, restored, deps };
+}
+
+async function seedHandoff(h: Harness, overrides: { taskId?: string; binding?: { headRef?: string; baseRef?: string; headSha?: string } } = {}) {
+    const record = await recordFollowupHandoff({
+        ref: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7 },
+        taskId: overrides.taskId ?? 'task-1',
+        sourceTaskIds: [],
+        correlationId: 'corr-1',
+        target: { repoOwner: 'acme', repoName: 'widgets', branchName: BRANCH, isFork: false },
+        worktreePath: h.fx.wt, localRepoPath: h.fx.local,
+        claimedComments: [{ id: 11, body: 'please fix the widget', author: 'alice', type: 'issue' }],
+        jobData: { pullRequestNumber: 7, repoOwner: 'acme', repoName: 'widgets', correlationId: 'corr-1' } as never,
+        llm: 'claude',
+        lockKey: LOCK, lockToken: 'dead-worker-token',
+        binding: overrides.binding,
+    }, { database });
+    assert.ok(record, 'handoff must be recorded');
+    return record!;
+}
+
+const agentEdit = async (fx: Fixture) => { await writeFile(path.join(fx.wt, 'feature.txt'), 'agent work\n'); };
+
+const commitInWorktree = (fx: Fixture, message = 'agent commit') => {
+    git(fx.wt, 'add', '-A');
+    git(fx.wt, 'commit', '-m', message);
+    return git(fx.wt, 'rev-parse', 'HEAD');
+};
+
+beforeEach(async () => {
+    await database(PR_FOLLOWUP_HANDOFFS_TABLE).delete();
+    currentLiveness = 'not_found';
+    refuseBranchRelease = false;
+    pushBranchCalls.length = 0;
+    queuedRecoveryJobs.length = 0;
+    FakeRuntimeRedis.constructed.length = 0;
+});
+
+// --- F9: diagnostics never invalidate the live writer; failed checkpoints fail closed.
+
+test('F9: a lease-less liveness diagnostic leaves the live writer\'s checkpoints valid', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const state = { followupHandoff: record };
+
+    // Startup reconciliation gets unavailable container evidence and records
+    // the diagnostic while the normal worker still owns the lease and the row.
+    await recordFailedClosed(record, { store: { database }, log: silentLog });
+    const diagnosed = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(diagnosed?.status_reason, 'liveness_unavailable');
+    assert.equal(diagnosed?.generation, record.generation, 'the diagnostic does not advance the generation');
+
+    // The live writer's next checkpoints must still land durably.
+    await agentEdit(h.fx);
+    const head = commitInWorktree(h.fx);
+    await markExecutionHandoffCommitted(state, head);
+    assert.ok(state.followupHandoff, 'the writer keeps tracking its handoff');
+    git(h.fx.wt, 'push', 'origin', `HEAD:refs/heads/${BRANCH}`);
+    await markExecutionHandoffPushed(state, head);
+    const persisted = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(persisted?.phase, 'pushed');
+    assert.equal(persisted?.commit_hash, head);
+});
+
+test('F9: a checkpoint that cannot be recorded fails closed instead of continuing untracked', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const state = { followupHandoff: record };
+    // A successor adopted the row (new lock token): the original writer lost ownership.
+    const adopted = await advanceFollowupHandoff({ database }, record, { lock_token: 'successor-token' });
+    assert.ok(adopted);
+    await assert.rejects(
+        markExecutionHandoffCommitted(state, 'deadbeef'),
+        FollowupHandoffOwnershipLostError,
+    );
+    assert.equal(state.followupHandoff, null);
+    const survivor = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(survivor?.lock_token, 'successor-token', 'the successor\'s row is untouched');
+    assert.equal(survivor?.phase, 'agent_running');
+});
+
+test('F9: a benign concurrent generation bump is retried, not treated as lost ownership', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    const state = { followupHandoff: record };
+    // Same owner, same incarnation and lock token — only the generation moved.
+    await advanceFollowupHandoff({ database }, record, { status_reason: 'publication_failed' });
+    await markExecutionHandoffCommitted(state, 'abc123');
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.phase, 'committed');
+    assert.ok(state.followupHandoff);
+});
+
+// --- F10: unresolved predecessors block successor admission.
+
+function gateParams(h: Harness, taskId: string) {
+    h.redis.store.set(LOCK, { value: `${taskId}-token`, ttl: 3600 });
+    return {
+        job: { name: 'processPullRequestComment', data: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7 } } as never,
+        ref: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7 },
+        taskId,
+        stateManager: h.stateManager as never,
+        redisClient: h.redis as never,
+        pickedUpComments: [],
+        lockKey: LOCK, lockToken: `${taskId}-token`,
+        correlatedLogger: silentLog as never,
+    };
+}
+
+test('F10: a cleanup_pending predecessor defers the successor instead of racing the attached branch', async () => {
+    const h = await createHarness();
+    octokitForDefaults = h.octokit;
+    await seedHandoff(h);
+    refuseBranchRelease = true;
+
+    // Admission gate: the inline resume settles publication (no changes) but
+    // branch release fails, so the successor must be rescheduled, not admitted.
+    const result = await gatePredecessorHandoff(gateParams(h, 'task-2'));
+    assert.ok(result, 'the successor is not admitted');
+    assert.equal(result!.status, 'rescheduled');
+    assert.equal((result as { reason?: string }).reason, 'predecessor_cleanup_pending');
+    assert.equal(queuedRecoveryJobs.length, 1, 'a delayed replacement job was queued');
+    assert.equal(h.redis.store.has(LOCK), false, 'the blocked successor released its lease');
+    const retained = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(retained?.phase, 'cleanup_pending');
+    assert.equal(retained?.status, HANDOFF_ACTIVE);
+    assert.equal(git(h.fx.wt, 'branch', '--show-current'), BRANCH, 'the branch is still attached');
+
+    // Branch release recovers; the next gate pass finishes cleanup and admits.
+    refuseBranchRelease = false;
+    const second = await gatePredecessorHandoff(gateParams(h, 'task-2'));
+    assert.equal(second, undefined, 'the successor proceeds once the branch is free');
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+    assert.equal(git(h.fx.wt, 'branch', '--show-current'), '');
+});
+
+test('F10: an unrecordable handoff refuses the agent launch', async () => {
+    const h = await createHarness();
+    // A different task's unresolved row still owns the obligation.
+    const predecessor = await seedHandoff(h, { taskId: 'task-1' });
+    await advanceFollowupHandoff({ database }, predecessor, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_missing' });
+    const state = {
+        worktreeInfo: { worktreePath: h.fx.wt, branchName: BRANCH },
+        localRepoPath: h.fx.local,
+        unprocessedComments: [],
+        startingWorkComment: null,
+        followupHandoff: null,
+    };
+    await assert.rejects(
+        recordExecutionHandoff({
+            state: state as never,
+            job: { data: {} } as never,
+            ref: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7 },
+            taskId: 'task-2', correlationId: 'corr-2',
+            publication: { target: { repoOwner: 'acme', repoName: 'widgets', branchName: BRANCH, isFork: false } } as never,
+            llm: 'claude', lockKey: LOCK, lockToken: 'task-2-token',
+            binding: { headRef: BRANCH, baseRef: 'main' },
+            correlatedLogger: silentLog as never,
+        }),
+        /agent launch is refused/,
+    );
+    const survivor = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(survivor?.task_id, 'task-1', 'the unresolved row is preserved');
+});
+
+// --- F11: committed recovery verifies attachment and the exact recorded HEAD.
+
+test('F11: a replaced worktree HEAD holds the committed handoff instead of pushing it', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h, { binding: { headSha: originHead(h.fx) } });
+    await agentEdit(h.fx);
+    const recorded = commitInWorktree(h.fx);
+    const committed = await advanceFollowupHandoff({ database }, record, { phase: 'committed', commit_hash: recorded });
+    assert.ok(committed);
+    // Manual recovery replaces the worktree HEAD with an unrelated commit.
+    await writeFile(path.join(h.fx.wt, 'other.txt'), 'unrelated\n');
+    commitInWorktree(h.fx, 'unrelated commit');
+    const before = originHead(h.fx);
+
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.awaitingOperator, 1);
+    assert.equal(h.counters.pushes, 0, 'the unverified HEAD is never published');
+    assert.equal(originHead(h.fx), before);
+    const held = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(held?.status, HANDOFF_AWAITING_OPERATOR);
+    assert.equal(held?.status_reason, 'recorded_commit_mismatch');
+});
+
+test('F11: a committed handoff whose worktree left the branch holds for an operator', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h, { binding: { headSha: originHead(h.fx) } });
+    await agentEdit(h.fx);
+    const recorded = commitInWorktree(h.fx);
+    await advanceFollowupHandoff({ database }, record, { phase: 'committed', commit_hash: recorded });
+    git(h.fx.wt, 'checkout', '--detach');
+
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.awaitingOperator, 1);
+    assert.equal(h.counters.pushes, 0);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, 'worktree_not_on_branch');
+});
+
+// --- F12: recovery never rebases over an externally advanced head.
+
+test('F12: a non-fast-forward rejection between validation and push holds for an operator', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h, { binding: { headSha: originHead(h.fx) } });
+    await agentEdit(h.fx);
+    const recorded = commitInWorktree(h.fx);
+    await advanceFollowupHandoff({ database }, record, { phase: 'committed', commit_hash: recorded });
+    const before = originHead(h.fx);
+    // The other contributor's push lands after validatePublicationBinding fetched.
+    h.gitOps.push = async () => {
+        throw new Error('To https://example.test/repo.git\n ! [rejected] (fetch first)\nUpdates were rejected because the remote contains work that you do not have locally');
+    };
+
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.awaitingOperator, 1);
+    assert.equal(originHead(h.fx), before, 'nothing was force-published or rebased');
+    const held = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(held?.status, HANDOFF_AWAITING_OPERATOR);
+    assert.equal(held?.status_reason, 'head_advanced_externally');
+});
+
+test('F12: the default handoff git push disables non-fast-forward rebasing', async () => {
+    const fx = await createFixture();
+    await writeFile(path.join(fx.wt, 'feature.txt'), 'work\n');
+    git(fx.wt, 'add', '-A');
+    git(fx.wt, 'commit', '-m', 'work');
+    const ops = createFollowupHandoffGitOps(async () => 'token');
+    await ops.push(fx.wt, { repoOwner: 'acme', repoName: 'widgets', branchName: BRANCH });
+    assert.equal(pushBranchCalls.length, 1);
+    assert.equal(pushBranchCalls[0].rebaseOnNonFastForward, false);
+});
+
+// --- F13: no-change recovery re-checks cancellation before publishing or restoring.
+
+test('F13: cancellation during git inspection stops the no-change publication and restoration', async () => {
+    const h = await createHarness();
+    await seedHandoff(h);
+    const realUnpushed = h.gitOps.hasUnpushedCommits.bind(h.gitOps);
+    h.gitOps.hasUnpushedCommits = async (worktreePath: string) => {
+        const result = await realUnpushed(worktreePath);
+        // The user cancels while recovery awaits the Git evidence.
+        h.stateManager.states.set('task-1', 'cancelled');
+        return result;
+    };
+
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.awaitingOperator, 1);
+    assert.equal(summary.noChanges, 0);
+    assert.equal(h.octokit.comments.length, 0, 'no interruption notice for cancelled work');
+    assert.deepEqual(h.restored, [], 'cancelled claimed comments are not requeued');
+    const held = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(held?.status, HANDOFF_AWAITING_OPERATOR);
+    assert.equal(held?.status_reason, 'cancelled_by_user');
+    assert.equal(h.stateManager.states.get('task-1'), 'cancelled', 'the task is never marked failed');
+});
+
+// --- F14: self-provisioned Redis uses the shared runtime configuration.
+
+test('F14: recovery builds its Redis client from the shared runtime configuration', async () => {
+    const h = await createHarness();
+    const resolved = await resolveRecoveryDeps({
+        log: silentLog, store: { database }, stateManager: h.stateManager as never,
+        git: h.gitOps as never, restoreComments: async () => undefined,
+        inspectLiveness: async () => ({ liveness: 'not_found' }),
+        taskStates: { COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled' },
+    });
+    assert.equal(resolved.ownRedis, true);
+    assert.equal(FakeRuntimeRedis.constructed.length, 1);
+    assert.deepEqual(FakeRuntimeRedis.constructed[0], [redisRuntimeConfig.url, redisRuntimeConfig.options],
+        'the URL form carries credentials, TLS and database selection');
+
+    // Without a URL, the full options object (auth, TLS, db) is used directly.
+    delete redisRuntimeConfig.url;
+    const optionsOnly = await resolveRecoveryDeps({
+        log: silentLog, store: { database }, stateManager: h.stateManager as never,
+        git: h.gitOps as never, restoreComments: async () => undefined,
+        inspectLiveness: async () => ({ liveness: 'not_found' }),
+        taskStates: { COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled' },
+    });
+    assert.equal(optionsOnly.ownRedis, true);
+    assert.deepEqual(FakeRuntimeRedis.constructed[1], [redisRuntimeConfig.options]);
+
+    // An injected client is reused untouched.
+    const injected = await resolveRecoveryDeps({
+        redis: h.redis as never, log: silentLog, stateManager: h.stateManager as never,
+    });
+    assert.equal(injected.ownRedis, false);
+    assert.equal(FakeRuntimeRedis.constructed.length, 2);
+});
