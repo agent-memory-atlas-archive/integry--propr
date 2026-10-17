@@ -14,7 +14,14 @@ const PromptModal: React.FC<PromptModalProps> = ({ prompt, loading, onClose }) =
 
   return (
     <TaskDialog title="LLM Prompt" closeLabel="Close prompt" onClose={onClose} sizeClass="sm:h-auto sm:max-w-4xl" testId="prompt-dialog">
-      <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-4">
+      {/* Focusable so keyboard users can scroll a prompt longer than the dialog. */}
+      <div
+        role="region"
+        aria-label="Prompt details"
+        tabIndex={0}
+        data-testid="prompt-content"
+        className="min-h-0 flex-1 overflow-y-auto p-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 sm:p-4"
+      >
         {loading ? (
           <div className="text-gray-600">Loading prompt...</div>
         ) : prompt.error ? (

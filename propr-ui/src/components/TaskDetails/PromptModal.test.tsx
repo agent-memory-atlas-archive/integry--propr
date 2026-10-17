@@ -39,10 +39,12 @@ describe('PromptModal', () => {
     expect(dialog).not.toHaveTextContent('claude-opus-5-5');
     expect(dialog).toHaveTextContent('integry/propr #28');
 
-    // Close is the only control, so Tab and Shift+Tab stay on it.
-    fireEvent.keyDown(document, { key: 'Tab' });
-    expect(close).toHaveFocus();
+    // The scrolling prompt details are in the dialog's tab order after Close, and Tab wraps between the two.
+    const details = within(dialog).getByRole('region', { name: 'Prompt details' });
+    expect(details).toHaveAttribute('tabindex', '0');
     fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+    expect(details).toHaveFocus();
+    fireEvent.keyDown(document, { key: 'Tab' });
     expect(close).toHaveFocus();
     // The task workspace behind the dialog is inert.
     expect((screen.getByRole('button', { name: 'Behind', hidden: true }).parentElement as HTMLElement).inert).toBe(true);

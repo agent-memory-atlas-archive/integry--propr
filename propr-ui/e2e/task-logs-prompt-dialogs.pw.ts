@@ -225,6 +225,47 @@ for (const viewport of viewports) {
   }
 }
 
+test('phone 320x640: keyboard users can reach and scroll to the end of a long prompt', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 640 });
+  await stubTask(page);
+  const lines = Array.from({ length: 120 }, (_, index) => `Step ${index + 1}: keep the change focused.`);
+  const longPrompt = { ...prompt, prompt: [...lines, 'Final prompt line'].join('\n') };
+  await page.route(`**/api/execution/${sessionId}/prompt`, route => route.fulfill({ contentType: 'application/json', body: JSON.stringify(longPrompt) }));
+  await page.goto(`/tasks/${taskId}`);
+  await expect(page.getByRole('heading', { name: title }).first()).toBeVisible();
+
+  await open(page, 'Prompt', true);
+  const dialog = page.getByRole('dialog', { name: 'LLM Prompt' });
+  const close = dialog.getByRole('button', { name: 'Close prompt' });
+  const details = dialog.getByRole('region', { name: 'Prompt details' });
+  await expect(close).toBeFocused();
+  await expect(details.locator('pre')).toContainText('Final prompt line');
+  expect(await details.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
+  // Whether the end of the prompt text lies within the visible part of the scrolling details.
+  const endInView = () => details.evaluate(element => {
+    const end = (element.querySelector('pre') as HTMLElement).getBoundingClientRect().bottom;
+    const box = element.getBoundingClientRect();
+    return end <= box.bottom && end >= box.top && box.bottom <= window.innerHeight;
+  });
+  expect(await endInView()).toBe(false);
+
+  await page.keyboard.press('Tab');
+  await expect(details).toBeFocused();
+  await page.keyboard.press('End');
+  await expect.poll(endInView).toBe(true);
+  await capture(page, 'task-prompt-keyboard-scrolled-phone-320x640');
+  await page.keyboard.press('Home');
+  await expect.poll(() => details.evaluate(element => element.scrollTop)).toBe(0);
+  for (let step = 0; step < 40; step += 1) await page.keyboard.press('ArrowDown');
+  await expect.poll(() => details.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+
+  // Tab wraps back to Close rather than leaving the dialog.
+  await page.keyboard.press('Tab');
+  await expect(close).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(details).toBeFocused();
+});
+
 test('native Linux 1280x820: Logs keeps clear of the titlebar and side-by-side', async ({ page }) => {
   const shell: Shell = { platform: 'linux' };
   await page.setViewportSize({ width: 1280, height: 820 });
