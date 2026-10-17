@@ -18,13 +18,17 @@ const directAgent: AgentConfig = {
   defaultModel: 'gpt-5.6-sol',
 };
 
-async function catalogFor(settings: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function catalogFor(
+  settings: Record<string, unknown>,
+  loadUltrafixDefaults: () => Promise<{ ratingGoal: number; maxCycles: number }> = async () => ({ ratingGoal: 7, maxCycles: 5 }),
+): Promise<Record<string, unknown>> {
   const routes = createInstanceCatalogRoutes({
     services: {
       loadAgents: async () => [directAgent],
       loadSyntheticAgents: async () => [],
       loadRepositories: async () => [],
       loadSettings: async () => settings,
+      loadUltrafixDefaults,
     },
   });
   let body: unknown;
@@ -46,5 +50,16 @@ describe('instance catalog planner model', () => {
   test('omits the field when no override is configured', async () => {
     assert.equal('plannerGenerationModel' in await catalogFor({ planner_generation_model: '' }), false);
     assert.equal('plannerGenerationModel' in await catalogFor({}), false);
+  });
+
+  test('exposes the instance ultrafix defaults so forms can preselect them', async () => {
+    const body = await catalogFor({}, async () => ({ ratingGoal: 9, maxCycles: 3 }));
+    assert.deepEqual(body.ultrafixDefaults, { ratingGoal: 9, maxCycles: 3 });
+  });
+
+  test('omits the ultrafix defaults when they cannot be loaded', async () => {
+    const body = await catalogFor({}, async () => { throw new Error('config store unavailable'); });
+    assert.equal('ultrafixDefaults' in body, false);
+    assert.ok(Array.isArray(body.agents));
   });
 });

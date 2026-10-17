@@ -121,6 +121,32 @@ describe('UltrafixSettingsControls', () => {
     expect(goal.selectedOptions[0].textContent).toBe('◆ 8/10 (Standard)');
     expect(screen.getByLabelText('Max Loops')).toHaveValue(5);
   });
+
+  it('preselects the instance values when nothing is set and keeps following them', () => {
+    const onGoalChange = vi.fn();
+    const onMaxCyclesChange = vi.fn();
+    render(
+      <UltrafixSettingsControls
+        enabled goal={null} maxCycles={null} onGoalChange={onGoalChange} onMaxCyclesChange={onMaxCyclesChange}
+        defaultGoal={3} defaultMaxCycles={4}
+        goalPlaceholder="Instance setting" maxPlaceholder="—" inputClassName="" goalInputWidthClassName="" maxInputWidthClassName=""
+      />
+    );
+
+    const goal = screen.getByLabelText('Min Review Score') as HTMLSelectElement;
+    expect(goal.selectedOptions[0].textContent).toBe('3/10');
+    expect(screen.queryByRole('option', { name: 'Instance setting' })).not.toBeInTheDocument();
+    const max = screen.getByLabelText('Max Loops');
+    expect(max).toHaveValue(4);
+    fireEvent.blur(max);
+    fireEvent.change(max, { target: { value: '' } });
+    fireEvent.blur(max);
+    expect(max).toHaveValue(4);
+    expect(onMaxCyclesChange).not.toHaveBeenCalled();
+    fireEvent.change(max, { target: { value: '6' } });
+    fireEvent.blur(max);
+    expect(onMaxCyclesChange).toHaveBeenCalledWith(6);
+  });
 });
 
 describe('RowActions', () => {

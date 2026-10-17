@@ -30,4 +30,6 @@ export interface InstanceCatalogResponse {
   defaultAgentAlias?: string;
   /** Instance-wide planner model override (`agent:model` or a model label). Omitted when unset. */
   plannerGenerationModel?: string;
+  /** Instance ultrafix target score and loop limit used when a plan or issue sets none. Omitted by older servers. */
+  ultrafixDefaults?: { ratingGoal: number; maxCycles: number };
 }

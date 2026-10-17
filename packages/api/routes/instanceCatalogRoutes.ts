@@ -5,6 +5,8 @@ import {
   loadSyntheticAgents,
   loadMonitoredReposRaw,
   loadSettings,
+  loadUltrafixMaxCycles,
+  loadUltrafixRatingGoal,
   type AgentConfig,
   type RepoToMonitor,
   type RepositoryIndexingStatus,
@@ -22,6 +24,7 @@ interface InstanceCatalogServices {
   loadIndexingStatuses: () => Promise<RepositoryIndexingStatus[]>;
   loadRepositories: () => Promise<RepoToMonitor[]>;
   loadSettings: () => Promise<Record<string, unknown>>;
+  loadUltrafixDefaults: () => Promise<{ ratingGoal: number; maxCycles: number }>;
 }
 
 interface InstanceCatalogRoutesDeps {
@@ -96,16 +99,19 @@ export function createInstanceCatalogRoutes({ services: overrides }: InstanceCat
     loadIndexingStatuses: getRepositoriesIndexingStatus,
     loadRepositories: loadMonitoredReposRaw,
     loadSettings,
+    loadUltrafixDefaults: async () => ({ ratingGoal: await loadUltrafixRatingGoal(), maxCycles: await loadUltrafixMaxCycles() }),
     ...overrides,
   };
 
   async function sendCatalog(res: Response, includeSyntheticAgents: boolean): Promise<void> {
     try {
-      const [agents, syntheticAgents, repositories, settings] = await Promise.all([
+      const [agents, syntheticAgents, repositories, settings, ultrafixDefaults] = await Promise.all([
         services.loadAgents(),
         includeSyntheticAgents ? services.loadSyntheticAgents() : Promise.resolve([]),
         services.loadRepositories(),
         services.loadSettings(),
+        // Optional: the UI falls back to a placeholder without it.
+        services.loadUltrafixDefaults().catch(() => undefined),
       ]);
       const catalogAgents = [
         ...agents.filter(agent => agent.enabled).map(catalogAgent),
@@ -125,6 +131,8 @@ export function createInstanceCatalogRoutes({ services: overrides }: InstanceCat
           : {}),
         // Lets the planner name the model behind its "Default" choice without an admin settings read.
         ...(plannerGenerationModel ? { plannerGenerationModel } : {}),
+        // Lets plan and task forms preselect the real ultrafix values instead of saying "default".
+        ...(ultrafixDefaults ? { ultrafixDefaults } : {}),
       };
       res.json(response);
     } catch (error) {

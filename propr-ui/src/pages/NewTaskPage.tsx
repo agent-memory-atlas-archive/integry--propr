@@ -1,5 +1,6 @@
 import { ExtensionProfileSelector } from '../components/Extensions/ExtensionProfileSelector';
 import { formatModelName } from '../utils/modelDisplay';
+import { resolvePlanIssueDefaultSelection } from '../components/TaskPlanner/planIssueDefaultSelection';
 import TextareaAutosize from 'react-textarea-autosize';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -205,13 +206,26 @@ function useNewTaskLauncher(scope: string) {
 
 type LauncherState = ReturnType<typeof useNewTaskLauncher>;
 
-function TaskRoutingOptions({ agentAlias, setAgent, model, setModel, catalog, selection, invalidRouting, locked, isDemoMode }: LauncherState) {
+// Nothing chosen runs the instance default agent with its default model; show those values rather than "default".
+function shownRouting({ agentAlias, model, catalog, selection }: Pick<LauncherState, 'agentAlias' | 'model' | 'catalog' | 'selection'>) {
+  const fallback = catalog ? resolvePlanIssueDefaultSelection(catalog.agents, catalog.defaultAgentAlias) : undefined;
+  const agent = agentAlias || fallback?.agentAlias || '';
+  const agentSelection = selection ?? catalog?.agents.find(candidate => candidate.alias === agent);
+  const agentModel = agentAlias ? agentSelection?.defaultModel ?? agentSelection?.supportedModels[0] : fallback?.modelName;
+  const shownModel = model || agentModel || '';
+  const modelUnavailable = Boolean(shownModel && !agentSelection?.supportedModels.includes(shownModel));
+  return { agent, agentSelection, model: shownModel, modelUnavailable, placeholder: catalog ? 'No agents available' : 'Loading agents…' };
+}
+
+function TaskRoutingOptions(state: LauncherState) {
+  const { agentAlias, setAgent, model, setModel, catalog, selection, invalidRouting, locked, isDemoMode } = state;
   const [optionsOpen, setOptionsOpen] = useState(invalidRouting);
+  const shown = shownRouting(state);
   return <details className="min-w-0 [overflow-wrap:anywhere] border-y border-slate-200 py-4" open={invalidRouting || undefined} onToggle={event => setOptionsOpen(event.currentTarget.open)}>
-    <summary className="cursor-pointer text-sm font-medium text-slate-700">Advanced Options {!optionsOpen && <span className="ml-2 font-normal text-slate-500">{agentAlias || 'Default agent'} · {model ? formatModelName(model) : 'Default model'}</span>}</summary>
+    <summary className="cursor-pointer text-sm font-medium text-slate-700">Advanced Options {!optionsOpen && <span className="ml-2 font-normal text-slate-500">{shown.agent || shown.placeholder}{shown.model && ` · ${formatModelName(shown.model)}`}</span>}</summary>
     <fieldset disabled={locked || isDemoMode} className="mt-4 grid min-w-0 grid-cols-1 gap-4 disabled:opacity-60 sm:grid-cols-2">
-      <label className="min-w-0 text-sm text-slate-700">Agent<select aria-describedby={agentAlias ? 'task-agent-selection' : undefined} aria-label="Agent" value={agentAlias} onChange={event => { setAgent(event.target.value); setModel(''); }} className="mt-1 min-h-11 w-full min-w-0 max-w-full rounded border border-slate-300 p-2"><option value="">Instance default</option>{invalidRouting && !selection && <option value={agentAlias}>{agentAlias} (unavailable)</option>}{catalog?.agents.map(agent => <option key={agent.alias} value={agent.alias}>{agent.alias}</option>)}</select>{agentAlias && <span id="task-agent-selection" className="mt-1 block text-xs text-slate-500">{agentAlias}</span>}</label>
-      <label className="min-w-0 text-sm text-slate-700">Model<select aria-describedby={model ? 'task-model-selection' : undefined} aria-label="Model" value={model} disabled={!agentAlias} onChange={event => setModel(event.target.value)} className="mt-1 min-h-11 w-full min-w-0 max-w-full rounded border border-slate-300 p-2"><option value="">Agent default</option>{model && !selection?.supportedModels.includes(model) && <option value={model}>{formatModelName(model)} (unavailable)</option>}{selection?.supportedModels.map(model => <option key={model} value={model}>{formatModelName(model)}</option>)}</select>{model && <span id="task-model-selection" className="mt-1 block text-xs text-slate-500">{formatModelName(model)}</span>}</label>
+      <label className="min-w-0 text-sm text-slate-700">Agent<select aria-describedby={shown.agent ? 'task-agent-selection' : undefined} aria-label="Agent" value={shown.agent} disabled={!shown.agent} onChange={event => { setAgent(event.target.value); setModel(''); }} className="mt-1 min-h-11 w-full min-w-0 max-w-full rounded border border-slate-300 p-2">{!shown.agent && <option value="">{shown.placeholder}</option>}{invalidRouting && !selection && <option value={agentAlias}>{agentAlias} (unavailable)</option>}{catalog?.agents.map(agent => <option key={agent.alias} value={agent.alias}>{agent.alias}</option>)}</select>{shown.agent && <span id="task-agent-selection" className="mt-1 block text-xs text-slate-500">{shown.agent}</span>}</label>
+      <label className="min-w-0 text-sm text-slate-700">Model<select aria-describedby={shown.model ? 'task-model-selection' : undefined} aria-label="Model" value={shown.model} disabled={!shown.agentSelection} onChange={event => { if (!agentAlias) setAgent(shown.agent); setModel(event.target.value); }} className="mt-1 min-h-11 w-full min-w-0 max-w-full rounded border border-slate-300 p-2">{!shown.model && <option value="">{shown.agentSelection ? 'No models available' : shown.placeholder}</option>}{shown.modelUnavailable && <option value={shown.model}>{formatModelName(shown.model)}{model ? ' (unavailable)' : ''}</option>}{shown.agentSelection?.supportedModels.map(model => <option key={model} value={model}>{formatModelName(model)}</option>)}</select>{shown.model && <span id="task-model-selection" className="mt-1 block text-xs text-slate-500">{formatModelName(shown.model)}</span>}</label>
     </fieldset>
     <p className="mt-3 text-xs text-slate-500">Base branch and automatic review settings follow the repository’s issue workflow.</p>
   </details>;
