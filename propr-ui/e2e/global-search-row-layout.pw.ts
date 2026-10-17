@@ -145,7 +145,22 @@ for (const width of [320, 390]) {
     const { input, palette, list } = await openPalette(page, { width: 1286, height: 760 });
     await palette.evaluate((el, w) => { el.style.width = `${w - 32}px`; }, width);
     await palette.getByTestId('global-search-preview').locator('xpath=..').evaluate(el => { el.style.display = 'none'; });
-    expect(Math.round((await list.boundingBox())!.width)).toBe(width - 34);
+    // The list fills the palette inside its 1px borders, less only the scrollport's own scrollbar: none in
+    // headless Chromium, the 6px `.scrollbar-subtle` bar in WebKit, which draws classic scrollbars.
+    const boxes = await list.evaluate(el => {
+      const scrollport = el.parentElement!;
+      const palette = el.closest<HTMLElement>('[data-testid="global-search-palette"]')!;
+      return {
+        palette: palette.getBoundingClientRect().width, paletteInner: palette.clientWidth,
+        scrollport: scrollport.getBoundingClientRect().width, scrollportInner: scrollport.clientWidth,
+        list: el.getBoundingClientRect().width,
+      };
+    });
+    expect(boxes.palette).toBe(width - 32);
+    expect(boxes.paletteInner).toBe(width - 34);
+    expect(boxes.scrollport).toBe(boxes.paletteInner);
+    expect(boxes.list).toBe(boxes.scrollportInner);
+    expect(boxes.scrollport - boxes.scrollportInner).toBeLessThanOrEqual(6);
     await expectFullWidthTitles(list);
     await expectCompactLongRow(list);
     await input.press('ArrowDown');
