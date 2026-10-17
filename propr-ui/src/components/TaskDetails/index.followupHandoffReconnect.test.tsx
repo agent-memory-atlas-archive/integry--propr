@@ -111,8 +111,8 @@ function desktopConnection() {
   const fixture = bridgeFixture();
   const adapters = createElectronDesktopAdapters(fixture.bridge);
   const otherProfile = { ...storedProfile, id: 'profile-2', label: 'Second server' };
-  const connect = async (transportScope: string, stored = storedProfile) => {
-    fixture.activate.mockResolvedValueOnce({ status: 'ready', profileId: stored.id, transportScope, identityEpoch: 'AAAAAAAAAAAAAAAAAAAAAA' });
+  const connect = async (transportScope: string, stored = storedProfile, identityEpoch = 'AAAAAAAAAAAAAAAAAAAAAA') => {
+    fixture.activate.mockResolvedValueOnce({ status: 'ready', profileId: stored.id, transportScope, identityEpoch });
     const profile = fromProfile(stored);
     const activated = await adapters.connection.activate!(profile, { status: 'ready', version: '0.8.15', activationTicket: `ticket-${transportScope}` });
     if (activated.status !== 'ready') throw new Error(`activation was ${activated.status}`);
@@ -198,6 +198,71 @@ describe('an accepted issue follow-up survives a same-profile desktop reconnect'
     expect(banner()).toHaveAttribute('data-phase', 'started');
     expect(within(banner()!).getByRole('link', { name: /View new run/ })).toHaveAttribute('href', '/tasks/fresh-run');
     expect(api.postTaskFollowup).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a same-profile credential replacement clears the handoff for good', () => {
+  const REPLACED_IDENTITY = 'BBBBBBBBBBBBBBBBBBBBBB';
+
+  it('does not bring back a cleared starting handoff on the mounted view, nor write it back by looking it up', async () => {
+    const desktop = desktopConnection();
+    await desktop.connect('first-transport-generation');
+    renderPage();
+    await flush();
+    await postFollowup();
+    expect(banner()).toHaveAttribute('data-phase', 'starting');
+
+    await desktop.disconnect();
+    api.getTaskFollowupRuns.mockClear();
+    api.getTaskFollowupRuns.mockResolvedValue(runsOf([{ taskId: 'fresh-run', status: 'processing' }]));
+    await desktop.connect('replaced-identity-generation', storedProfile, REPLACED_IDENTITY);
+    await flush();
+    expect(banner()).toBeNull();
+    expect(handoffKeys()).toHaveLength(0);
+
+    await poll();
+    expect(banner()).toBeNull();
+    expect(handoffKeys()).toHaveLength(0);
+    expect(api.getTaskFollowupRuns).not.toHaveBeenCalled();
+    expect(api.postTaskFollowup).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not bring back the cleared run link on the mounted view', async () => {
+    const desktop = desktopConnection();
+    await desktop.connect('first-transport-generation');
+    renderPage();
+    await flush();
+    api.getTaskFollowupRuns.mockResolvedValue(runsOf([{ taskId: 'fresh-run', status: 'completed' }]));
+    await postFollowup();
+    await flush();
+    expect(within(banner()!).getByRole('link', { name: /View new run/ })).toHaveAttribute('href', '/tasks/fresh-run');
+
+    await desktop.disconnect();
+    await desktop.connect('replaced-identity-generation', storedProfile, REPLACED_IDENTITY);
+    await flush();
+    expect(banner()).toBeNull();
+    expect(screen.queryByRole('link', { name: /View new run/ })).toBeNull();
+    expect(handoffKeys()).toHaveLength(0);
+  });
+});
+
+describe('without session storage the handoff lasts as long as the page', () => {
+  it('keeps the request in memory on the mounted view when storage refuses it', async () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('QuotaExceededError'); });
+    try {
+      renderPage();
+      await flush();
+      await postFollowup();
+      expect(handoffKeys()).toHaveLength(0);
+      expect(banner()).toHaveAttribute('data-phase', 'starting');
+
+      api.getTaskFollowupRuns.mockResolvedValue(runsOf([{ taskId: 'fresh-run', status: 'processing' }]));
+      await poll();
+      expect(within(banner()!).getByRole('link', { name: /View new run/ })).toHaveAttribute('href', '/tasks/fresh-run');
+      expect(api.postTaskFollowup).toHaveBeenCalledTimes(1);
+    } finally {
+      setItem.mockRestore();
+    }
   });
 });
 

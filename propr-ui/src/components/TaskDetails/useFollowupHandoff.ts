@@ -88,12 +88,15 @@ function readStored(key: string | null, now = Date.now()): StoredHandoff | null 
   }
 }
 
-function writeStored(key: string, value: StoredHandoff | null): void {
+/** Records the handoff in this tab's storage; false when storage is unavailable and did not take it. */
+function writeStored(key: string, value: StoredHandoff | null): boolean {
   try {
     if (value) sessionStorage.setItem(key, JSON.stringify(value));
     else sessionStorage.removeItem(key);
+    return true;
   } catch {
     // Storage may be unavailable; the handoff then lasts as long as the page.
+    return false;
   } finally {
     window.dispatchEvent(new Event(CHANGE_EVENT));
   }
@@ -134,7 +137,8 @@ export function useFollowupHandoff(sourceTaskId: string | undefined) {
   const raw = useSyncExternalStore(subscribeStored, () => {
     try { return key ? sessionStorage.getItem(key) : null; } catch { return null; }
   });
-  // Without storage, the request is held for this page only.
+  // Only a request storage could not take is held here, for this page only. Once storage holds a
+  // request, storage alone is authoritative: an entry the desktop cleared on an identity change stays gone.
   const [memory, setMemory] = useState<{ key: string; value: StoredHandoff } | null>(null);
   const stored = useMemo(() => {
     const fromStorage = raw ? readStored(key) : null;
@@ -147,8 +151,8 @@ export function useFollowupHandoff(sourceTaskId: string | undefined) {
   keyRef.current = key;
 
   const save = useCallback((targetKey: string, value: StoredHandoff | null) => {
-    writeStored(targetKey, value);
-    setMemory(value ? { key: targetKey, value } : null);
+    const persisted = writeStored(targetKey, value);
+    setMemory(value && !persisted ? { key: targetKey, value } : null);
   }, []);
 
   /** The scope and connection a submission starts in; `accept` records its receipt only while both are current. */
