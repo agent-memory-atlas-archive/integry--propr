@@ -70,6 +70,9 @@ function useNewTaskLauncher(scope: string) {
   const [error, setError] = useState<string | null>(null);
   const submitting = useRef(false);
   const selection = catalog?.agents.find(agent => agent.alias === agentAlias);
+  // An explicit agent without a chosen model runs the model the launcher shows for it.
+  const agentModel = selection?.defaultModel ?? selection?.supportedModels[0];
+  const routedModel = model || (agentAlias ? agentModel : undefined);
   const invalidRouting = Boolean(agentAlias && catalog && (!selection || (model && !selection.supportedModels.includes(model))));
 
   useEffect(() => {
@@ -115,7 +118,7 @@ function useNewTaskLauncher(scope: string) {
   const run = async () => {
     if (submitting.current || processingFiles || isDemoMode) return;
     submitting.current = true; setBusy(true); setError(null);
-    const current = snapshot || { key: crypto.randomUUID(), payload: { repository, instruction, ...(extensionProfile ? { extensionProfile, extensionAllowWrite } : {}), ...(agentAlias ? { agentAlias } : {}), ...(model ? { model } : {}), todoIds }, files };
+    const current = snapshot || { key: crypto.randomUUID(), payload: { repository, instruction, ...(extensionProfile ? { extensionProfile, extensionAllowWrite } : {}), ...(agentAlias ? { agentAlias } : {}), ...(routedModel ? { model: routedModel } : {}), todoIds }, files };
     try {
       // Persist before the network mutation. A reload can safely repeat this exact request.
       const storageError = await persistForRetry(scope, current);
@@ -198,7 +201,7 @@ function useNewTaskLauncher(scope: string) {
   const locked = busy || Boolean(snapshot) || Boolean(planDraft);
   return {
     extensionAllowWrite, setExtensionAllowWrite, extensionProfile, setExtensionProfile, repository, setRepository, instruction, setInstruction, files, setFiles,
-    agentAlias, setAgent, model, setModel, catalog, selection, invalidRouting,
+    agentAlias, setAgent, model, setModel, catalog, selection, agentModel, invalidRouting,
     snapshot, result, busy, processingFiles, setProcessingFiles, planDraft,
     ready, error, setError, run, startOver, dismiss, planFirst, locked, isDemoMode, recoverable, reopen,
   };
@@ -207,11 +210,11 @@ function useNewTaskLauncher(scope: string) {
 type LauncherState = ReturnType<typeof useNewTaskLauncher>;
 
 // Nothing chosen runs the instance default agent with its default model; show those values rather than "default".
-function shownRouting({ agentAlias, model, catalog, selection }: Pick<LauncherState, 'agentAlias' | 'model' | 'catalog' | 'selection'>) {
+function shownRouting({ agentAlias, model, catalog, selection, agentModel: selectedAgentModel }: Pick<LauncherState, 'agentAlias' | 'model' | 'catalog' | 'selection' | 'agentModel'>) {
   const fallback = catalog ? resolvePlanIssueDefaultSelection(catalog.agents, catalog.defaultAgentAlias) : undefined;
   const agent = agentAlias || fallback?.agentAlias || '';
   const agentSelection = selection ?? catalog?.agents.find(candidate => candidate.alias === agent);
-  const agentModel = agentAlias ? agentSelection?.defaultModel ?? agentSelection?.supportedModels[0] : fallback?.modelName;
+  const agentModel = agentAlias ? selectedAgentModel : fallback?.modelName;
   const shownModel = model || agentModel || '';
   const modelUnavailable = Boolean(shownModel && !agentSelection?.supportedModels.includes(shownModel));
   return { agent, agentSelection, model: shownModel, modelUnavailable, placeholder: catalog ? 'No agents available' : 'Loading agents…' };
