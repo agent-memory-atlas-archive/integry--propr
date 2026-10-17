@@ -53,6 +53,7 @@ function createAuthorizationTestApp() {
       agentRuntimeRoutes: handlerCollection(),
       agentVersionRoutes: handlerCollection(),
       configRoutes: handlerCollection(),
+      followupHandoffRoutes: handlerCollection(),
       visualPreviewAuthRoutes: handlerCollection(),
     }),
   ];
@@ -84,6 +85,10 @@ const managementRequests = [
   ['POST', '/api/config/synthetic-agents'],
   ['GET', '/api/config/agent-tank/usage'],
   ['GET', '/api/admin/members'],
+  ['GET', '/api/admin/followup-handoffs'],
+  ['GET', '/api/admin/followup-handoffs/integry/propr/42'],
+  ['POST', '/api/admin/followup-handoffs/integry/propr/42/resume'],
+  ['POST', '/api/admin/followup-handoffs/integry/propr/42/release'],
   ['GET', '/api/config/preview-storage'],
   ['GET', '/api/config/visual-preview-auth'],
   ['POST', '/api/config/visual-preview-auth'],

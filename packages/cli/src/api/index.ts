@@ -41,6 +41,21 @@ export {
 } from './agentRuntime.js';
 
 export {
+  followupHandoffPath,
+  getFollowupHandoff,
+  listFollowupHandoffs,
+  releaseFollowupHandoff,
+  resumeFollowupHandoff,
+} from './followupHandoffs.js';
+export type {
+  FollowupHandoffListResponse,
+  FollowupHandoffRecoverySummary,
+  FollowupHandoffReleaseResponse,
+  FollowupHandoffResumeResponse,
+  FollowupHandoffStatus,
+} from './followupHandoffs.js';
+
+export {
   getVisualPreviewAuthStatus,
   saveVisualPreviewUploadToken,
 } from './visualPreviewAuth.js';

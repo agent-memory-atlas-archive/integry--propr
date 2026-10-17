@@ -38,6 +38,8 @@ import {
     publishPullRequestCommentVisualPreviews,
 } from '../github/visualPreviewAttachments.js';
 import type { PullRequestPublication, PublicationSalvage } from './prPublication.js';
+import type { FollowupHandoffRecord } from './followupHandoffStore.js';
+import { markExecutionHandoffCommitted, markExecutionHandoffCommentPublished, markExecutionHandoffPushed } from './prCommentHandoffIntegration.js';
 import { recordPushSalvageEvent } from './pushSalvageTimeline.js';
 import { savePublicationCheckpoint } from './prContinuation.js';
 import { buildWorkNotificationRecap, fullNotificationSummary } from './notificationRecap.js';
@@ -51,6 +53,8 @@ interface PostExecutionState {
     authorsText: string;
     unprocessedComments: UnprocessedComment[];
     startingWorkComment: { data: { id: number; html_url: string } } | null;
+    /** Durable publication handoff; advanced as commit, push and comment complete. */
+    followupHandoff?: FollowupHandoffRecord | null;
 }
 
 interface ReadyPostExecutionState extends PostExecutionState {
@@ -125,10 +129,14 @@ async function commitAndPush(
     const commitResult = await commitChanges(state.worktreeInfo.worktreePath, commitMessage, AI_COMMIT_AUTHOR, { issueNumber: context.pullRequestNumber, issueTitle: 'Follow-up changes' });
 
     if (commitResult) {
+        // Durable phase checkpoints around the push: restart recovery must know a
+        // clean, pushed worktree means completed publication, not missing work.
+        await markExecutionHandoffCommitted(state, commitResult.commitHash);
         const pushResult = await context.publication.push(state.worktreeInfo.worktreePath, { ...completionInputs, commitResult, changesSummary, commitMessage }, { salvage: context.salvage });
         if (pushResult.commitHash) {
             commitResult.commitHash = pushResult.commitHash;
         }
+        await markExecutionHandoffPushed(state, commitResult.commitHash);
     }
 
     return { commitResult, changesSummary, commitMessage };
@@ -353,6 +361,7 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
             unprocessedReviewComments,
             visualPreviewEvidence: preparedVisualPreview?.evidence
         });
+        await markExecutionHandoffCommentPublished(state, completionComment.data.html_url);
         correlatedLogger.info({ pullRequestNumber, commitHash: commitResult?.commitHash, commentUrl: completionComment.data.html_url, partial, terminationReason }, partial ? 'Published partial follow-up changes after interrupted execution' : 'Successfully applied follow-up changes');
 
         if (unprocessedReviewComments.length > 0) {

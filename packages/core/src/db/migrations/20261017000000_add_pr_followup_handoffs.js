@@ -20,7 +20,7 @@ export async function up(knex) {
         table.text('claimed_comments').notNullable().defaultTo('[]');
         table.text('job_data').notNullable().defaultTo('{}');
         table.string('llm', 255);
-        // agent_running | agent_exited | committed | pushed | comment_published
+        // agent_running | agent_exited | committed | pushed | comment_published | cleanup_pending
         table.string('phase', 32).notNullable().defaultTo('agent_running');
         // active | awaiting_operator | released
         table.string('status', 32).notNullable().defaultTo('active');
@@ -30,6 +30,17 @@ export async function up(knex) {
         table.bigInteger('starting_comment_id');
         table.string('commit_hash', 64);
         table.text('completion_comment_url');
+        // Publication binding captured before the agent launches: the pull
+        // request's head/base refs and the worktree HEAD the agent builds on.
+        // Recovery revalidates them before pushing and fails closed on mismatch.
+        table.string('head_ref', 255);
+        table.string('base_ref', 255);
+        table.string('head_sha', 64);
+        // Immutable agent container identity, bound as soon as the container
+        // starts; recovery refuses to act on a different container's evidence.
+        table.string('container_id', 255);
+        // Task that adopted this handoff's obligation, for operator status.
+        table.string('successor_task_id', 255);
         // PR processing lease ownership recorded at handoff time.
         table.string('lock_key', 512).notNullable();
         table.string('lock_token', 512).notNullable();

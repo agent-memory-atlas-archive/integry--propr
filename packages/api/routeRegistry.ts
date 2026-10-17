@@ -27,6 +27,7 @@ interface ManagementRouteDeps {
   agentRuntimeRoutes: ReturnType<typeof routes.createAgentRuntimeRoutes>;
   agentVersionRoutes: ReturnType<typeof routes.createAgentVersionRoutes>;
   configRoutes: ReturnType<typeof routes.createConfigRoutes>;
+  followupHandoffRoutes: ReturnType<typeof routes.createFollowupHandoffRoutes>;
   visualPreviewAuthRoutes: ReturnType<typeof routes.createVisualPreviewAuthRoutes>;
 }
 
@@ -80,6 +81,7 @@ export function createManagementRouteEntries({
   agentRuntimeRoutes,
   agentVersionRoutes,
   configRoutes,
+  followupHandoffRoutes,
   visualPreviewAuthRoutes,
 }: ManagementRouteDeps): RouteEntry[] {
   return [
@@ -125,6 +127,11 @@ export function createManagementRouteEntries({
     ['post', '/api/admin/members', requireManageMembers, adminRoutes.addMember],
     ['patch', '/api/admin/members/:githubUserId', requireManageMembers, adminRoutes.updateMemberRole],
     ['delete', '/api/admin/members/:githubUserId', requireManageMembers, adminRoutes.removeMember],
+
+    ['get', '/api/admin/followup-handoffs', requireManageRuntime, followupHandoffRoutes.list],
+    ['get', '/api/admin/followup-handoffs/:owner/:repo/:pr', requireManageRuntime, followupHandoffRoutes.get],
+    ['post', '/api/admin/followup-handoffs/:owner/:repo/:pr/resume', requireManageRuntime, followupHandoffRoutes.resume],
+    ['post', '/api/admin/followup-handoffs/:owner/:repo/:pr/release', requireManageRuntime, followupHandoffRoutes.release],
 
     ['get', '/api/admin/mcp', requireManageSettings, adminMcpRoutes.getSettings],
     ['put', '/api/admin/mcp', requireManageSettings, adminMcpRoutes.putSettings],

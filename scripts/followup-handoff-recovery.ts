@@ -2,15 +2,19 @@
 /**
  * Non-destructive operator command for interrupted PR follow-up publication
  * handoffs. It never deletes retained worktrees or unpublished commits.
+ * The same operations are available through the packaged surfaces: the
+ * admin-only `/api/admin/followup-handoffs` API and `propr handoffs ...`.
  *
  *   tsx scripts/followup-handoff-recovery.ts list
  *   tsx scripts/followup-handoff-recovery.ts inspect <owner/repo> <pr>
  *   tsx scripts/followup-handoff-recovery.ts resume <owner/repo> <pr> [--authorize-cancelled]
  *   tsx scripts/followup-handoff-recovery.ts release <owner/repo> <pr> [--force]
  *
- * `resume` runs one recovery pass for the handoff; with --authorize-cancelled
- * it first grants explicit operator authorization to publish work whose task
- * the user cancelled (publication never happens without it).
+ * `resume` re-arms an operator-held handoff whose condition was repaired, then
+ * runs one recovery pass strictly scoped to the named pull request; with
+ * --authorize-cancelled it first grants explicit operator authorization to
+ * publish work whose task the user cancelled (publication never happens
+ * without it).
  * `release` stops tracking the handoff; it frees the branch only when the
  * worktree is settled, or detaches its HEAD in place with --force (all files
  * and commits stay in the worktree).
@@ -20,6 +24,7 @@ import {
     inspectFollowupHandoffs,
     recoverInterruptedFollowupHandoffs,
     releaseFollowupHandoffRecord,
+    resumeOperatorHeldFollowupHandoff,
 } from '../src/jobs/followupHandoffRecovery.js';
 import type { FollowupHandoffKey } from '../src/jobs/followupHandoffStore.js';
 
@@ -38,19 +43,46 @@ function printStatuses(statuses: Awaited<ReturnType<typeof inspectFollowupHandof
         console.log('No follow-up publication handoffs recorded.');
         return;
     }
-    for (const { record, liveness, nextAction } of statuses) {
+    for (const { record, liveness, nextAction, predecessorTaskIds, successorTaskId } of statuses) {
         console.log([
             `${record.repository}#${record.pull_request}`,
-            `  task:       ${record.task_id}`,
-            `  phase:      ${record.phase}`,
-            `  status:     ${record.status}${record.status_reason ? ` (${record.status_reason})` : ''}`,
-            `  liveness:   ${liveness}`,
-            `  branch:     ${record.branch_name}`,
-            `  worktree:   ${record.worktree_path}`,
-            `  commit:     ${record.commit_hash ?? '-'}`,
-            `  next action: ${nextAction}`,
+            `  task:         ${record.task_id}`,
+            `  predecessors: ${predecessorTaskIds.length ? predecessorTaskIds.join(', ') : '-'}`,
+            `  successor:    ${successorTaskId ?? '-'}`,
+            `  phase:        ${record.phase}`,
+            `  status:       ${record.status}${record.status_reason ? ` (${record.status_reason})` : ''}`,
+            `  liveness:     ${liveness}`,
+            `  branch:       ${record.branch_name}`,
+            `  worktree:     ${record.worktree_path}`,
+            `  commit:       ${record.commit_hash ?? '-'}`,
+            `  next action:  ${nextAction}`,
         ].join('\n'));
     }
+}
+
+async function resumeHandoff(key: FollowupHandoffKey, flag?: string): Promise<void> {
+    if (flag === '--authorize-cancelled') {
+        const authorized = await authorizeCancelledFollowupHandoff(key);
+        if (!authorized) {
+            console.error('No operator-held handoff to authorize, or it changed while authorizing; re-run inspect.');
+            process.exit(1);
+        }
+        console.log('Operator authorization recorded; the cancelled work may now publish.');
+    } else {
+        const reactivated = await resumeOperatorHeldFollowupHandoff(key);
+        if (!reactivated.resumed) {
+            if (reactivated.reason === 'requires_cancellation_authorization') {
+                console.error('This handoff was held for a user cancellation; re-run with --authorize-cancelled to explicitly authorize publication.');
+            } else {
+                console.error(`Cannot resume this handoff (${reactivated.reason}); re-run inspect.`);
+            }
+            process.exit(1);
+        }
+    }
+    // Keyed recovery: side effects are limited to this pull request's handoff.
+    const summary = await recoverInterruptedFollowupHandoffs({}, key);
+    console.log(JSON.stringify(summary, null, 2));
+    printStatuses(await inspectFollowupHandoffs({}, key));
 }
 
 async function main(): Promise<void> {
@@ -65,25 +97,14 @@ async function main(): Promise<void> {
             return;
         }
         case 'resume': {
-            const key = parseKey(repository, pr);
-            if (flag === '--authorize-cancelled') {
-                const authorized = await authorizeCancelledFollowupHandoff(key);
-                if (!authorized) {
-                    console.error('No such handoff, or it changed while authorizing; re-run inspect.');
-                    process.exit(1);
-                }
-                console.log('Operator authorization recorded; the cancelled work may now publish.');
-            }
-            const summary = await recoverInterruptedFollowupHandoffs();
-            console.log(JSON.stringify(summary, null, 2));
-            printStatuses(await inspectFollowupHandoffs({}, key));
+            await resumeHandoff(parseKey(repository, pr), flag);
             return;
         }
         case 'release': {
             const key = parseKey(repository, pr);
             const result = await releaseFollowupHandoffRecord(key, { force: flag === '--force' });
             if (!result.released) {
-                console.error(`Not released: ${result.reason}. The worktree still holds unpublished work; inspect it, or re-run with --force to detach its HEAD in place (files and commits are kept).`);
+                console.error(`Not released: ${result.reason}. Settle the reported condition first; when the worktree holds unpublished work you may re-run with --force to detach its HEAD in place (files and commits are kept).`);
                 process.exit(1);
             }
             console.log('Handoff released. The retained worktree and its contents were preserved.');

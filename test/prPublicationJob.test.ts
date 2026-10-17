@@ -207,8 +207,9 @@ const modules: Record<string, Record<string, unknown>> = {
     },
     // Durable handoff recovery is covered by test/followupHandoffRecovery.test.ts.
     prCommentHandoffIntegration: {
-        recordExecutionHandoff: noOp, markExecutionHandoffAgentExited: noOp, finalizeExecutionHandoff: noOp,
-        gatePredecessorHandoff: async () => undefined, settleExecutionHandoffAfterError: noOp,
+        recordExecutionHandoff: noOp, markExecutionHandoffAgentExited: noOp, markExecutionHandoffContainer: noOp,
+        markExecutionHandoffCommitted: noOp, markExecutionHandoffPushed: noOp, markExecutionHandoffCommentPublished: noOp,
+        finalizeExecutionHandoff: noOp, gatePredecessorHandoff: async () => undefined, settleExecutionHandoffAfterError: noOp,
     },
     prCommentCollisionRecovery: {
         createPRCommentTaskStateIfMissing: async (params: Parameters<typeof realRecovery.createPRCommentTaskStateIfMissing>[0]) => { if (realReentryHelpers) await realRecovery.createPRCommentTaskStateIfMissing(params); },

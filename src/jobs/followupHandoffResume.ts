@@ -1,21 +1,22 @@
-import { access } from 'node:fs/promises';
-import { commitChanges, createHooklessGit, releaseBranchFromSettledWorktree } from '@propr/core';
 import type { UnprocessedComment } from '@propr/core';
-import { AI_COMMIT_AUTHOR } from './commitAuthor.js';
-import { pushPullRequestHeadBranch } from './prGitOperations.js';
 import { buildWorkEvidenceMarker, filterRealComments } from '../shared/workEvidenceMarker.js';
+import type { FollowupHandoffGitOps } from './followupHandoffGitOps.js';
 import {
     advanceFollowupHandoff, finalizeFollowupHandoff, parseClaimedComments, parseSourceTaskIds,
     HANDOFF_AWAITING_OPERATOR,
     type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
 } from './followupHandoffStore.js';
 
+export { createFollowupHandoffGitOps, type FollowupHandoffGitOps, type WorktreeAttachment } from './followupHandoffGitOps.js';
+
 /**
  * Resumes the exact missing publication phase of an adopted follow-up handoff.
  * Every step is idempotent: committing is skipped when the worktree is clean,
  * pushing an already-published head is up to date, the owed comment is
  * deduplicated by a durable marker, and the task finalizer refuses terminal
- * states — so duplicate recovery passes can never publish twice.
+ * states — so duplicate recovery passes can never publish twice. The handoff
+ * row itself survives until the branch is proven free again (cleanup_pending),
+ * so a crash around branch release retries cleanup without republishing.
  */
 
 export interface LoggerLike {
@@ -44,21 +45,6 @@ export interface HandoffTaskStates {
     CANCELLED: string;
 }
 
-export type WorktreeAttachment = 'missing' | 'not_on_branch' | 'attached';
-
-export interface FollowupHandoffGitOps {
-    worktreeAttachment(worktreePath: string, branchName: string): Promise<WorktreeAttachment>;
-    hasUncommittedChanges(worktreePath: string): Promise<boolean>;
-    commitWork(worktreePath: string, message: string, pullRequestNumber: number): Promise<{ commitHash: string } | null>;
-    hasUnpushedCommits(worktreePath: string, branchName: string): Promise<boolean>;
-    head(worktreePath: string): Promise<string>;
-    push(worktreePath: string, target: { repoOwner: string; repoName: string; branchName: string }): Promise<{ commitHash?: string } | void>;
-    /** Frees the branch from a settled retained worktree; keeps the worktree itself. */
-    releaseSettledWorktree(localRepoPath: string, branchName: string, worktreePath: string): Promise<boolean>;
-    /** Detaches the worktree HEAD in place: commits and working-tree files all stay. */
-    detachWorktreeHead(worktreePath: string): Promise<void>;
-}
-
 export interface ResumeFollowupHandoffParams {
     record: FollowupHandoffRecord;
     octokit: HandoffOctokit;
@@ -70,12 +56,16 @@ export interface ResumeFollowupHandoffParams {
     taskStates: HandoffTaskStates;
     /** Successor task adopting this handoff, when a new follow-up triggered the recovery. */
     recoveredBy?: string;
+    /** Reports a lost PR processing lease; once true no further external mutation runs. */
+    isOwnershipLost?: () => boolean;
 }
 
 export type ResumeOutcome =
     | { outcome: 'published'; commitHash: string | null }
     | { outcome: 'no_changes' }
     | { outcome: 'awaiting_operator'; reason: string }
+    | { outcome: 'cleanup_pending' }
+    | { outcome: 'ownership_lost' }
     | { outcome: 'superseded' };
 
 export function splitHandoffRepository(repository: string): { owner: string; repo: string } {
@@ -85,60 +75,6 @@ export function splitHandoffRepository(repository: string): { owner: string; rep
 
 export function handoffCommentMarker(record: Pick<FollowupHandoffRecord, 'repository' | 'pull_request' | 'incarnation'>): string {
     return `<!-- propr-followup-handoff:${record.repository}:${record.pull_request}:${record.incarnation} -->`;
-}
-
-/** Default Git evidence and publication operations over the retained worktree. */
-export function createFollowupHandoffGitOps(getToken: () => Promise<string>): FollowupHandoffGitOps {
-    return {
-        async worktreeAttachment(worktreePath, branchName) {
-            try {
-                await access(worktreePath);
-            } catch {
-                return 'missing';
-            }
-            const current = (await createHooklessGit(worktreePath).raw(['branch', '--show-current'])).trim();
-            return current === branchName ? 'attached' : 'not_on_branch';
-        },
-        async hasUncommittedChanges(worktreePath) {
-            const status = await createHooklessGit(worktreePath).raw(['status', '--porcelain', '--untracked-files=all']);
-            return status.trim().length > 0;
-        },
-        async commitWork(worktreePath, message, pullRequestNumber) {
-            return commitChanges(worktreePath, message, AI_COMMIT_AUTHOR, { issueNumber: pullRequestNumber, issueTitle: 'Recovered follow-up changes' });
-        },
-        async hasUnpushedCommits(worktreePath, branchName) {
-            const git = createHooklessGit(worktreePath);
-            try {
-                await git.raw(['fetch', 'origin', `+refs/heads/${branchName}:refs/remotes/origin/${branchName}`]);
-            } catch {
-                // Offline comparison against the last known remote ref is still safe:
-                // it can only overestimate the unpushed work, and the push is idempotent.
-            }
-            try {
-                const unpushed = await git.raw(['rev-list', '--count', 'HEAD', '--not', `refs/remotes/origin/${branchName}`]);
-                return unpushed.trim() !== '0';
-            } catch {
-                // No remote ref yet: everything on the branch is unpublished.
-                return true;
-            }
-        },
-        async head(worktreePath) {
-            return (await createHooklessGit(worktreePath).raw(['rev-parse', 'HEAD'])).trim();
-        },
-        async push(worktreePath, target) {
-            return pushPullRequestHeadBranch({
-                worktreePath,
-                target: { ...target, isFork: false },
-                authToken: await getToken(),
-            }) as Promise<{ commitHash?: string } | void>;
-        },
-        async releaseSettledWorktree(localRepoPath, branchName, worktreePath) {
-            return releaseBranchFromSettledWorktree(createHooklessGit(localRepoPath), branchName, worktreePath);
-        },
-        async detachWorktreeHead(worktreePath) {
-            await createHooklessGit(worktreePath).raw(['checkout', '--detach']);
-        },
-    };
 }
 
 async function holdForOperator(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord, reason: string): Promise<ResumeOutcome> {
@@ -161,18 +97,65 @@ export async function reportHandoffOnTaskTimeline(
     try {
         const current = await params.stateManager.getTaskState(record.task_id);
         if (!current) return;
+        // Host filesystem paths stay off the member-visible timeline; the
+        // operator-only status API exposes the retained worktree path instead.
         await params.stateManager.updateHistoryMetadata(record.task_id, current.state, {
             followupPublicationHandoff: {
                 phase: record.phase, status: record.status, statusReason: record.status_reason,
-                worktreePath: record.worktree_path, branchName: record.branch_name,
+                branchName: record.branch_name,
                 predecessorTaskIds: parseSourceTaskIds(record),
-                ...(params.recoveredBy ? { successorTaskId: params.recoveredBy } : {}),
+                ...(successorTaskId(params, record) ? { successorTaskId: successorTaskId(params, record) } : {}),
                 nextAction,
             },
         });
     } catch (error) {
         params.log.warn({ taskId: record.task_id, error: (error as Error).message }, 'Could not record follow-up handoff status on the task timeline');
     }
+}
+
+function successorTaskId(params: Pick<ResumeFollowupHandoffParams, 'recoveredBy'>, record: FollowupHandoffRecord): string | null {
+    return params.recoveredBy ?? record.successor_task_id ?? null;
+}
+
+/** True (and logged) when the PR processing lease was lost: no further mutation may run. */
+function ownershipLost(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): boolean {
+    if (!params.isOwnershipLost?.()) return false;
+    params.log.warn({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request },
+        'Lost the PR processing lease during follow-up handoff recovery; stopping before further mutations');
+    return true;
+}
+
+/** User cancellation is authoritative: re-checked before every publication step. */
+async function cancellationHold(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome | null> {
+    if (record.operator_authorized) return null;
+    const taskState = await params.stateManager.getTaskState(record.task_id);
+    if (taskState?.state !== params.taskStates.CANCELLED) return null;
+    return holdForOperator(params, record, 'cancelled_by_user');
+}
+
+/**
+ * Revalidates publication authority immediately before the push: the pull
+ * request must still have the head/base refs the handoff was bound to, and the
+ * remote branch head must be our own baseline or our own earlier push. A
+ * retargeted PR or an externally advanced head fails closed and preserves the
+ * handoff for an operator.
+ */
+async function validatePublicationBinding(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome | null> {
+    if (record.head_ref || record.base_ref) {
+        const { owner, repo } = splitHandoffRepository(record.repository);
+        const { data } = await params.octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+            owner, repo, pull_number: record.pull_request,
+        });
+        const pr = data as { head?: { ref?: string }; base?: { ref?: string } };
+        if ((record.head_ref && pr.head?.ref !== record.head_ref) || (record.base_ref && pr.base?.ref !== record.base_ref)) {
+            return holdForOperator(params, record, 'pr_binding_mismatch');
+        }
+    }
+    const remoteHead = await params.git.remoteBranchHead(record.worktree_path, record.branch_name);
+    if (remoteHead && remoteHead !== record.head_sha && !(await params.git.isAncestorOfHead(record.worktree_path, remoteHead))) {
+        return holdForOperator(params, record, 'head_advanced_externally');
+    }
+    return null;
 }
 
 function recoveryCommitMessage(record: FollowupHandoffRecord): string {
@@ -242,9 +225,9 @@ async function finalizeRecoveredTask(params: ResumeFollowupHandoffParams, record
     const current = await stateManager.getTaskState(record.task_id);
     const historyMetadata = {
         followupPublicationHandoff: {
-            recovered: true, phase: record.phase, worktreePath: record.worktree_path,
+            recovered: true, phase: record.phase, branchName: record.branch_name,
             predecessorTaskIds: parseSourceTaskIds(record),
-            ...(params.recoveredBy ? { successorTaskId: params.recoveredBy } : {}),
+            ...(successorTaskId(params, record) ? { successorTaskId: successorTaskId(params, record) } : {}),
         },
         notificationRecap: published
             ? 'Recovered and published the interrupted follow-up after a worker restart.'
@@ -263,15 +246,42 @@ async function finalizeRecoveredTask(params: ResumeFollowupHandoffParams, record
     });
 }
 
+/**
+ * Retires the handoff only once the branch is proven free of the retained
+ * worktree. A failed or interrupted release keeps the row at cleanup_pending,
+ * so a later pass retries cleanup without republishing anything.
+ */
+async function attemptHandoffCleanup(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
+    if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
+    let released = false;
+    try {
+        released = await params.git.releaseSettledWorktree(record.local_repo_path, record.branch_name, record.worktree_path);
+    } catch (error) {
+        params.log.warn({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, error: (error as Error).message },
+            'Branch release from the settled worktree failed; the handoff is retained to retry cleanup');
+    }
+    if (!released) {
+        await reportHandoffOnTaskTimeline(params, record, 'publication complete; branch release pending retry');
+        return { outcome: 'cleanup_pending' };
+    }
+    await finalizeFollowupHandoff(params.store, record);
+    params.log.info({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, commitHash: record.commit_hash },
+        record.commit_hash
+            ? 'Recovered and published an interrupted follow-up exactly once'
+            : 'Interrupted follow-up produced no changes; its branch is free again');
+    return record.commit_hash ? { outcome: 'published', commitHash: record.commit_hash } : { outcome: 'no_changes' };
+}
+
 async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
+    if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
     await publishOwedComment(params, record, interruptedWithoutChangesBody(record));
     await params.restoreComments(record, parseClaimedComments(record));
     await finalizeRecoveredTask(params, record, false);
-    await finalizeFollowupHandoff(params.store, record);
-    await params.git.releaseSettledWorktree(record.local_repo_path, record.branch_name, record.worktree_path);
+    const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'cleanup_pending' });
+    if (!advanced) return { outcome: 'superseded' };
     params.log.info({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request },
         'Interrupted follow-up produced no changes; claimed comments were returned to the queue');
-    return { outcome: 'no_changes' };
+    return attemptHandoffCleanup(params, advanced);
 }
 
 /**
@@ -289,6 +299,7 @@ async function collectAgentOutput(
     if (attachment === 'not_on_branch') return { done: await holdForOperator(params, record, 'worktree_not_on_branch') };
     let commitHash: string | null;
     if (await git.hasUncommittedChanges(record.worktree_path)) {
+        if (ownershipLost(params, record)) return { done: { outcome: 'ownership_lost' } };
         const commit = await git.commitWork(record.worktree_path, recoveryCommitMessage(record), record.pull_request);
         commitHash = commit?.commitHash ?? null;
     } else if (await git.hasUnpushedCommits(record.worktree_path, record.branch_name)) {
@@ -300,6 +311,31 @@ async function collectAgentOutput(
     return advanced ? { record: advanced } : { done: { outcome: 'superseded' } };
 }
 
+type ResumeStep = { record: FollowupHandoffRecord } | { done: ResumeOutcome };
+
+/** Pushes the committed work after revalidating cancellation, binding and lease ownership. */
+async function pushCommittedWork(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeStep> {
+    const { git } = params;
+    const hold = await cancellationHold(params, record) ?? await validatePublicationBinding(params, record);
+    if (hold) return { done: hold };
+    if (ownershipLost(params, record)) return { done: { outcome: 'ownership_lost' } };
+    const { owner, repo } = splitHandoffRepository(record.target_repository);
+    const pushed = await git.push(record.worktree_path, { repoOwner: owner, repoName: repo, branchName: record.branch_name });
+    const commitHash = (pushed && typeof pushed === 'object' && pushed.commitHash) || await git.head(record.worktree_path);
+    const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'pushed', commit_hash: commitHash });
+    return advanced ? { record: advanced } : { done: { outcome: 'superseded' } };
+}
+
+/** Publishes the owed completion comment after re-checking cancellation and lease ownership. */
+async function publishPushedCompletion(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeStep> {
+    const hold = await cancellationHold(params, record);
+    if (hold) return { done: hold };
+    if (ownershipLost(params, record)) return { done: { outcome: 'ownership_lost' } };
+    const commentUrl = await publishOwedComment(params, record, recoveredCompletionBody(record));
+    const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'comment_published', completion_comment_url: commentUrl });
+    return advanced ? { record: advanced } : { done: { outcome: 'superseded' } };
+}
+
 /**
  * Called under the pull request's processing lease with a record whose agent
  * is proven exited/lost. Adopts the existing retained worktree in place; it
@@ -307,13 +343,12 @@ async function collectAgentOutput(
  */
 export async function resumeFollowupHandoff(params: ResumeFollowupHandoffParams): Promise<ResumeOutcome> {
     let record = params.record;
-    const { git, taskStates } = params;
-    // User cancellation is authoritative: never publish without explicit operator authorization.
-    const taskState = await params.stateManager.getTaskState(record.task_id);
-    if (taskState?.state === taskStates.CANCELLED && !record.operator_authorized) {
-        return holdForOperator(params, record, 'cancelled_by_user');
+    if (record.phase !== 'cleanup_pending') {
+        // User cancellation is authoritative: never publish without explicit operator authorization.
+        const hold = await cancellationHold(params, record);
+        if (hold) return hold;
+        if (record.is_fork) return holdForOperator(params, record, 'fork_publication_unsupported');
     }
-    if (record.is_fork) return holdForOperator(params, record, 'fork_publication_unsupported');
 
     if (record.phase === 'agent_running' || record.phase === 'agent_exited') {
         const collected = await collectAgentOutput(params, record);
@@ -321,25 +356,22 @@ export async function resumeFollowupHandoff(params: ResumeFollowupHandoffParams)
         record = collected.record;
     }
     if (record.phase === 'committed') {
-        const { owner, repo } = splitHandoffRepository(record.target_repository);
-        const pushed = await git.push(record.worktree_path, { repoOwner: owner, repoName: repo, branchName: record.branch_name });
-        const commitHash = (pushed && typeof pushed === 'object' && pushed.commitHash) || await git.head(record.worktree_path);
-        const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'pushed', commit_hash: commitHash });
-        if (!advanced) return { outcome: 'superseded' };
-        record = advanced;
+        const step = await pushCommittedWork(params, record);
+        if ('done' in step) return step.done;
+        record = step.record;
     }
     if (record.phase === 'pushed') {
-        const commentUrl = await publishOwedComment(params, record, recoveredCompletionBody(record));
-        const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'comment_published', completion_comment_url: commentUrl });
+        const step = await publishPushedCompletion(params, record);
+        if ('done' in step) return step.done;
+        record = step.record;
+    }
+    if (record.phase === 'comment_published') {
+        await finalizeRecoveredTask(params, record, Boolean(record.commit_hash));
+        const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'cleanup_pending' });
         if (!advanced) return { outcome: 'superseded' };
         record = advanced;
     }
-    if (record.phase !== 'comment_published') return { outcome: 'superseded' };
-    await finalizeRecoveredTask(params, record, true);
-    await finalizeFollowupHandoff(params.store, record);
+    if (record.phase !== 'cleanup_pending') return { outcome: 'superseded' };
     // The push proved the branch settled; free it for later follow-ups while keeping the worktree.
-    await params.git.releaseSettledWorktree(record.local_repo_path, record.branch_name, record.worktree_path);
-    params.log.info({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, commitHash: record.commit_hash },
-        'Recovered and published an interrupted follow-up exactly once');
-    return { outcome: 'published', commitHash: record.commit_hash };
+    return attemptHandoffCleanup(params, record);
 }

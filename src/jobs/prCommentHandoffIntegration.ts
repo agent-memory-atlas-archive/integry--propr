@@ -1,20 +1,26 @@
 import type { Job } from 'bullmq';
 import type { Logger } from 'pino';
 import type { Redis } from 'ioredis';
+import { createHooklessGit } from '@propr/core';
 import type { CommentJobData, JobResult, UnprocessedComment, WorkerStateManager } from '@propr/core';
-import { advanceFollowupHandoff, finalizeFollowupHandoff, recordFollowupHandoff } from './followupHandoffStore.js';
+import { advanceFollowupHandoff, finalizeFollowupHandoff, recordFollowupHandoff, type FollowupHandoffRecord } from './followupHandoffStore.js';
 import { adoptPredecessorFollowupHandoff, settleFollowupHandoffAfterFailure } from './followupHandoffRecovery.js';
 import { schedulePRCommentRecovery } from './prCommentCollisionRecovery.js';
-import { releasePRProcessingLock } from './prProcessingLock.js';
+import { releasePRProcessingLock, startPRProcessingLockHeartbeat } from './prProcessingLock.js';
 import type { ProcessingState } from './prPublicationRecovery.js';
 import type { PullRequestPublication } from './prPublication.js';
 
 /**
  * Durable follow-up publication handoff hooks for the PR comment job. The
- * handoff is written before the agent launches, advanced when it exits, and
- * retired only once the owed publication (or its handled failure) is proven
- * delivered — so a worker restart at any point leaves a recoverable record.
+ * handoff is written before the agent launches — bound to the PR's head/base
+ * and the worktree baseline — advanced through every publication phase the
+ * normal path completes (agent exit, commit, push, completion comment), and
+ * retired only once the owed publication is proven delivered. A worker restart
+ * at any point leaves a record that names its exact missing phase.
  */
+
+/** The slice of processing state these hooks read and advance. */
+export interface HandoffCarrier { followupHandoff?: FollowupHandoffRecord | null }
 
 interface HandoffRef { repoOwner: string; repoName: string; pullRequestNumber: number }
 
@@ -28,7 +34,17 @@ export interface RecordExecutionHandoffParams {
     llm: string | null | undefined;
     lockKey: string;
     lockToken: string;
+    /** PR head/base refs at launch; recovery revalidates them before pushing. */
+    binding: { headRef?: string | null; baseRef?: string | null };
     correlatedLogger: Logger;
+}
+
+async function worktreeHeadSha(worktreePath: string): Promise<string | null> {
+    try {
+        return (await createHooklessGit(worktreePath).raw(['rev-parse', 'HEAD'])).trim() || null;
+    } catch {
+        return null;
+    }
 }
 
 /** Persists the handoff right before the agent launches. */
@@ -43,20 +59,45 @@ export async function recordExecutionHandoff(params: RecordExecutionHandoffParam
         claimedComments: state.unprocessedComments, jobData: job.data, llm: params.llm,
         lockKey: params.lockKey, lockToken: params.lockToken,
         startingCommentId: state.startingWorkComment?.data.id,
+        binding: { ...params.binding, headSha: await worktreeHeadSha(worktreeInfo.worktreePath) },
     });
     if (!state.followupHandoff) {
         correlatedLogger.warn({ pullRequestNumber: ref.pullRequestNumber }, 'Could not record the follow-up publication handoff; restart recovery is unavailable for this attempt');
     }
 }
 
-/** Marks the agent exited so recovery knows execution itself finished. */
-export async function markExecutionHandoffAgentExited(state: ProcessingState): Promise<void> {
+async function advanceExecutionHandoff(state: HandoffCarrier, changes: Parameters<typeof advanceFollowupHandoff>[2]): Promise<void> {
     if (!state.followupHandoff) return;
-    state.followupHandoff = await advanceFollowupHandoff({}, state.followupHandoff, { phase: 'agent_exited' });
+    state.followupHandoff = await advanceFollowupHandoff({}, state.followupHandoff, changes);
+}
+
+/** Binds the launched agent container's immutable identity to the handoff. */
+export async function markExecutionHandoffContainer(state: HandoffCarrier, containerId: string): Promise<void> {
+    await advanceExecutionHandoff(state, { container_id: containerId });
+}
+
+/** Marks the agent exited so recovery knows execution itself finished. */
+export async function markExecutionHandoffAgentExited(state: HandoffCarrier): Promise<void> {
+    await advanceExecutionHandoff(state, { phase: 'agent_exited' });
+}
+
+/** Records the normal path's commit so restart recovery resumes from the push, not from scratch. */
+export async function markExecutionHandoffCommitted(state: HandoffCarrier, commitHash: string | null | undefined): Promise<void> {
+    await advanceExecutionHandoff(state, { phase: 'committed', commit_hash: commitHash ?? null });
+}
+
+/** Records the normal path's completed push; recovery after this never reports missing work. */
+export async function markExecutionHandoffPushed(state: HandoffCarrier, commitHash: string | null | undefined): Promise<void> {
+    await advanceExecutionHandoff(state, { phase: 'pushed', commit_hash: commitHash ?? null });
+}
+
+/** Records the delivered completion comment so recovery never overwrites it with a failure notice. */
+export async function markExecutionHandoffCommentPublished(state: HandoffCarrier, commentUrl: string | null | undefined): Promise<void> {
+    await advanceExecutionHandoff(state, { phase: 'comment_published', completion_comment_url: commentUrl ?? null });
 }
 
 /** Retires the handoff once commit, push and the completion comment are published. */
-export async function finalizeExecutionHandoff(state: ProcessingState): Promise<void> {
+export async function finalizeExecutionHandoff(state: HandoffCarrier): Promise<void> {
     if (!state.followupHandoff) return;
     await finalizeFollowupHandoff({}, state.followupHandoff);
     state.followupHandoff = null;
@@ -74,25 +115,50 @@ export interface PredecessorHandoffGateParams {
     correlatedLogger: Logger;
 }
 
+function predecessorBlockReason(adoption: Awaited<ReturnType<typeof adoptPredecessorFollowupHandoff>>): string | undefined {
+    if ('blocked' in adoption && adoption.blocked) return adoption.blocked;
+    // An operator hold produced by the inline resume itself (or a lost lease)
+    // equally blocks this writer: the unresolved obligation must not be raced
+    // or overwritten by a fresh worktree and handoff.
+    if ('resumed' in adoption && adoption.resumed
+        && (adoption.resumed.outcome === 'awaiting_operator' || adoption.resumed.outcome === 'ownership_lost')) {
+        return `predecessor_${adoption.resumed.outcome}`;
+    }
+    return undefined;
+}
+
 /**
  * Runs under the caller's PR processing lease, before any new worktree is
- * prepared: a recoverable predecessor is adopted and finished in-line, while a
- * still-live or unverifiable predecessor reschedules this writer instead of
- * letting it race the retained worktree.
+ * prepared: a recoverable predecessor is adopted and finished in-line — with
+ * the lease kept renewed for the duration — while a still-live, unverifiable,
+ * or operator-held predecessor reschedules this writer instead of letting it
+ * race the retained worktree.
  */
 export async function gatePredecessorHandoff(params: PredecessorHandoffGateParams): Promise<JobResult | undefined> {
     const { job, ref, taskId, stateManager, redisClient, correlatedLogger } = params;
-    const adoption = await adoptPredecessorFollowupHandoff(
-        { ...ref, currentTaskId: taskId, log: correlatedLogger },
-        { redis: redisClient, stateManager },
-    );
-    if (!('blocked' in adoption) || !adoption.blocked) return undefined;
+    let leaseLost = false;
+    const stopHeartbeat = startPRProcessingLockHeartbeat({
+        redisClient, lockKey: params.lockKey, lockToken: params.lockToken,
+        onLockLost: () => { leaseLost = true; },
+        onError: error => correlatedLogger.warn({ lockKey: params.lockKey, error: (error as Error).message }, 'Failed to renew PR processing lock during predecessor handoff adoption'),
+    });
+    let adoption: Awaited<ReturnType<typeof adoptPredecessorFollowupHandoff>>;
+    try {
+        adoption = await adoptPredecessorFollowupHandoff(
+            { ...ref, currentTaskId: taskId, log: correlatedLogger, isOwnershipLost: () => leaseLost },
+            { redis: redisClient, stateManager },
+        );
+    } finally {
+        await stopHeartbeat();
+    }
+    const blocked = predecessorBlockReason(adoption);
+    if (!blocked) return undefined;
     const replacementTaskId = await schedulePRCommentRecovery({
         job, taskId, stateManager, redisClient, pickedUpComments: params.pickedUpComments,
-        delay: 60_000, reason: adoption.blocked, correlatedLogger,
+        delay: 60_000, reason: blocked, correlatedLogger,
     });
     await releasePRProcessingLock(redisClient, params.lockKey, params.lockToken);
-    return { status: 'rescheduled', reason: adoption.blocked, replacementTaskId };
+    return { status: 'rescheduled', reason: blocked, replacementTaskId };
 }
 
 export interface HandoffErrorSettlementParams {
@@ -106,8 +172,9 @@ export interface HandoffErrorSettlementParams {
 
 /**
  * Settles the handoff after the in-process error handler delivered the owed
- * failure comment and terminal state; a user cancellation instead holds the
- * record and its retained work for an explicit operator decision.
+ * failure comment and terminal state. Retained unpublished work keeps the
+ * record recoverable, and a user cancellation holds it for an explicit
+ * operator decision.
  */
 export async function settleExecutionHandoffAfterError(params: HandoffErrorSettlementParams): Promise<void> {
     const { ref, taskId, error, cancelledState, correlatedLogger } = params;

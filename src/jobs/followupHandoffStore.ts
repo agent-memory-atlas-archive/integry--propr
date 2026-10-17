@@ -19,7 +19,7 @@ export const HANDOFF_ACTIVE = 'active';
 export const HANDOFF_AWAITING_OPERATOR = 'awaiting_operator';
 export const HANDOFF_RELEASED = 'released';
 
-export const HANDOFF_PHASES = ['agent_running', 'agent_exited', 'committed', 'pushed', 'comment_published'] as const;
+export const HANDOFF_PHASES = ['agent_running', 'agent_exited', 'committed', 'pushed', 'comment_published', 'cleanup_pending'] as const;
 export type FollowupHandoffPhase = typeof HANDOFF_PHASES[number];
 
 export interface FollowupHandoffRecord {
@@ -43,6 +43,11 @@ export interface FollowupHandoffRecord {
     starting_comment_id: number | null;
     commit_hash: string | null;
     completion_comment_url: string | null;
+    head_ref: string | null;
+    base_ref: string | null;
+    head_sha: string | null;
+    container_id: string | null;
+    successor_task_id: string | null;
     lock_key: string;
     lock_token: string;
     generation: number;
@@ -133,6 +138,18 @@ export interface RecordFollowupHandoffParams {
     lockKey: string;
     lockToken: string;
     startingCommentId?: number;
+    /** PR head/base refs and the worktree HEAD the agent builds on, revalidated before any recovery push. */
+    binding?: { headRef?: string | null; baseRef?: string | null; headSha?: string | null };
+}
+
+/**
+ * An unresolved predecessor obligation must never be erased by a new attempt:
+ * only a released row, or this same task's own redelivery, may be taken over.
+ * Anything else settles through recovery or an explicit operator decision.
+ */
+function handoffReplaceable(existing: FollowupHandoffRecord, taskId: string): boolean {
+    return existing.status === HANDOFF_RELEASED
+        || (existing.task_id === taskId && existing.status === HANDOFF_ACTIVE);
 }
 
 /**
@@ -148,6 +165,7 @@ export async function recordFollowupHandoff(
     const repository = handoffRepositoryKey(params.ref.repoOwner, params.ref.repoName);
     const key = { repository, pull_request: params.ref.pullRequestNumber };
     const existing = await loadFollowupHandoff(deps, key);
+    if (existing && !handoffReplaceable(existing, params.taskId)) return null;
     const timestamp = nowMs(deps);
     const record: FollowupHandoffRecord = {
         ...key,
@@ -169,6 +187,11 @@ export async function recordFollowupHandoff(
         starting_comment_id: params.startingCommentId ?? null,
         commit_hash: null,
         completion_comment_url: null,
+        head_ref: params.binding?.headRef ?? null,
+        base_ref: params.binding?.baseRef ?? null,
+        head_sha: params.binding?.headSha ?? null,
+        container_id: null,
+        successor_task_id: null,
         lock_key: params.lockKey,
         lock_token: params.lockToken,
         generation: (existing?.generation ?? 0) + 1,
@@ -217,7 +240,8 @@ async function insertHandoff(deps: FollowupHandoffStoreDeps, record: FollowupHan
 
 export type FollowupHandoffChanges = Partial<Pick<FollowupHandoffRecord,
     'phase' | 'status' | 'status_reason' | 'operator_authorized'
-    | 'commit_hash' | 'completion_comment_url' | 'starting_comment_id' | 'lock_token'>>;
+    | 'commit_hash' | 'completion_comment_url' | 'starting_comment_id' | 'lock_token'
+    | 'container_id' | 'successor_task_id'>>;
 
 /**
  * Writes the next phase or status of the row the caller read, returning the

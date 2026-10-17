@@ -43,7 +43,7 @@ import {
     acquireCurrentPRProcessingLock, ensurePRProcessingLockToken, releasePRProcessingLock, startPRProcessingLockHeartbeat,
 } from './prProcessingLock.js';
 import { createPRCommentTaskStateIfMissing, evaluatePRCommentPreExecutionRecovery, handlePRCommentLockContention } from './prCommentCollisionRecovery.js';
-import { finalizeExecutionHandoff, gatePredecessorHandoff, markExecutionHandoffAgentExited, recordExecutionHandoff, settleExecutionHandoffAfterError } from './prCommentHandoffIntegration.js';
+import { finalizeExecutionHandoff, gatePredecessorHandoff, markExecutionHandoffAgentExited, markExecutionHandoffContainer, recordExecutionHandoff, settleExecutionHandoffAfterError } from './prCommentHandoffIntegration.js';
 import { stopOriginalPRReviewCycle } from './prContinuationReview.js';
 import { loadOriginalContributionDiscussion } from './prContributionDiscussion.js';
 import { PullRequestPublication } from './prPublication.js';
@@ -253,7 +253,12 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
 
         // Durable handoff before the agent launches: a worker restart from here on
         // leaves a record that recovery can adopt to finish the owed publication.
-        await recordExecutionHandoff({ state, job, ref: { repoOwner, repoName, pullRequestNumber }, taskId, correlationId, publication, llm, lockKey, lockToken, correlatedLogger });
+        // It is bound to the PR's head/base at launch so recovery fails closed on a
+        // retargeted or externally advanced pull request.
+        await recordExecutionHandoff({
+            state, job, ref: { repoOwner, repoName, pullRequestNumber }, taskId, correlationId, publication, llm, lockKey, lockToken,
+            binding: { headRef: prData!.data.head?.ref, baseRef: baseBranch }, correlatedLogger,
+        });
 
         // Implementation is authorized and the publication destination is resolved, so
         // the validation of the head this task is about to replace is now obsolete.
@@ -306,6 +311,9 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
             llm, worktreePath: state.worktreeInfo.worktreePath, branchName: state.worktreeInfo.branchName, prompt,
             pullRequestNumber, repoOwner, repoName, stateManager, correlatedLogger, githubToken: githubToken.token, taskId, redisClient,
             reasoningLevel: job.data.reasoningLevel, repositoryWorkflow, applyRepositoryWorkflow: true,
+            // Bind the launched container's immutable identity to the handoff, so
+            // recovery never trusts a different container's evidence for this task.
+            onContainerInfo: containerId => markExecutionHandoffContainer(state, containerId),
         });
         state.claudeResult = claudeResult;
         await markExecutionHandoffAgentExited(state);

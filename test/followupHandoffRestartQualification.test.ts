@@ -173,6 +173,22 @@ test('a worker restart recovers the persisted handoff and publishes the retained
             return git(worktreePath, 'rev-list', '--count', 'HEAD', '--not', `refs/remotes/origin/${branchName}`) !== '0';
         },
         async head(worktreePath: string) { return git(worktreePath, 'rev-parse', 'HEAD'); },
+        async remoteBranchHead(worktreePath: string, branchName: string) {
+            try {
+                git(worktreePath, 'fetch', 'origin', `+refs/heads/${branchName}:refs/remotes/origin/${branchName}`);
+                return git(worktreePath, 'rev-parse', `refs/remotes/origin/${branchName}`);
+            } catch {
+                return null;
+            }
+        },
+        async isAncestorOfHead(worktreePath: string, sha: string) {
+            try {
+                git(worktreePath, 'merge-base', '--is-ancestor', sha, 'HEAD');
+                return true;
+            } catch {
+                return false;
+            }
+        },
         async push(worktreePath: string) {
             git(worktreePath, 'push', 'origin', `HEAD:refs/heads/${BRANCH}`);
             pushes += 1;

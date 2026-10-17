@@ -45,6 +45,7 @@ import {
   createTankCommand,
   createRelayCommand,
   createRuntimeCommand,
+  createHandoffsCommand,
   runChecks,
   printChecks,
   STACK_CONFIG_CHECK_NAME,
@@ -248,6 +249,7 @@ Command Groups:
   Goals:          goal [capabilities|create|list|inspect|input|inputs|pause|resume|cancel|model]
   Automations:    automation [list|show|run|runs|report|approve|reject|cancel]   (Agents: saved automations)
   Tasks:          task [inspect|list|get|stop|delete|followup|import|revert]
+  Handoffs:       handoffs [list|inspect|resume|release]   (admin recovery for PR follow-up publications)
   Repositories:   repo [list|add|remove|toggle|index|status]
   Agents:         agent [list|add|enable|disable|delete|pool]   (coding-agent configurations)
   Settings:       setting [get|update|reindex-summaries]
@@ -425,6 +427,7 @@ program.addCommand(createConnectCommand());
 program.addCommand(createTankCommand());
 program.addCommand(createRelayCommand());
 program.addCommand(createRuntimeCommand());
+program.addCommand(createHandoffsCommand());
 program.addCommand(createConfigCommand());
 
 // Setup + backend client command groups
