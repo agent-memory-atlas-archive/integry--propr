@@ -210,7 +210,7 @@ const modules: Record<string, Record<string, unknown>> = {
         recordExecutionHandoff: noOp, markExecutionHandoffAgentExited: noOp, markExecutionHandoffContainer: noOp,
         markExecutionHandoffCommitted: noOp, markExecutionHandoffPushed: noOp, markExecutionHandoffCommentPublished: noOp,
         markExecutionHandoffCleanupPending: noOp, retireExecutionHandoffAfterCleanup: noOp,
-        gatePredecessorHandoff: async () => undefined, settleExecutionHandoffAfterError: noOp,
+        gatePredecessorHandoff: async () => undefined, settleExecutionHandoffAfterError: noOp, checkpointExecutionHandoffUsageLimitRetry: noOp,
     },
     prCommentCollisionRecovery: {
         createPRCommentTaskStateIfMissing: async (params: Parameters<typeof realRecovery.createPRCommentTaskStateIfMissing>[0]) => { if (realReentryHelpers) await realRecovery.createPRCommentTaskStateIfMissing(params); },

@@ -7,7 +7,7 @@ import {
 } from './followupHandoffDeps.js';
 import {
     advanceFollowupHandoff, loadFollowupHandoff, loadFollowupHandoffs, parseSourceTaskIds,
-    HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED,
+    HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED, SETTLEMENT_RETRY_SCHEDULING,
     type FollowupHandoffKey, type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
 } from './followupHandoffStore.js';
 import type { FollowupHandoffGitOps } from './followupHandoffGitOps.js';
@@ -52,8 +52,11 @@ export async function resumeOperatorHeldFollowupHandoff(
     if (record.status_reason === 'cancelled_by_user' && !record.operator_authorized) {
         return { resumed: false, reason: 'requires_cancellation_authorization' };
     }
+    // An unconfirmed usage-limit retry is resolved by this decision: the
+    // operator found no retry job, so resuming returns the request to the queue.
     const advanced = await advanceFollowupHandoff(store, record, {
         status: HANDOFF_ACTIVE, status_reason: 'operator_resumed',
+        ...(record.settlement === SETTLEMENT_RETRY_SCHEDULING ? { settlement: null } : {}),
     });
     return advanced ? { resumed: true } : { resumed: false, reason: 'superseded' };
 }
@@ -151,7 +154,9 @@ function handoffNextAction(record: FollowupHandoffRecord, liveness: string): str
     if (record.status === HANDOFF_AWAITING_OPERATOR) {
         return record.status_reason === 'cancelled_by_user'
             ? 'resume --authorize-cancelled to publish the cancelled work, or release to stop tracking it'
-            : 'repair the reported condition, then resume to re-arm recovery, or release to stop tracking it';
+            : record.status_reason === 'usage_limit_retry_unconfirmed'
+                ? 'check the issue queue for the usage-limit retry job: release if it exists, or resume to return the request to the queue'
+                : 'repair the reported condition, then resume to re-arm recovery, or release to stop tracking it';
     }
     if (record.phase === 'cleanup_pending') return 'publication is complete; automatic recovery retries the branch release';
     if (liveness === 'running') return 'wait for the live agent container to exit';

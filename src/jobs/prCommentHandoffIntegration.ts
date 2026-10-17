@@ -4,7 +4,10 @@ import type { Redis } from 'ioredis';
 import { createHooklessGit } from '@propr/core';
 import { createFollowupHandoffGitOps } from './followupHandoffGitOps.js';
 import type { CommentJobData, JobResult, UnprocessedComment, WorkerStateManager } from '@propr/core';
-import { advanceFollowupHandoff, finalizeFollowupHandoff, loadFollowupHandoff, recordFollowupHandoff, HANDOFF_ACTIVE, type FollowupHandoffRecord } from './followupHandoffStore.js';
+import {
+    advanceFollowupHandoff, finalizeFollowupHandoff, loadFollowupHandoff, recordFollowupHandoff,
+    HANDOFF_ACTIVE, SETTLEMENT_RETRY_SCHEDULED, SETTLEMENT_RETRY_SCHEDULING, type FollowupHandoffRecord,
+} from './followupHandoffStore.js';
 import { adoptPredecessorFollowupHandoff, settleFollowupHandoffAfterFailure } from './followupHandoffRecovery.js';
 import { schedulePRCommentRecovery } from './prCommentCollisionRecovery.js';
 import { releasePRProcessingLock, startPRProcessingLockHeartbeat } from './prProcessingLock.js';
@@ -130,6 +133,26 @@ export async function markExecutionHandoffPushed(state: HandoffCarrier, commitHa
 /** Records the delivered completion comment so recovery never overwrites it with a failure notice. */
 export async function markExecutionHandoffCommentPublished(state: HandoffCarrier, commentUrl: string | null | undefined): Promise<void> {
     await advanceExecutionHandoff(state, { phase: 'comment_published', completion_comment_url: commentUrl ?? null });
+}
+
+/**
+ * Durably records that a usage-limit retry is taking over the claimed
+ * comments: `scheduling` before the queue add, `scheduled` once the retry job
+ * is persisted. A worker death before the handoff settles then never lets
+ * recovery return comments the retry job owns to the pending list. Best
+ * effort: a failed checkpoint is logged and the retry is scheduled regardless,
+ * since withholding it would strand the request.
+ */
+export async function checkpointExecutionHandoffUsageLimitRetry(
+    state: HandoffCarrier,
+    stage: 'scheduling' | 'scheduled',
+    correlatedLogger: Logger,
+): Promise<void> {
+    try {
+        await advanceExecutionHandoff(state, { settlement: stage === 'scheduled' ? SETTLEMENT_RETRY_SCHEDULED : SETTLEMENT_RETRY_SCHEDULING });
+    } catch (error) {
+        correlatedLogger.warn({ stage, error: (error as Error).message }, 'Could not checkpoint the usage-limit retry on the follow-up handoff');
+    }
 }
 
 /**

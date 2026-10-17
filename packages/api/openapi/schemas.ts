@@ -386,7 +386,9 @@ export const FollowupHandoffStatus = component('FollowupHandoffStatus', z.object
     .describe('Exact publication step recovery resumes from. `cleanup_pending` means everything is published and only branch release is owed.'),
   status: z.enum(['active', 'awaiting_operator', 'released'])
     .describe('`active` records are recovered automatically; `awaiting_operator` records never publish without an explicit operator decision.'),
-  statusReason: z.string().nullable().describe('Why the handoff is held or failed closed, for example `cancelled_by_user`, `worktree_missing`, `head_advanced_externally`, `liveness_unavailable`.'),
+  statusReason: z.string().nullable().describe('Why the handoff is held or failed closed, for example `cancelled_by_user`, `worktree_missing`, `head_advanced_externally`, `usage_limit_retry_unconfirmed`, `liveness_unavailable`. A mutable diagnostic; see `settlement` for the durable outcome.'),
+  settlement: z.enum(['returned_to_queue', 'usage_limit_retry_scheduling', 'usage_limit_retry_scheduled']).nullable()
+    .describe('Durable owner of the claimed comments once the attempt settles without publishing: `returned_to_queue` (recovery returned them to the pending list), `usage_limit_retry_scheduled` (a scheduled usage-limit retry job owns them; recovery never requeues them) or `usage_limit_retry_scheduling` (the worker stopped around the queue add; held for an operator as `usage_limit_retry_unconfirmed`). Unlike `statusReason`, later diagnostics never overwrite it, so the `noChanges`/`settled` counters stay correct.'),
   operatorAuthorized: z.boolean().describe('Whether an operator explicitly authorized publishing user-cancelled work.'),
   liveness: z.string().describe('Agent container liveness evidence, for example `running`, `stopped`, `not_found` or `unavailable` (recovery fails closed on the latter).'),
   branchName: z.string().describe('PR head branch still attached to the retained worktree until cleanup releases it.'),
@@ -408,8 +410,8 @@ export const FollowupHandoffDetail = component('FollowupHandoffDetail', z.object
 export const FollowupHandoffRecoverySummary = component('FollowupHandoffRecoverySummary', z.object({
   inspected: z.number().int().nonnegative(),
   published: z.number().int().nonnegative().describe('Interrupted work recovered and published exactly once.'),
-  noChanges: z.number().int().nonnegative().describe('Interrupted runs that produced nothing; their requests were returned to the queue.'),
-  settled: z.number().int().nonnegative().describe('Runs whose no-change completion or failure the normal path had already delivered; recorded without republishing or requeueing.'),
+  noChanges: z.number().int().nonnegative().describe('Interrupted runs that produced nothing; their requests were returned to the queue (settlement `returned_to_queue`).'),
+  settled: z.number().int().nonnegative().describe('Runs whose no-change completion, failure or usage-limit retry the normal path had already delivered or scheduled; recorded without republishing or requeueing.'),
   cleanupPending: z.number().int().nonnegative().describe('Publication settled but branch release still owed; retried on the next pass.'),
   skippedLiveAgent: z.number().int().nonnegative(),
   failedClosed: z.number().int().nonnegative().describe('Records whose container evidence was unavailable or ambiguous; left untouched.'),

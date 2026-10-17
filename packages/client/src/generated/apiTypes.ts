@@ -224,9 +224,9 @@ export interface FollowupHandoffRecoverySummary {
   inspected: number;
   /** Interrupted work recovered and published exactly once. */
   published: number;
-  /** Interrupted runs that produced nothing; their requests were returned to the queue. */
+  /** Interrupted runs that produced nothing; their requests were returned to the queue (settlement `returned_to_queue`). */
   noChanges: number;
-  /** Runs whose no-change completion or failure the normal path had already delivered; recorded without republishing or requeueing. */
+  /** Runs whose no-change completion, failure or usage-limit retry the normal path had already delivered or scheduled; recorded without republishing or requeueing. */
   settled: number;
   /** Publication settled but branch release still owed; retried on the next pass. */
   cleanupPending: number;
@@ -277,8 +277,10 @@ export interface FollowupHandoffStatus {
   phase: "agent_running" | "agent_exited" | "committed" | "pushed" | "comment_published" | "cleanup_pending";
   /** `active` records are recovered automatically; `awaiting_operator` records never publish without an explicit operator decision. */
   status: "active" | "awaiting_operator" | "released";
-  /** Why the handoff is held or failed closed, for example `cancelled_by_user`, `worktree_missing`, `head_advanced_externally`, `liveness_unavailable`. */
+  /** Why the handoff is held or failed closed, for example `cancelled_by_user`, `worktree_missing`, `head_advanced_externally`, `usage_limit_retry_unconfirmed`, `liveness_unavailable`. A mutable diagnostic; see `settlement` for the durable outcome. */
   statusReason: string | null;
+  /** Durable owner of the claimed comments once the attempt settles without publishing: `returned_to_queue` (recovery returned them to the pending list), `usage_limit_retry_scheduled` (a scheduled usage-limit retry job owns them; recovery never requeues them) or `usage_limit_retry_scheduling` (the worker stopped around the queue add; held for an operator as `usage_limit_retry_unconfirmed`). Unlike `statusReason`, later diagnostics never overwrite it, so the `noChanges`/`settled` counters stay correct. */
+  settlement: "returned_to_queue" | "usage_limit_retry_scheduling" | "usage_limit_retry_scheduled" | null;
   /** Whether an operator explicitly authorized publishing user-cancelled work. */
   operatorAuthorized: boolean;
   /** Agent container liveness evidence, for example `running`, `stopped`, `not_found` or `unavailable` (recovery fails closed on the latter). */

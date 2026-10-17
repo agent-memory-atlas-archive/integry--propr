@@ -128,7 +128,7 @@ test('admin list and single status expose the operator payload with no-store cac
     assert.deepEqual(handoffs[0], {
       repository: 'integry/propr', pullRequest: 42, taskId: 'task-1', predecessorTaskIds: ['task-0'],
       successorTaskId: null, phase: 'pushed', status: 'awaiting_operator', statusReason: 'cancelled_by_user',
-      operatorAuthorized: false, liveness: 'not_checked', branchName: 'propr/fix-42', commitHash: 'abc123',
+      settlement: null, operatorAuthorized: false, liveness: 'not_checked', branchName: 'propr/fix-42', commitHash: 'abc123',
       completionCommentUrl: null, nextAction: 'inspect the retained worktree, then resume or release',
       retainedWorktreePath: '/tmp/worktrees/fix-42', updatedAt: 1760650000000,
     });
@@ -140,6 +140,22 @@ test('admin list and single status expose the operator payload with no-store cac
     // The single-status inspection is keyed with the lowercased repository.
     const inspect = calls.find(call => call.name === 'inspect' && call.args[1]);
     assert.deepEqual(inspect?.args[1], { repository: 'integry/propr', pull_request: 42 });
+  });
+});
+
+test('status keeps the durable settlement apart from a later liveness diagnostic', async () => {
+  const deps = stubDeps([], {
+    inspectFollowupHandoffs: async () => [status({
+      phase: 'cleanup_pending', status: 'active', status_reason: 'liveness_unavailable',
+      settlement: 'returned_to_queue', commit_hash: null,
+    })],
+  });
+  await withServer(deps, async origin => {
+    const one = await fetch(`${origin}/api/admin/followup-handoffs/integry/propr/42`, { headers: asAdmin });
+    assert.equal(one.status, 200);
+    const { status: body } = await one.json() as { status: Record<string, unknown> };
+    assert.equal(body.statusReason, 'liveness_unavailable');
+    assert.equal(body.settlement, 'returned_to_queue', 'the diagnostic does not replace the semantic classification');
   });
 });
 

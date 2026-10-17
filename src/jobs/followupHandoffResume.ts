@@ -2,7 +2,7 @@ import type { UnprocessedComment } from '@propr/core';
 import type { FollowupHandoffGitOps } from './followupHandoffGitOps.js';
 import {
     advanceFollowupHandoff, finalizeFollowupHandoff, parseClaimedComments, parseSourceTaskIds,
-    HANDOFF_AWAITING_OPERATOR,
+    HANDOFF_AWAITING_OPERATOR, SETTLEMENT_RETRY_SCHEDULED, SETTLEMENT_RETRY_SCHEDULING, SETTLEMENT_RETURNED_TO_QUEUE,
     type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
 } from './followupHandoffStore.js';
 
@@ -282,17 +282,16 @@ async function finalizeRecoveredTask(
     return 'finalized';
 }
 
-/** Status reason marking a no-change recovery that returned the claimed comments to the queue. */
-const RETURNED_TO_QUEUE = 'returned_to_queue';
-
 /**
  * What a retired handoff reports: published work, an interrupted request
  * this recovery returned to the queue, or a completion/failure the normal
  * path had already delivered (settled without republishing or requeueing).
+ * The durable settlement — never the diagnostic status reason a later
+ * liveness warning can overwrite — classifies a returned request.
  */
 function retiredOutcome(record: FollowupHandoffRecord): ResumeOutcome {
     if (record.commit_hash) return { outcome: 'published', commitHash: record.commit_hash };
-    return record.status_reason === RETURNED_TO_QUEUE ? { outcome: 'no_changes' } : { outcome: 'settled' };
+    return record.settlement === SETTLEMENT_RETURNED_TO_QUEUE ? { outcome: 'no_changes' } : { outcome: 'settled' };
 }
 
 /**
@@ -373,7 +372,41 @@ async function finishDeliveredFailure(params: ResumeFollowupHandoffParams, recor
     return attemptHandoffCleanup(params, advanced);
 }
 
+/**
+ * The normal usage-limit path scheduled its retry — which carries the claimed
+ * comments — and died before settling the handoff. The retry job owns those
+ * comments, so recovery reconciles to the settlement's own outcome: nothing is
+ * returned to the queue or scheduled, the starting comment is left alone, and
+ * the task ends as the requeued attempt the job result would have recorded.
+ */
+async function finishRetryOwnedClaims(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
+    if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
+    // Checkpoint first: a cancelled task found by a later pass would otherwise
+    // be held as a user cancellation instead of retiring.
+    const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'cleanup_pending', status_reason: 'usage_limit_retry' });
+    if (!advanced) return { outcome: 'superseded' };
+    try {
+        const current = await params.stateManager.getTaskState(record.task_id);
+        if (current && !terminalStates(params.taskStates).has(current.state) && !ownershipLost(params, advanced)) {
+            await params.stateManager.updateTaskState(record.task_id, params.taskStates.CANCELLED, {
+                reason: 'PR comment job requeued: usage_limit',
+                historyMetadata: { followupPublicationHandoff: { recovered: true, phase: record.phase, branchName: record.branch_name, nextAction: 'the scheduled usage-limit retry owns the request' } },
+            });
+        }
+    } catch (error) {
+        params.log.warn({ taskId: record.task_id, error: (error as Error).message }, 'Could not record the requeued attempt after a usage-limit retry was scheduled');
+    }
+    params.log.info({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request },
+        'The usage-limit retry scheduled before a worker restart owns the claimed comments; nothing was returned to the queue');
+    return attemptHandoffCleanup(params, advanced);
+}
+
 async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
+    if (record.settlement === SETTLEMENT_RETRY_SCHEDULED) return finishRetryOwnedClaims(params, record);
+    // The worker died around the queue add: the retry may own the comments,
+    // so returning them could run the request twice. Fail closed for an
+    // operator, who releases the handoff or resumes it to return them.
+    if (record.settlement === SETTLEMENT_RETRY_SCHEDULING) return holdForOperator(params, record, 'usage_limit_retry_unconfirmed');
     // Cancellation or lease loss may land while the Git evidence or the notice
     // request is awaited: publication re-checks both before its mutation, and
     // they are re-checked again before restoring the claimed comments, or a
@@ -409,7 +442,9 @@ async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record:
         await withdrawCancelledClaims(params, record, claimed);
         return holdForOperator(params, record, 'cancelled_by_user');
     }
-    const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'cleanup_pending', status_reason: RETURNED_TO_QUEUE });
+    const advanced = await advanceFollowupHandoff(params.store, record, {
+        phase: 'cleanup_pending', status_reason: SETTLEMENT_RETURNED_TO_QUEUE, settlement: SETTLEMENT_RETURNED_TO_QUEUE,
+    });
     if (!advanced) return { outcome: 'superseded' };
     params.log.info({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request },
         'Interrupted follow-up produced no changes; claimed comments were returned to the queue');

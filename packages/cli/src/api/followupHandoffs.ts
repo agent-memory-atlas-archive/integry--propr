@@ -18,6 +18,8 @@ export interface FollowupHandoffStatus {
   phase: string;
   status: string;
   statusReason: string | null;
+  /** Durable owner of the claimed comments once the attempt settled without publishing. */
+  settlement: string | null;
   operatorAuthorized: boolean;
   liveness: string;
   branchName: string;

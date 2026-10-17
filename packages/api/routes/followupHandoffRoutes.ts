@@ -28,6 +28,7 @@ export interface FollowupHandoffRecordFields {
   phase: string;
   status: string;
   status_reason: string | null;
+  settlement?: string | null;
   operator_authorized: number;
   branch_name: string;
   worktree_path: string;
@@ -106,6 +107,7 @@ function toStatusPayload(status: FollowupHandoffStatus) {
     phase: status.record.phase,
     status: status.record.status,
     statusReason: status.record.status_reason,
+    settlement: status.record.settlement ?? null,
     operatorAuthorized: Boolean(status.record.operator_authorized),
     liveness: status.liveness,
     branchName: status.record.branch_name,

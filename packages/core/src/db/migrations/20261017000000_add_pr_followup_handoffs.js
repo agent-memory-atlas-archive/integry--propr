@@ -29,6 +29,11 @@ export async function up(knex) {
         // active | awaiting_operator | released
         table.string('status', 32).notNullable().defaultTo('active');
         table.string('status_reason', 255);
+        // Durable classification of who owns the claimed comments once the
+        // attempt settles without publishing (returned to the queue, or held
+        // by a scheduled usage-limit retry). Unlike status_reason, diagnostics
+        // never overwrite it, so retirement reports the semantic outcome.
+        table.string('settlement', 64);
         // Explicit operator authorization to publish after a user cancellation.
         table.integer('operator_authorized').notNullable().defaultTo(0);
         table.bigInteger('starting_comment_id');

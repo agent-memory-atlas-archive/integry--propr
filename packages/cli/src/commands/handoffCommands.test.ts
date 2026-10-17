@@ -29,7 +29,7 @@ function handoffStatus(): FollowupHandoffStatus {
   return {
     repository: "integry/propr", pullRequest: 42, taskId: "task-1",
     predecessorTaskIds: ["task-0"], successorTaskId: null, phase: "pushed",
-    status: "awaiting_operator", statusReason: "cancelled_by_user", operatorAuthorized: false,
+    status: "awaiting_operator", statusReason: "cancelled_by_user", settlement: null, operatorAuthorized: false,
     liveness: "not_checked", branchName: "propr/fix-42", commitHash: "abc123",
     completionCommentUrl: null, nextAction: "resume --authorize-cancelled to publish the cancelled work",
     retainedWorktreePath: "/tmp/worktrees/fix-42", updatedAt: 1760650000000,
@@ -48,6 +48,16 @@ test("human handoff output shows phase, status, liveness, lineage, retained work
   assert.match(text, /Retained worktree: \/tmp\/worktrees\/fix-42/);
   assert.match(text, /Commit:\s+abc123/);
   assert.match(text, /Next action:\s+resume --authorize-cancelled/);
+  assert.match(text, /Settlement:\s+\(none\)/);
+});
+
+test("human handoff output shows the durable settlement beside a later liveness diagnostic", () => {
+  const text = formatHandoffStatus({
+    ...handoffStatus(), phase: "cleanup_pending", status: "active",
+    statusReason: "liveness_unavailable", settlement: "returned_to_queue",
+  }).join("\n");
+  assert.match(text, /Status:\s+active \(liveness_unavailable\)/);
+  assert.match(text, /Settlement:\s+returned_to_queue/);
 });
 
 test("recovery summaries render every counter", () => {

@@ -19,6 +19,18 @@ export const HANDOFF_ACTIVE = 'active';
 export const HANDOFF_AWAITING_OPERATOR = 'awaiting_operator';
 export const HANDOFF_RELEASED = 'released';
 
+/**
+ * Durable settlement classifications. `status_reason` is a mutable diagnostic
+ * (a later liveness warning overwrites it); `settlement` is written only with
+ * the fenced transition that decides who owns the claimed comments.
+ */
+/** Recovery returned the claimed comments to the pending list. */
+export const SETTLEMENT_RETURNED_TO_QUEUE = 'returned_to_queue';
+/** The normal path is about to schedule a usage-limit retry; whether the queue add landed is unknown. */
+export const SETTLEMENT_RETRY_SCHEDULING = 'usage_limit_retry_scheduling';
+/** A scheduled usage-limit retry job owns the claimed comments; recovery must never return them to the queue. */
+export const SETTLEMENT_RETRY_SCHEDULED = 'usage_limit_retry_scheduled';
+
 export const HANDOFF_PHASES = ['agent_running', 'agent_exited', 'committed', 'pushed', 'comment_published', 'cleanup_pending'] as const;
 export type FollowupHandoffPhase = typeof HANDOFF_PHASES[number];
 
@@ -41,6 +53,8 @@ export interface FollowupHandoffRecord {
     agent_completed?: number | null;
     status: string;
     status_reason: string | null;
+    /** Durable claim-ownership classification; see SETTLEMENT_*. Never overwritten by diagnostics. */
+    settlement?: string | null;
     operator_authorized: number;
     starting_comment_id: number | null;
     commit_hash: string | null;
@@ -189,6 +203,7 @@ export async function recordFollowupHandoff(
         agent_completed: null,
         status: HANDOFF_ACTIVE,
         status_reason: null,
+        settlement: null,
         operator_authorized: 0,
         starting_comment_id: params.startingCommentId ?? null,
         commit_hash: null,
@@ -245,7 +260,7 @@ async function insertHandoff(deps: FollowupHandoffStoreDeps, record: FollowupHan
 }
 
 export type FollowupHandoffChanges = Partial<Pick<FollowupHandoffRecord,
-    'phase' | 'agent_completed' | 'status' | 'status_reason' | 'operator_authorized'
+    'phase' | 'agent_completed' | 'status' | 'status_reason' | 'settlement' | 'operator_authorized'
     | 'commit_hash' | 'completion_comment_url' | 'starting_comment_id' | 'lock_token'
     | 'container_id' | 'successor_task_id'>>;
 

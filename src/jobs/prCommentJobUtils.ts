@@ -205,6 +205,8 @@ export interface JobErrorOptions {
     retryComments?: UnprocessedComment[];
     /** Durable publication handoff whose marker the failure notice carries for restart reconciliation. */
     followupHandoff?: Pick<FollowupHandoffRecord, 'repository' | 'pull_request' | 'incarnation'> | null;
+    /** Durably records the usage-limit retry's ownership of the claim before and after it is scheduled. */
+    checkpointUsageLimitRetry?(stage: 'scheduling' | 'scheduled'): Promise<void>;
 }
 
 export class UsageLimitError extends Error {
@@ -252,17 +254,15 @@ async function handleUsageLimitError(error: UsageLimitError, job: Job<CommentJob
 
     if ((await options.stateManager.getTaskState(options.taskId))?.state === TaskStates.CANCELLED) return;
     const retryComments = options.retryComments ?? job.data.comments ?? [];
-    const durableRetryJobId = await schedulePRCommentUsageLimitRetry(
-        job,
-        retryComments,
-        requeueJobId,
-        Math.max(0, delay),
-    );
+    await options.checkpointUsageLimitRetry?.('scheduling');
+    const durableRetryJobId = await schedulePRCommentUsageLimitRetry(job, retryComments, requeueJobId, Math.max(0, delay));
 
     if ((await options.stateManager.getTaskState(options.taskId))?.state === TaskStates.CANCELLED) {
         await (await issueQueue.getJob(durableRetryJobId))?.remove();
         return;
     }
+    // The retry job now owns the claimed comments; recovery must not requeue them.
+    await options.checkpointUsageLimitRetry?.('scheduled');
     if (octokit) {
         try {
             await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {

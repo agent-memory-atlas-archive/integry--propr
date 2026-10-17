@@ -42,6 +42,7 @@ export function formatHandoffStatus(status: FollowupHandoffStatus): string[] {
     `${status.repository}#${status.pullRequest}`,
     `  Phase:            ${status.phase}`,
     `  Status:           ${status.status}${reason}`,
+    `  Settlement:       ${status.settlement ?? "(none)"}`,
     `  Liveness:         ${status.liveness}`,
     `  Branch:           ${status.branchName}`,
     `  Task:             ${status.taskId}`,

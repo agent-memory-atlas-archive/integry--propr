@@ -9048,11 +9048,11 @@ components:
         noChanges:
           type: integer
           minimum: 0
-          description: Interrupted runs that produced nothing; their requests were returned to the queue.
+          description: Interrupted runs that produced nothing; their requests were returned to the queue (settlement `returned_to_queue`).
         settled:
           type: integer
           minimum: 0
-          description: Runs whose no-change completion or failure the normal path had already delivered; recorded without republishing or requeueing.
+          description: Runs whose no-change completion, failure or usage-limit retry the normal path had already delivered or scheduled; recorded without republishing or requeueing.
         cleanupPending:
           type: integer
           minimum: 0
@@ -9167,10 +9167,19 @@ components:
             - released
           description: "`active` records are recovered automatically; `awaiting_operator` records never publish without an explicit operator decision."
         statusReason:
-          description: Why the handoff is held or failed closed, for example `cancelled_by_user`, `worktree_missing`, `head_advanced_externally`, `liveness_unavailable`.
+          description: Why the handoff is held or failed closed, for example `cancelled_by_user`, `worktree_missing`, `head_advanced_externally`, `usage_limit_retry_unconfirmed`, `liveness_unavailable`. A mutable diagnostic; see `settlement` for the durable outcome.
           type:
             - string
             - "null"
+        settlement:
+          anyOf:
+            - type: string
+              enum:
+                - returned_to_queue
+                - usage_limit_retry_scheduling
+                - usage_limit_retry_scheduled
+            - type: "null"
+          description: "Durable owner of the claimed comments once the attempt settles without publishing: `returned_to_queue` (recovery returned them to the pending list), `usage_limit_retry_scheduled` (a scheduled usage-limit retry job owns them; recovery never requeues them) or `usage_limit_retry_scheduling` (the worker stopped around the queue add; held for an operator as `usage_limit_retry_unconfirmed`). Unlike `statusReason`, later diagnostics never overwrite it, so the `noChanges`/`settled` counters stay correct."
         operatorAuthorized:
           type: boolean
           description: Whether an operator explicitly authorized publishing user-cancelled work.
@@ -9208,6 +9217,7 @@ components:
         - phase
         - status
         - statusReason
+        - settlement
         - operatorAuthorized
         - liveness
         - branchName

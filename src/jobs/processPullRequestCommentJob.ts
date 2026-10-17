@@ -43,7 +43,7 @@ import {
     acquireCurrentPRProcessingLock, ensurePRProcessingLockToken, releasePRProcessingLock, startPRProcessingLockHeartbeat,
 } from './prProcessingLock.js';
 import { createPRCommentTaskStateIfMissing, evaluatePRCommentPreExecutionRecovery, handlePRCommentLockContention } from './prCommentCollisionRecovery.js';
-import { gatePredecessorHandoff, markExecutionHandoffAgentExited, markExecutionHandoffCleanupPending, markExecutionHandoffContainer, recordExecutionHandoff, retireExecutionHandoffAfterCleanup, settleExecutionHandoffAfterError } from './prCommentHandoffIntegration.js';
+import { checkpointExecutionHandoffUsageLimitRetry, gatePredecessorHandoff, markExecutionHandoffAgentExited, markExecutionHandoffCleanupPending, markExecutionHandoffContainer, recordExecutionHandoff, retireExecutionHandoffAfterCleanup, settleExecutionHandoffAfterError } from './prCommentHandoffIntegration.js';
 import { stopOriginalPRReviewCycle } from './prContinuationReview.js';
 import { loadOriginalContributionDiscussion } from './prContributionDiscussion.js';
 import { PullRequestPublication } from './prPublication.js';
@@ -453,7 +453,7 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
         return await runWithExecutionAbortSignal(executionController.signal, () => executeProcessing({ job, context, llm, taskId, stateManager, state, lockKey, lockToken }), hashTaskAttemptToken(lockToken));
     } catch (error) {
         executionFailed = true;
-        const failJob = (failure: Error) => handleJobError(failure, job, { pullRequestNumber, repoOwner, repoName, authorsText: state.authorsText, unprocessedComments: state.unprocessedComments, octokit: state.octokit, startingWorkComment: state.startingWorkComment, claudeResult: state.claudeResult, correlationId, correlatedLogger, stateManager, taskId, retryComments: context.commentsToProcess, publicationStatus: state.publication?.status, followupHandoff: state.followupHandoff });
+        const failJob = (failure: Error) => handleJobError(failure, job, { pullRequestNumber, repoOwner, repoName, authorsText: state.authorsText, unprocessedComments: state.unprocessedComments, octokit: state.octokit, startingWorkComment: state.startingWorkComment, claudeResult: state.claudeResult, correlationId, correlatedLogger, stateManager, taskId, retryComments: context.commentsToProcess, publicationStatus: state.publication?.status, followupHandoff: state.followupHandoff, checkpointUsageLimitRetry: stage => checkpointExecutionHandoffUsageLimitRetry(state, stage, correlatedLogger) });
         if (error instanceof RepositoryWorkflowCapacityError) {
             capacityRefused = true;
             // The delayed job keeps the claimed comments, command context and policy; store them before releasing
