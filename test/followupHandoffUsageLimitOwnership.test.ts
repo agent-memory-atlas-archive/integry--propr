@@ -25,6 +25,9 @@ import { up } from '../packages/core/src/db/migrations/20261017000000_add_pr_fol
  *   unconfirmed rather than requeued.
  * - Retry persistence that lands on a reconciled fallback job transfers the
  *   claim to exactly that queued job.
+ * - Unpublished edits retained beside a scheduled retry are never published:
+ *   the requeue's CANCELLED state is no user cancellation, and neither an
+ *   operator's authorization nor resumption of such a hold publishes them.
  */
 
 const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
@@ -89,7 +92,10 @@ const {
     recordFollowupHandoff, advanceFollowupHandoff, loadFollowupHandoff, PR_FOLLOWUP_HANDOFFS_TABLE, HANDOFF_AWAITING_OPERATOR,
     SETTLEMENT_RETRY_SCHEDULED, SETTLEMENT_RETRY_SCHEDULING,
 } = await import('../src/jobs/followupHandoffStore.js');
-const { recoverInterruptedFollowupHandoffs, adoptPredecessorFollowupHandoff } = await import('../src/jobs/followupHandoffRecovery.js');
+const {
+    recoverInterruptedFollowupHandoffs, adoptPredecessorFollowupHandoff, settleFollowupHandoffAfterFailure,
+} = await import('../src/jobs/followupHandoffRecovery.js');
+const { authorizeCancelledFollowupHandoff, resumeOperatorHeldFollowupHandoff } = await import('../src/jobs/followupHandoffOperator.js');
 const { createFollowupHandoffGitOps } = await import('../src/jobs/followupHandoffGitOps.js');
 const { handleJobError, UsageLimitError } = await import('../src/jobs/prCommentJobUtils.js');
 const {
@@ -367,4 +373,83 @@ test('real retry persistence reconciles a terminal duplicate and hands the claim
     assert.equal(h.scheduled.length, 0);
     assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
     assert.equal(branchOf(h.fx.wt), '', 'the branch is free for the retry');
+});
+
+// Retained unpublished edits plus a scheduled retry: the retry is the one
+// owner of execution, so recovery never commits, pushes or comments the
+// replaced attempt's edits — they stay in the worktree, unpublished.
+async function retainEditsBesideScheduledRetry(h: Harness): Promise<string> {
+    const record = await seedHandoff(h);
+    const baseHead = git(h.fx.wt, 'rev-parse', 'HEAD');
+    await writeFile(path.join(h.fx.wt, 'widget.txt'), 'half-finished edit\n');
+    await hitUsageLimit(h, { followupHandoff: record });
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.settlement, SETTLEMENT_RETRY_SCHEDULED);
+    assert.equal(queued.size, 1, 'the retry owns the request');
+    return baseHead;
+}
+
+async function assertRetryRemainsSoleOwner(h: Harness, baseHead: string): Promise<void> {
+    assert.equal(git(h.fx.local, 'ls-remote', 'origin', `refs/heads/${BRANCH}`).split('\t')[0], baseHead, 'nothing was pushed');
+    assert.equal(git(h.fx.local, 'rev-parse', BRANCH), baseHead, 'nothing was committed onto the branch');
+    assert.equal(h.octokit.comments.filter(comment => comment.id !== 500 && !/Processing Delayed/.test(comment.body)).length, 0, 'no completion comment');
+    assert.equal(h.octokit.comments.find(comment => comment.id === 500)?.body, '🤖 Starting work on the follow-up', 'the starting comment is left alone');
+    assert.deepEqual(h.restored, []);
+    assert.equal(h.scheduled.length, 0);
+    assert.equal(queued.size, 1, 'the scheduled retry still owns the request');
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+    assert.equal(branchOf(h.fx.wt), '', 'the branch is free for the retry');
+    assert.match(git(h.fx.wt, 'status', '--porcelain'), /widget\.txt/, 'the retained edits stay in the worktree');
+}
+
+test('retained edits beside a scheduled retry settle without a cancellation hold and are never published', async () => {
+    const h = await createHarness();
+    const baseHead = await retainEditsBesideScheduledRetry(h);
+    // The normal path settles the handoff, then its finalizer records the requeue as CANCELLED.
+    await settleFollowupHandoffAfterFailure({ repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, taskId: 'task-1', cancelled: false }, { store: { database } });
+    const settled = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(settled?.status, 'active');
+    assert.equal(settled?.phase, 'cleanup_pending', 'only branch release is owed');
+    h.stateManager.states.set('task-1', 'cancelled');
+
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.errors, 0);
+    assert.equal(summary.awaitingOperator, 0, 'the requeue is not held as a user cancellation');
+    await assertRetryRemainsSoleOwner(h, baseHead);
+});
+
+test('an operator authorizing a retry-owned cancellation hold re-arms no publication of the retained edits', async () => {
+    const h = await createHarness();
+    const baseHead = await retainEditsBesideScheduledRetry(h);
+    // A hold recorded before the fix: the requeued attempt classified as a user cancellation.
+    const record = await loadFollowupHandoff({ database }, KEY);
+    assert.ok(await advanceFollowupHandoff({ database }, record!, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' }));
+    h.stateManager.states.set('task-1', 'cancelled');
+
+    const authorized = await authorizeCancelledFollowupHandoff(KEY, h.deps as never);
+    assert.ok(authorized);
+    assert.equal(authorized.operator_authorized ? 1 : 0, 0, 'no publication authority is granted');
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.errors, 0);
+    assert.equal(summary.awaitingOperator, 0);
+    await assertRetryRemainsSoleOwner(h, baseHead);
+});
+
+test('an operator resuming a retry-owned cancellation hold hands the request to the retry, which adopts it without publishing', async () => {
+    const h = await createHarness();
+    const baseHead = await retainEditsBesideScheduledRetry(h);
+    const record = await loadFollowupHandoff({ database }, KEY);
+    assert.ok(await advanceFollowupHandoff({ database }, record!, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' }));
+    h.stateManager.states.set('task-1', 'cancelled');
+
+    assert.deepEqual(await resumeOperatorHeldFollowupHandoff(KEY, h.deps as never), { resumed: true }, 'the requeue needs no cancellation authorization');
+    // Even a stale authorization flag on the row grants no publication.
+    const resumed = await loadFollowupHandoff({ database }, KEY);
+    assert.ok(await advanceFollowupHandoff({ database }, resumed!, { operator_authorized: 1 }));
+    const [retry] = [...queued.values()];
+    const adoption = await adoptPredecessorFollowupHandoff(
+        { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: retry.id, log: silentLog, lockToken: `${retry.id}-token` },
+        h.deps as never,
+    );
+    assert.deepEqual(adoption, { resumed: { outcome: 'settled' } });
+    await assertRetryRemainsSoleOwner(h, baseHead);
 });

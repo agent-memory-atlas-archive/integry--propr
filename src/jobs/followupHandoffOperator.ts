@@ -72,7 +72,9 @@ async function withOperatorRedis<T>(
  * changed concurrently, or its pull request lease is held by another writer.
  * A refused release may already have recorded the claims as suppressed; that
  * evidence is revoked in the same transaction, so recovery's return of the
- * authorized request to the queue is never dropped at admission.
+ * authorized request to the queue is never dropped at admission. A
+ * scheduled usage-limit retry owns its request, so authorizing its hold only
+ * re-arms recovery to hand the request to that retry, never to publish.
  */
 export async function authorizeCancelledFollowupHandoff(
     key: FollowupHandoffKey,
@@ -83,9 +85,9 @@ export async function authorizeCancelledFollowupHandoff(
     if (!record || record.status !== HANDOFF_AWAITING_OPERATOR) return null;
     const result = await withOperatorRedis(deps, redis => underOperatorLease(record, { store, redis }, 'authorize',
         fresh => inFollowupHandoffTransaction(store, async transactional => {
-            const authorized = await advanceFollowupHandoff(transactional, fresh, {
-                status: HANDOFF_ACTIVE, status_reason: 'operator_authorized', operator_authorized: 1,
-            });
+            const authorized = await advanceFollowupHandoff(transactional, fresh, retryOwnsClaims(fresh)
+                ? { status: HANDOFF_ACTIVE, status_reason: 'usage_limit_retry' }
+                : { status: HANDOFF_ACTIVE, status_reason: 'operator_authorized', operator_authorized: 1 });
             if (authorized) await revokeCancelledClaims(transactional, fresh);
             return authorized;
         })));
@@ -109,7 +111,9 @@ export async function resumeOperatorHeldFollowupHandoff(
     if (!record) return { resumed: false, reason: 'not_found' };
     if (record.status === HANDOFF_ACTIVE) return { resumed: true };
     if (record.status !== HANDOFF_AWAITING_OPERATOR) return { resumed: false, reason: 'released' };
-    if (record.status_reason === 'cancelled_by_user' && !record.operator_authorized) {
+    // A retry-owned hold is no user cancellation, and its resumption publishes
+    // nothing: recovery hands the request to the scheduled retry.
+    if (record.status_reason === 'cancelled_by_user' && !record.operator_authorized && !retryOwnsClaims(record)) {
         return { resumed: false, reason: 'requires_cancellation_authorization' };
     }
     // An unconfirmed usage-limit retry is resolved by this decision: the
@@ -246,6 +250,11 @@ export interface FollowupHandoffStatus {
 
 function handoffNextAction(record: FollowupHandoffRecord, liveness: string): string {
     if (record.status === HANDOFF_RELEASED) return 'none';
+    if (retryOwnsClaims(record)) {
+        return record.status === HANDOFF_AWAITING_OPERATOR
+            ? 'resume to hand the request to the scheduled usage-limit retry (retained edits are never published), or release to stop tracking it'
+            : 'the scheduled usage-limit retry owns the request; automatic recovery frees the branch and keeps retained edits unpublished';
+    }
     if (record.status === HANDOFF_AWAITING_OPERATOR) {
         return record.status_reason === 'cancelled_by_user'
             ? 'resume --authorize-cancelled to publish the cancelled work, or release to stop tracking it'

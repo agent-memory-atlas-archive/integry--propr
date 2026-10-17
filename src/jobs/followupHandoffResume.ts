@@ -1,8 +1,8 @@
 import type { UnprocessedComment } from '@propr/core';
 import type { FollowupHandoffGitOps } from './followupHandoffGitOps.js';
 import {
-    advanceFollowupHandoff, finalizeFollowupHandoff, parseClaimedComments, parseSourceTaskIds,
-    HANDOFF_AWAITING_OPERATOR, SETTLEMENT_RETRY_SCHEDULED, SETTLEMENT_RETRY_SCHEDULING, SETTLEMENT_RETURNED_TO_QUEUE,
+    advanceFollowupHandoff, finalizeFollowupHandoff, parseClaimedComments, parseSourceTaskIds, retryOwnsClaims,
+    HANDOFF_AWAITING_OPERATOR, SETTLEMENT_RETRY_SCHEDULING, SETTLEMENT_RETURNED_TO_QUEUE,
     type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
 } from './followupHandoffStore.js';
 
@@ -327,6 +327,19 @@ function retiredOutcome(record: FollowupHandoffRecord): ResumeOutcome {
 }
 
 /**
+ * A scheduled usage-limit retry owns the request, so edits the replaced
+ * attempt left in its worktree are never published: the worktree HEAD is
+ * detached in place (every file stays) to free the branch for the retry.
+ */
+async function detachRetryOwnedWorktree(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<boolean> {
+    if (!retryOwnsClaims(record)) return false;
+    await params.git.detachWorktreeHead(record.worktree_path);
+    params.log.info({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, worktreePath: record.worktree_path },
+        'Detached the retained worktree of a retry-owned follow-up in place; its unpublished edits are kept, never published');
+    return true;
+}
+
+/**
  * Retires the handoff only once the branch is proven free of the retained
  * worktree. A failed or interrupted release keeps the row at cleanup_pending,
  * so a later pass retries cleanup without republishing anything.
@@ -340,7 +353,8 @@ async function attemptHandoffCleanup(params: ResumeFollowupHandoffParams, record
         // release then belongs to the successor that now owns the handoff.
         if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
         if (attachment !== 'attached'
-            || await params.git.releaseSettledWorktree(record.local_repo_path, record.branch_name, record.worktree_path)) {
+            || await params.git.releaseSettledWorktree(record.local_repo_path, record.branch_name, record.worktree_path)
+            || await detachRetryOwnedWorktree(params, record)) {
             // Release proof is the repository's own worktree registrations, not
             // the directory: a worktree removed (or detached) by normal cleanup
             // is free, but a removed directory whose registration survives
@@ -390,10 +404,11 @@ async function finishDeliveredFailure(params: ResumeFollowupHandoffParams, recor
 
 /**
  * The normal usage-limit path scheduled its retry — which carries the claimed
- * comments — and died before settling the handoff. The retry job owns those
- * comments, so recovery reconciles to the settlement's own outcome: nothing is
- * returned to the queue or scheduled, the starting comment is left alone, and
- * the task ends as the requeued attempt the job result would have recorded.
+ * comments — and died before settling the handoff, or left unpublished edits
+ * in the worktree. The retry job owns those comments, so recovery reconciles
+ * to the settlement's own outcome: nothing is committed, published, returned
+ * to the queue or scheduled, the starting comment is left alone, and the task
+ * ends as the requeued attempt the job result would have recorded.
  */
 async function finishRetryOwnedClaims(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
     if (ownershipLost(params, record)) return { outcome: 'ownership_lost' };
@@ -418,7 +433,6 @@ async function finishRetryOwnedClaims(params: ResumeFollowupHandoffParams, recor
 }
 
 async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
-    if (record.settlement === SETTLEMENT_RETRY_SCHEDULED) return finishRetryOwnedClaims(params, record);
     // The worker died around the queue add: the retry may own the comments,
     // so returning them could run the request twice. Fail closed for an
     // operator, who releases the handoff or resumes it to return them.
@@ -565,6 +579,11 @@ async function finishPublishedComment(params: ResumeFollowupHandoffParams, recor
  */
 export async function resumeFollowupHandoff(params: ResumeFollowupHandoffParams): Promise<ResumeOutcome> {
     let record = params.record;
+    // A scheduled usage-limit retry is the request's one owner. Its requeue
+    // leaves this attempt CANCELLED, which is no user cancellation, and even
+    // an operator's authorization of such a hold grants no publication: the
+    // retained edits stay in the worktree while the retry runs the request.
+    if (retryOwnsClaims(record) && record.phase !== 'cleanup_pending') return finishRetryOwnedClaims(params, record);
     if (record.phase !== 'cleanup_pending') {
         // User cancellation is authoritative: never publish without explicit operator authorization.
         const hold = await cancellationHold(params, record);

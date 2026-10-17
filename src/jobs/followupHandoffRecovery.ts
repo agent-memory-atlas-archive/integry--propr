@@ -11,7 +11,7 @@ import {
 import {
     advanceFollowupHandoff, finalizeFollowupHandoff, handoffRepositoryKey, loadFollowupHandoff, loadFollowupHandoffs, parseClaimedComments, retryOwnsClaims,
     HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED,
-    type FollowupHandoffKey, type FollowupHandoffRecord,
+    type FollowupHandoffKey, type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
 } from './followupHandoffStore.js';
 import { createFollowupHandoffGitOps } from './followupHandoffGitOps.js';
 import {
@@ -290,6 +290,23 @@ async function publicationCheckpointRetained(
     }
 }
 
+/**
+ * Settles a handoff whose request another owner decides. A scheduled
+ * usage-limit retry owns it: retained edits are never published, and the
+ * requeue is no user cancellation, so only branch release is owed, which
+ * cleanup or recovery proves before retiring. A user cancellation holds it
+ * for an explicit operator decision.
+ */
+async function settleOwnershipElsewhere(store: FollowupHandoffStoreDeps, record: FollowupHandoffRecord, cancelled: boolean): Promise<boolean> {
+    if (retryOwnsClaims(record)) {
+        await advanceFollowupHandoff(store, record, { phase: 'cleanup_pending', status_reason: 'usage_limit_retry' });
+        return true;
+    }
+    if (!cancelled) return false;
+    await advanceFollowupHandoff(store, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' });
+    return true;
+}
+
 export interface HandoffFailureSettlement {
     repoOwner: string;
     repoName: string;
@@ -325,12 +342,7 @@ export async function settleFollowupHandoffAfterFailure(
         await finalizeFollowupHandoff(store, record);
         return;
     }
-    if (params.cancelled) {
-        await advanceFollowupHandoff(store, record, {
-            status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user',
-        });
-        return;
-    }
+    if (await settleOwnershipElsewhere(store, record, params.cancelled)) return;
     // Publication already completed; only task finalization or branch release
     // is owed, which recovery retries without republishing.
     if (record.phase === 'comment_published' || record.phase === 'cleanup_pending') return;
