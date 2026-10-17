@@ -1094,15 +1094,18 @@ describe('native staged artifact lifecycle authority', () => {
     // the flat thirty-second cap this replaces, which killed four consecutive
     // dumps and failed the postcondition with COMMAND_DEADLINE. A dump that is
     // still emitting records keeps its deadline alive however long it runs.
+    // The stall window also covers child startup before the first record, so
+    // it leaves room for a cold Node start on a loaded macOS runner, while the
+    // dump as a whole still streams for longer than that window.
     assert.deepEqual(
       await scanCommandLinesForMatch(
         process.execPath,
         ['-e', 'let emitted = 0;'
           + 'const timer = setInterval(() => {'
           + "  process.stdout.write('\\tpath: /Applications/Other.app\\n');"
-          + `  if ((emitted += 1) === 12) { clearInterval(timer); process.stdout.write(${record}); }`
+          + `  if ((emitted += 1) === 50) { clearInterval(timer); process.stdout.write(${record}); }`
           + '}, 40);'],
-        { timeout: 30_000, stallTimeout: 400 },
+        { timeout: 30_000, stallTimeout: 1_500 },
         matchesLine,
       ),
       { matched: true },
