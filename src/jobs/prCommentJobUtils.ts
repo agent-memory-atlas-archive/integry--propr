@@ -254,6 +254,9 @@ async function handleUsageLimitError(error: UsageLimitError, job: Job<CommentJob
 
     if ((await options.stateManager.getTaskState(options.taskId))?.state === TaskStates.CANCELLED) return;
     const retryComments = options.retryComments ?? job.data.comments ?? [];
+    // Throws when the handoff cannot durably record the retry's ownership: the
+    // retry is then never added, and the failure propagates past the handoff's
+    // error settlement so recovery remains the claim's only owner.
     await options.checkpointUsageLimitRetry?.('scheduling');
     const durableRetryJobId = await schedulePRCommentUsageLimitRetry(job, retryComments, requeueJobId, Math.max(0, delay));
 

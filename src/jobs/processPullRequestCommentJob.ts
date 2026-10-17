@@ -468,6 +468,8 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
         const cancelledState = await stateManager.getTaskState(taskId);
         // The handled failure delivered the owed comment and terminal state, so the
         // handoff retires; a cancellation instead holds it for an operator decision.
+        // A usage-limit retry whose ownership checkpoint failed throws above and
+        // never reaches this settlement: the handoff keeps the claim for recovery.
         await settleExecutionHandoffAfterError({
             ref: { repoOwner, repoName, pullRequestNumber }, taskId, error: error as Error,
             cancelledState, cancelledStateName: TaskStates.CANCELLED, correlatedLogger,

@@ -24,7 +24,15 @@ import type { PullRequestPublication } from './prPublication.js';
  */
 
 /** The slice of processing state these hooks read and advance. */
-export interface HandoffCarrier { followupHandoff?: FollowupHandoffRecord | null }
+export interface HandoffCarrier {
+    followupHandoff?: FollowupHandoffRecord | null;
+    /**
+     * Set when a checkpoint observed the handoff move on without this writer.
+     * A swallowed loss (the container-identity callback's) otherwise leaves
+     * `followupHandoff` null, indistinguishable from never having recorded one.
+     */
+    followupHandoffOwnershipLost?: boolean;
+}
 
 interface HandoffRef { repoOwner: string; repoName: string; pullRequestNumber: number }
 
@@ -103,6 +111,7 @@ async function advanceExecutionHandoff(state: HandoffCarrier, changes: Parameter
         }
     }
     state.followupHandoff = null;
+    state.followupHandoffOwnershipLost = true;
     throw new FollowupHandoffOwnershipLostError(fresh ? 'handoff_record_changed' : 'handoff_record_missing');
 }
 
@@ -139,19 +148,29 @@ export async function markExecutionHandoffCommentPublished(state: HandoffCarrier
  * Durably records that a usage-limit retry is taking over the claimed
  * comments: `scheduling` before the queue add, `scheduled` once the retry job
  * is persisted. A worker death before the handoff settles then never lets
- * recovery return comments the retry job owns to the pending list. Best
- * effort: a failed checkpoint is logged and the retry is scheduled regardless,
- * since withholding it would strand the request.
+ * recovery return comments the retry job owns to the pending list.
+ *
+ * `scheduling` fails closed: a failed write or lost ownership throws, so no
+ * retry is added and the claim stays with the handoff, whose recovery returns
+ * it exactly once. A failed `scheduled` confirmation is only logged — the
+ * retry already exists, and the durable `scheduling` state makes recovery
+ * hold the handoff for an operator instead of requeueing.
  */
 export async function checkpointExecutionHandoffUsageLimitRetry(
     state: HandoffCarrier,
     stage: 'scheduling' | 'scheduled',
     correlatedLogger: Logger,
 ): Promise<void> {
+    if (stage === 'scheduling') {
+        if (state.followupHandoffOwnershipLost) throw new FollowupHandoffOwnershipLostError('usage_limit_retry_not_owned');
+        await advanceExecutionHandoff(state, { settlement: SETTLEMENT_RETRY_SCHEDULING });
+        return;
+    }
     try {
-        await advanceExecutionHandoff(state, { settlement: stage === 'scheduled' ? SETTLEMENT_RETRY_SCHEDULED : SETTLEMENT_RETRY_SCHEDULING });
+        await advanceExecutionHandoff(state, { settlement: SETTLEMENT_RETRY_SCHEDULED });
     } catch (error) {
-        correlatedLogger.warn({ stage, error: (error as Error).message }, 'Could not checkpoint the usage-limit retry on the follow-up handoff');
+        correlatedLogger.warn({ stage, error: (error as Error).message },
+            'Could not confirm the scheduled usage-limit retry on the follow-up handoff; recovery holds it as unconfirmed');
     }
 }
 

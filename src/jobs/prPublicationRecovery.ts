@@ -33,6 +33,8 @@ export interface ProcessingState {
     repositoryWorkflowBaseBranch?: string;
     /** Durable publication handoff recorded before the agent launched, for restart recovery. */
     followupHandoff?: FollowupHandoffRecord | null;
+    /** Set once a checkpoint observed the handoff move on without this writer. */
+    followupHandoffOwnershipLost?: boolean;
     octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>> | null;
     localRepoPath: string | undefined;
     worktreeInfo: WorktreeInfo | undefined;
