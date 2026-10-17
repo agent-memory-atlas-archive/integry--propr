@@ -155,6 +155,16 @@ export interface TaskInfo {
   replacedByTaskId?: string | null;
   /** Every attempt of the lineage, oldest first; present for replaced and replacement tasks. */
   attemptLineage?: TaskAttempt[];
+  /** Where the API posts a follow-up submitted for this task; absent when it would refuse one. */
+  followupTarget?: FollowupTarget;
+}
+
+/** The GitHub thread the follow-up route resolves for a task ID, as reported by the task history API. */
+export interface FollowupTarget {
+  taskId: string;
+  repository: string;
+  kind: 'pull_request' | 'issue';
+  number: number;
 }
 
 export interface TaskAttempt {

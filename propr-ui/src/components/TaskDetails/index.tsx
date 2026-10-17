@@ -31,7 +31,7 @@ import { useLiveRunStop } from './useLiveRunStop';
 import { useTaskAssignment } from './useTaskAssignment';
 import LatestRunCommands from './LatestRunCommands';
 import { useTaskPullRequestScores } from './pullRequestScores';
-import { hasFollowupTarget, taskLabelMode } from './taskKind';
+import { followupTargetFor, hasFollowupTarget, taskLabelMode } from './taskKind';
 
 const CenteredStatus: React.FC<{ className: string; children: React.ReactNode }> = ({ className, children }) => (
   <div className="h-full bg-white flex items-center justify-center">
@@ -474,7 +474,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
         onClose={() => setFollowupModalOpen(false)}
         onSubmit={handleFollowupSubmit}
         initialContent={'Please address the following based on the previous task execution:\n\n'}
-        taskInfo={taskData.taskInfo}
+        target={followupTargetFor(taskData.taskInfo, taskId)}
       />
     </div>
   );

@@ -6,15 +6,18 @@ const failure = 'Comment posted, but the command failed before submission.';
 const longText = `Please address the following based on the previous task execution:\n\n${
   Array.from({ length: 60 }, (_, line) => `- detail ${line + 1}: keep the receipt visible`).join('\n')}`;
 
-async function stubTask(page: Page, posts: string[]) {
+// The thread the API resolves for this task ID: the issue, as this run opened no pull request.
+const issueTarget = { taskId, repository: 'integry/propr', kind: 'issue', number: 3127 };
+
+async function stubTask(page: Page, posts: string[], completed: Record<string, unknown> = {}, followupTarget: unknown = issueTarget) {
   await fixture(page);
   await page.route(`**/api/task/${taskId}/history`, route => route.fulfill({ json: {
     history: [
       { state: 'PENDING', timestamp: ago(60) },
       { state: 'CLAUDE_EXECUTION', timestamp: ago(59) },
-      { state: 'COMPLETED', timestamp: ago(51) },
+      { state: 'COMPLETED', timestamp: ago(51), ...completed },
     ],
-    taskInfo: { title: 'Follow Up failure feedback', type: 'issue', number: 3127, issueNumber: 3127, repoOwner: 'integry', repoName: 'propr' },
+    taskInfo: { title: 'Follow Up failure feedback', type: 'issue', number: 3127, issueNumber: 3127, repoOwner: 'integry', repoName: 'propr', followupTarget },
   } }));
   await page.route(`**/api/task/${taskId}/live-details`, route => route.fulfill({ json: { events: [], todos: [], currentTask: null } }));
   // The real route answers 202 with a receipt when the comment posted but its dispatch failed.
@@ -114,5 +117,60 @@ for (const viewport of viewports) {
     await expect(alert).toBeFocused();
     expect(posts).toHaveLength(2);
     expect(posts[1]).toBe(`${longText} (edited)`);
+  });
+}
+
+// The issue run that created PR #3128 is followed up on that PR, as the API routes it.
+const prTarget = { taskId, repository: 'integry/propr', kind: 'pull_request', number: 3128 };
+const createdPr = { metadata: { pr: { number: 3128, url: 'https://github.com/integry/propr/pull/3128' } } };
+
+for (const viewport of viewports.filter(({ name }) => name.startsWith('phone'))) {
+  test(`${viewport.name}: the dialog names the thread the API posts the follow-up to`, async ({ page }) => {
+    const posts: string[] = [];
+    await page.setViewportSize(viewport);
+    await stubTask(page, posts, createdPr, prTarget);
+    // The PR is open, so the run takes a follow-up.
+    await page.route('**/api/pull-requests/3128/scores**', route => route.fulfill({ json: {
+      repository: 'integry/propr', pr_number: 3128, outcome: null, merged_at: null, closed_at: null, scores: [] } }));
+    const dialog = await openFollowup(page);
+
+    await expect(dialog).toHaveAccessibleDescription('Post a comment to PR integry/propr#3128');
+    await expect(dialog).not.toContainText('#3127');
+    // Neither the dialog nor the page scrolls sideways, and the full repository stays readable.
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
+    expect(await dialog.evaluate(element => element.scrollWidth - element.clientWidth)).toBe(0);
+    expect(await fullyOnScreen(dialog.getByText('Post a comment to PR integry/propr#3128'))).toBe(true);
+    for (const target of [dialog.getByRole('button', { name: 'Close follow-up dialog' }), dialog.getByRole('button', { name: 'Cancel' }), dialog.getByRole('button', { name: 'Post Comment' })]) {
+      const box = await target.boundingBox();
+      expect(box!.width).toBeGreaterThanOrEqual(44);
+      expect(box!.height).toBeGreaterThanOrEqual(44);
+      expect(await fullyOnScreen(target)).toBe(true);
+    }
+    await capture(page, `task-followup-destination-${viewport.name}`);
+
+    await dialog.getByRole('textbox', { name: 'Comment' }).fill('Please also cover the empty state.');
+    const submitted = page.waitForRequest(`**/api/tasks/${taskId}/followup`);
+    await dialog.getByRole('button', { name: 'Post Comment' }).click();
+    expect((await submitted).url()).toContain(`/api/tasks/${taskId}/followup`);
+    expect(posts).toEqual(['Please also cover the empty state.']);
+  });
+
+  test(`${viewport.name}: without a resolved thread the dialog names none and does not post`, async ({ page }) => {
+    const posts: string[] = [];
+    await page.setViewportSize(viewport);
+    await stubTask(page, posts, {}, null);
+    const dialog = await openFollowup(page);
+
+    await expect(dialog).toHaveAccessibleDescription(/thread for this follow-up is not available/);
+    await expect(dialog).not.toContainText('#3127');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
+    const post = dialog.getByRole('button', { name: 'Post Comment' });
+    await dialog.getByRole('textbox', { name: 'Comment' }).fill('Retry');
+    await expect(post).toBeDisabled();
+    await post.click({ force: true });
+    expect(posts).toEqual([]);
+    const close = dialog.getByRole('button', { name: 'Close follow-up dialog' });
+    expect((await close.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await capture(page, `task-followup-destination-unavailable-${viewport.name}`);
   });
 }

@@ -1,11 +1,14 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, test, vi } from 'vitest';
 import FollowupModal, { FollowupReceiptError } from './FollowupModal';
+import type { FollowupTarget } from './types';
 
 const longText = `Please address the following:\n\n${'- another detail\n'.repeat(80)}`;
 
-function renderModal(onSubmit: (body: string) => Promise<void>, onClose = vi.fn()) {
-  render(<FollowupModal isOpen onClose={onClose} onSubmit={onSubmit} initialContent="" taskInfo={{ repoOwner: 'integry', repoName: 'propr', number: 3127 }} />);
+const issueTarget = { taskId: 'issue-3127-run', repository: 'integry/propr', kind: 'issue' as const, number: 3127 };
+
+function renderModal(onSubmit: (body: string) => Promise<void>, onClose = vi.fn(), target: FollowupTarget | null = issueTarget) {
+  render(<FollowupModal isOpen onClose={onClose} onSubmit={onSubmit} initialContent="" target={target} />);
   const textarea = screen.getByRole('textbox', { name: 'Comment' });
   fireEvent.change(textarea, { target: { value: longText } });
   return { textarea, post: screen.getByRole('button', { name: 'Post Comment' }), onClose };
@@ -82,5 +85,22 @@ describe('FollowupModal submission feedback', () => {
     fireEvent.click(post);
     await act(async () => { resolve(); });
     expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  test('names the resolved thread with its full repository, or none and refuses to post', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { unmount } = render(<FollowupModal isOpen onClose={vi.fn()} onSubmit={onSubmit} initialContent="Go"
+      target={{ taskId: 'issue-27-run', repository: 'owner/repository', kind: 'pull_request', number: 28 }} />);
+    expect(screen.getByRole('dialog')).toHaveAccessibleDescription('Post a comment to PR owner/repository#28');
+    unmount();
+
+    renderModal(onSubmit, vi.fn(), null);
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveAccessibleDescription('The GitHub thread for this follow-up is not available. Refresh the task before posting.');
+    expect(dialog).not.toHaveTextContent('#');
+    const post = screen.getByRole('button', { name: 'Post Comment' });
+    expect(post).toBeDisabled();
+    fireEvent.click(post);
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });

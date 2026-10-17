@@ -11,6 +11,7 @@ import { sendSafeJson } from './jsonResponse.js';
 import { previewMediaReader, projectTaskPreviewMedia } from '../services/previewMediaProjection.js';
 import { attemptLineageFields, loadAttemptLineage } from './taskAttemptLineage.js';
 import { automationTaskKind } from './automationTaskKind.js';
+import { followupDestination, loadFollowupDestination, type FollowupTaskRecord } from './followupThread.js';
 
 interface JobData {
     repoOwner?: string; repoName?: string; number?: number;
@@ -50,6 +51,9 @@ export function createTaskHistoryRoutes(deps: TaskHistoryRoutesDeps) {
         const queueResult = await getHistoryFromQueue(taskQueue, taskId);
         if (queueResult) { if (!taskInfo) taskInfo = queueResult.taskInfo; history = queueResult.history; }
       }
+      // A task read from live state or the queue still follows up through its persisted row.
+      const followupTarget = taskInfo && await loadFollowupDestination(db, taskId);
+      if (taskInfo && followupTarget) taskInfo.followupTarget = followupTarget;
       const budget = await loadTaskBudget(db, redisClient, taskId, history);
       sendSafeJson(res, redactVisualPreviewValue({ taskId, history, taskInfo, ...(budget ? { budget } : {}) }));
     } catch (error) {
@@ -87,6 +91,8 @@ function buildTaskInfoFromDb(
   if (taskKind) taskInfo.taskKind = taskKind;
   if (commandMode) taskInfo.commandMode = commandMode;
   if (hasUltrafixMeta) taskInfo.ultrafixCycle = true;
+  const followupTarget = followupDestination(task as unknown as FollowupTaskRecord);
+  if (followupTarget) taskInfo.followupTarget = followupTarget;
   return { ...taskInfo, ...attemptLineageFields(task) };
 }
 

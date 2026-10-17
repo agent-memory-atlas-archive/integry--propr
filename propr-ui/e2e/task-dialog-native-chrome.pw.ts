@@ -15,7 +15,8 @@ async function stubTask(page: Page, shell: Shell, posts: string[]) {
       { state: 'CLAUDE_EXECUTION', timestamp: ago(59) },
       { state: 'COMPLETED', timestamp: ago(51) },
     ],
-    taskInfo: { title: 'Keep follow-up and diff dialogs clear of native window controls', type: 'issue', number: 3183, issueNumber: 3183, repoOwner: 'integry', repoName: 'propr' },
+    taskInfo: { title: 'Keep follow-up and diff dialogs clear of native window controls', type: 'issue', number: 3183, issueNumber: 3183, repoOwner: 'integry', repoName: 'propr',
+      followupTarget: { taskId, repository: 'integry/propr', kind: 'issue', number: 3183 } },
   } }));
   await page.route(`**/api/task/${taskId}/live-details`, route => route.fulfill({ json: { events: [], todos: [], currentTask: null } }));
   await page.route(`**/api/task/${taskId}/file-changes`, route => route.fulfill({ json: {

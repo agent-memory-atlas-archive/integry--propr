@@ -1,4 +1,4 @@
-import type { TaskInfo } from './types';
+import type { FollowupTarget, TaskInfo } from './types';
 
 /** Label mode for an automation report task; its shared execution states describe a report, not code changes. */
 export const AUTOMATION_REPORT_MODE = 'automation-report';
@@ -40,3 +40,27 @@ export const hasFollowupTarget = (
   taskInfo: Pick<TaskInfo, 'repoOwner' | 'repoName' | 'number'> | null | undefined,
   prInfo?: { number?: number },
 ): boolean => Boolean(taskInfo?.repoOwner && taskInfo.repoName && (isThreadNumber(prInfo?.number) || isThreadNumber(taskInfo.number)));
+
+const REPOSITORY = /^[^/\s]+\/[^/\s]+$/;
+
+/**
+ * The thread a follow-up submitted for `taskId` will be posted to, or null
+ * when it is not known. The API resolves it for the task ID it was read for;
+ * task info still held from another task or run names a different thread, so
+ * it is never borrowed. The dialog names no thread it cannot vouch for.
+ */
+export function followupTargetFor(
+  taskInfo: Pick<TaskInfo, 'followupTarget'> | null | undefined,
+  taskId: string | undefined,
+): FollowupTarget | null {
+  const target = taskInfo?.followupTarget;
+  if (!target || !taskId || target.taskId !== taskId) return null;
+  if (target.kind !== 'pull_request' && target.kind !== 'issue') return null;
+  if (!isThreadNumber(target.number)) return null;
+  if (typeof target.repository !== 'string' || !REPOSITORY.test(target.repository)) return null;
+  return target;
+}
+
+/** How the dialog names a follow-up's thread, with the repository in full. */
+export const describeFollowupTarget = (target: FollowupTarget): string =>
+  `${target.kind === 'pull_request' ? 'PR' : 'Issue'} ${target.repository}#${target.number}`;

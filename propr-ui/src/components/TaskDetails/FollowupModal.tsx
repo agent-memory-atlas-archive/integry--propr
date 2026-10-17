@@ -2,6 +2,8 @@ import React, { useState, useEffect, useId, useRef } from 'react';
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import type { PostFollowupResponse } from '../../api/proprApi';
 import { inertOutside } from '../../utils/modalBackground';
+import type { FollowupTarget } from './types';
+import { describeFollowupTarget } from './taskKind';
 
 /** The server's receipt for a follow-up it did not confirm, kept verbatim for the dialog. */
 export type FollowupReceipt = Pick<PostFollowupResponse, 'state' | 'posted' | 'commentId' | 'jobId' | 'message'>;
@@ -22,12 +24,11 @@ interface FollowupModalProps {
   onClose: () => void;
   onSubmit: (body: string) => Promise<void>;
   initialContent: string;
-  taskInfo?: {
-    repoOwner?: string;
-    repoName?: string;
-    number?: number;
-    type?: string;
-  } | null;
+  /**
+   * The thread the API resolved for the task ID `onSubmit` posts for. Without
+   * one the dialog names no thread and does not post.
+   */
+  target: FollowupTarget | null;
 }
 
 interface Feedback {
@@ -117,7 +118,7 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
   onClose,
   onSubmit,
   initialContent,
-  taskInfo
+  target
 }) => {
   const [content, setContent] = useState(initialContent);
   const [submitting, setSubmitting] = useState(false);
@@ -168,7 +169,7 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
   const duplicateBlocked = feedback?.postedBody !== undefined && sameBody(content, feedback.postedBody);
 
   const handleSubmit = async () => {
-    if (submittingRef.current || duplicateBlocked) return;
+    if (submittingRef.current || duplicateBlocked || !target) return;
     if (!content.trim()) {
       setFeedback({ title: 'Nothing to post', message: 'Please enter a comment.' });
       return;
@@ -189,10 +190,6 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
     }
   };
 
-  const issueType = taskInfo?.type === 'pr-comment' ? 'PR' : 'Issue';
-  const issueLink = taskInfo?.repoOwner && taskInfo?.repoName && taskInfo?.number
-    ? `${taskInfo.repoOwner}/${taskInfo.repoName}#${taskInfo.number}`
-    : 'the linked issue';
 
   // The dialog fills the viewport's height at most; the comment field gives up
   // space first, so the result and the actions below it stay on screen. On a
@@ -213,7 +210,9 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
           <div className="min-w-0">
             <h3 id={titleId} className="text-lg font-semibold text-gray-900">Follow Up on Task</h3>
             <p id={descriptionId} className="text-sm text-gray-500 mt-1 break-words">
-              Post a comment to {issueType} {issueLink}
+              {target
+                ? `Post a comment to ${describeFollowupTarget(target)}`
+                : 'The GitHub thread for this follow-up is not available. Refresh the task before posting.'}
             </p>
           </div>
           <button
@@ -269,8 +268,8 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
           <button
             type="button"
             onClick={handleSubmit}
-            disabled={submitting || !content.trim() || duplicateBlocked}
-            aria-describedby={duplicateBlocked ? retryHintId : undefined}
+            disabled={submitting || !content.trim() || duplicateBlocked || !target}
+            aria-describedby={duplicateBlocked ? retryHintId : !target ? descriptionId : undefined}
             className="min-h-11 px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
             {submitting ? (
