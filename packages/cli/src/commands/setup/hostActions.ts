@@ -159,18 +159,26 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
       if (message === GITHUB_SIGN_IN_REVOKED_MESSAGE) return discardRevokedGithubCredential();
       throw new Error(message);
     }
-    const superseding = supersedingToken();
-    if (superseding !== undefined) return superseding;
     try {
       // GitHub has already invalidated the previous pair: persist before use.
-      await configManager!.setGithubCredential(rotated);
+      // Compare-and-set inside the config's serialized mutations, so a sign-in
+      // confirmed before or during this write is never overwritten or rolled back.
+      const saved = await configManager!.setGithubCredential(rotated, { replacingRefreshToken: credential.refreshToken });
+      if (!saved) {
+        const superseding = supersedingToken();
+        if (superseding !== undefined) return superseding;
+        throw new Error("GitHub sign-in changed while it was being renewed. Retry the request.");
+      }
       renewedTokens.set(credential.accessToken, rotated.accessToken);
     } catch {
+      const superseding = supersedingToken();
+      if (superseding !== undefined) return superseding;
       browserTokenSaveFailed = true;
       browserLoginFailure = "GitHub sign-in was renewed, but ProPR could not save it on this computer. Check available storage, then sign in again.";
       throw new Error(browserLoginFailure);
     }
-    return rotated.accessToken;
+    // A sign-in queued behind this write has replaced it by now; hand out that identity instead.
+    return supersedingToken() ?? rotated.accessToken;
   };
 
   /** Return a live GitHub user token, refreshing an expiring credential once across concurrent callers. */
@@ -587,7 +595,10 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
           // can never be paired with the newly confirmed identity.
           await configManager.setGithubCredential(credential);
           renewedTokens.clear();
+          // An older refresh whose write failed while this sign-in was queued
+          // must not leave its recovery state on the newly confirmed account.
           browserTokenSaveFailed = false;
+          browserLoginFailure = undefined;
         } catch {
           browserTokenSaveFailed = true;
           browserLoginFailure = "GitHub account was confirmed, but ProPR could not save sign-in on this computer. Check available storage and retry.";

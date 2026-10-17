@@ -577,3 +577,76 @@ test("a failed credential write leaves the previous credential in memory", async
     cleanupTempDir(tempDir);
   }
 });
+
+/** Pause the first config write until released, then complete it or fail it. */
+function pauseFirstSave(t: { mock: { method: typeof import("node:test").mock.method } }, manager: ConfigManager, fail: boolean) {
+  const save = manager.save.bind(manager);
+  let release!: () => void;
+  let paused!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const reached = new Promise<void>(resolve => { paused = resolve; });
+  let calls = 0;
+  t.mock.method(manager, "save", async () => {
+    if (calls++ === 0) {
+      paused();
+      await gate;
+      if (fail) throw new Error("disk full");
+    }
+    await save();
+  });
+  return { reached, release };
+}
+
+for (const fail of [false, true]) {
+  test(`a sign-in saved while an older credential write is ${fail ? "failing" : "persisting"} wins in memory and on disk`, async t => {
+    const tempDir = createTempDir();
+    try {
+      const manager = new ConfigManager(tempDir);
+      await manager.init();
+      await manager.setRemoteUrl("https://remote.example.com");
+      await manager.setGithubCredential({ accessToken: "ghu_old", expiresAt: 1_000, refreshToken: "ghr_old" });
+      const write = pauseFirstSave(t, manager, fail);
+      const refresh = manager.setGithubCredential(
+        { accessToken: "ghu_a", expiresAt: 2_000, refreshToken: "ghr_a" }, { replacingRefreshToken: "ghr_old" });
+      await write.reached;
+      const signIn = manager.setGithubCredential({ accessToken: "ghu_b", expiresAt: 3_000, refreshToken: "ghr_b" });
+      write.release();
+      if (fail) await assert.rejects(refresh, /disk full/);
+      else assert.equal(await refresh, true);
+      assert.equal(await signIn, true);
+
+      const expected = { accessToken: "ghu_b", expiresAt: 3_000, refreshToken: "ghr_b" };
+      assert.deepEqual(manager.getGithubCredential(), expected);
+      const reloaded = new ConfigManager(tempDir);
+      await reloaded.init();
+      assert.deepEqual(reloaded.getGithubCredential(), expected);
+      assert.equal(reloaded.getRemoteUrl(), "https://remote.example.com");
+      const disk = readFileSync(join(tempDir, "config.json"), "utf8");
+      assert.doesNotMatch(disk, /ghu_old|ghr_old|ghu_a|ghr_a/);
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  });
+}
+
+test("a refresh compare-and-set queued behind a sign-in does not overwrite it", async t => {
+  const tempDir = createTempDir();
+  try {
+    const manager = new ConfigManager(tempDir);
+    await manager.init();
+    await manager.setGithubCredential({ accessToken: "ghu_old", expiresAt: 1_000, refreshToken: "ghr_old" });
+    const write = pauseFirstSave(t, manager, false);
+    const signIn = manager.setGithubCredential({ accessToken: "ghu_b", expiresAt: 3_000, refreshToken: "ghr_b" });
+    await write.reached;
+    const refresh = manager.setGithubCredential(
+      { accessToken: "ghu_a", expiresAt: 2_000, refreshToken: "ghr_a" }, { replacingRefreshToken: "ghr_old" });
+    write.release();
+    assert.equal(await signIn, true);
+    assert.equal(await refresh, false);
+    const reloaded = new ConfigManager(tempDir);
+    await reloaded.init();
+    assert.deepEqual(reloaded.getGithubCredential(), { accessToken: "ghu_b", expiresAt: 3_000, refreshToken: "ghr_b" });
+  } finally {
+    cleanupTempDir(tempDir);
+  }
+});

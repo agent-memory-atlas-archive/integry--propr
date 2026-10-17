@@ -297,3 +297,57 @@ test('a failed account switch keeps the previous credential intact', async t => 
   assert.equal(actions.githubLoginRecovery?.()?.detail, 'GitHub returned an invalid expiring sign-in. Retry or check the OAuth app configuration.');
   assert.equal(env.config.getGithubCredential()?.accessToken, 'ghu_integry');
 });
+
+for (const fail of [false, true]) {
+  test(`an account switch confirmed while the old account's renewal is ${fail ? "failing" : "persisting"} wins after reload`, async t => {
+    const env = await setup(t);
+    let now = 7_000_000_000;
+    await env.config.setGithubCredential(expiring('ghu_integry', 'ghr_integry', now));
+    now += 9 * HOUR;
+    const save = env.config.save.bind(env.config);
+    let releaseWrite!: () => void;
+    let writePaused!: () => void;
+    const gate = new Promise<void>(resolve => { releaseWrite = resolve; });
+    const paused = new Promise<void>(resolve => { writePaused = resolve; });
+    let saves = 0;
+    t.mock.method(env.config, 'save', async () => {
+      if (saves++ === 0) {
+        writePaused();
+        await gate;
+        if (fail) throw new Error('disk full');
+      }
+      await save();
+    });
+    const setCredential = env.config.setGithubCredential.bind(env.config);
+    let signInQueued!: () => void;
+    const queued = new Promise<void>(resolve => { signInQueued = resolve; });
+    t.mock.method(env.config, 'setGithubCredential', (credential: GithubUserCredential, options?: { replacingRefreshToken?: string }) => {
+      const result = setCredential(credential, options);
+      if (credential.refreshToken === 'ghr_ultrafix') signInQueued();
+      return result;
+    });
+    const actions = createDefaultActions(env.config, {
+      now: () => now,
+      githubBrowserLogin: async () => expiring('ghu_ultrafix', 'ghr_ultrafix', now),
+      refreshGithubCredential: async () => expiring('ghu_integry2', 'ghr_integry2', now),
+    });
+    const discovery = actions.fetchRelayInstallations({ relayUrl: env.relayUrl });
+    await paused;
+    const login = actions.loginWithGithub({ force: true });
+    await queued;
+    releaseWrite();
+    assert.equal(await login, true);
+    // Success or failure, the old account's renewal yields to the newer sign-in.
+    assert.equal((await discovery).username, 'user-of-ghu_ultrafix');
+
+    assert.equal(env.config.getGithubCredential()?.refreshToken, 'ghr_ultrafix');
+    assert.equal(actions.hasGithubToken(), true);
+    assert.doesNotMatch(actions.githubLoginRecovery?.()?.detail ?? '', /could not save/);
+    assert.equal((await actions.fetchRelayInstallations({ relayUrl: env.relayUrl })).username, 'user-of-ghu_ultrafix');
+    const reloaded = new ConfigManager(env.dir);
+    await reloaded.init();
+    assert.deepEqual(reloaded.getGithubCredential(), expiring('ghu_ultrafix', 'ghr_ultrafix', now));
+    assert.doesNotMatch(readFileSync(join(env.dir, 'config.json'), 'utf8'), /integry/);
+    assert.ok(!env.seen.some(token => token.includes('integry')));
+  });
+}

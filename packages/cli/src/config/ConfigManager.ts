@@ -81,6 +81,10 @@ export class ConfigManager {
   private initialized: boolean = false;
   private readonly warn: (message: string) => void;
   private readonly readOnly: boolean;
+  /** Tail of the profile mutation queue: each mutation and its rollback completes before the next starts. */
+  private profileMutations: Promise<unknown> = Promise.resolve();
+  /** Tail of the file write queue, so the last rename always carries the latest in-memory state. */
+  private fileWrites: Promise<unknown> = Promise.resolve();
 
   /**
    * Creates a new ConfigManager instance.
@@ -295,7 +299,22 @@ export class ConfigManager {
     return this.getActiveProfile()[key];
   }
 
-  private async updateActiveProfile(patch: Partial<RemoteProfile>): Promise<void> {
+  /**
+   * Run profile mutations one at a time. A mutation reads, saves, and on
+   * failure rolls back `profiles` without another mutation interleaving, so an
+   * older write can never restore its snapshot over a later one.
+   */
+  private serializeProfileMutation<T>(mutation: () => Promise<T>): Promise<T> {
+    const run = this.profileMutations.then(mutation);
+    this.profileMutations = run.catch(() => undefined);
+    return run;
+  }
+
+  private updateActiveProfile(patch: Partial<RemoteProfile>): Promise<void> {
+    return this.serializeProfileMutation(() => this.applyActiveProfilePatch(patch));
+  }
+
+  private async applyActiveProfilePatch(patch: Partial<RemoteProfile>): Promise<void> {
     const name = this.getActiveProfileName();
     const previousProfiles = this.config.profiles;
     const profiles = { ...(previousProfiles ?? {}) };
@@ -321,6 +340,12 @@ export class ConfigManager {
    */
   async save(): Promise<void> {
     if (this.readOnly) throw new Error("Configuration manager is read-only");
+    const write = this.fileWrites.then(() => this.writeConfigFile());
+    this.fileWrites = write.catch(() => undefined);
+    await write;
+  }
+
+  private async writeConfigFile(): Promise<void> {
     await ensurePrivateDirectory(this.configDir);
 
     // Only write non-undefined values
@@ -411,20 +436,29 @@ export class ConfigManager {
    * Atomically replaces the whole GitHub credential. Fields absent from
    * `credential` are removed so a rotated or replaced credential can never be
    * combined with a stale refresh token from an earlier sign-in.
+   *
+   * With `replacingRefreshToken`, the write is a compare-and-set: it only
+   * happens when the active credential still carries that refresh token once
+   * every earlier credential mutation has settled, and resolves `false`
+   * otherwise. A refresh uses this so a sign-in confirmed meanwhile always wins.
    */
-  async setGithubCredential(credential: GithubCredential): Promise<void> {
+  async setGithubCredential(
+    credential: GithubCredential,
+    options: { replacingRefreshToken?: string } = {},
+  ): Promise<boolean> {
     if (!credential.accessToken) throw new Error("GitHub credential requires an access token");
     if (credential.expiresAt !== undefined && !isExpiryTime(credential.expiresAt)) throw new Error("Invalid GitHub token expiry");
     if (credential.refreshTokenExpiresAt !== undefined && (!credential.refreshToken || !isExpiryTime(credential.refreshTokenExpiresAt))) {
       throw new Error("Invalid GitHub refresh token expiry");
     }
-    await this.replaceActiveProfileCredential({
+    const expected = options.replacingRefreshToken;
+    return this.replaceActiveProfileCredential({
       githubToken: credential.accessToken,
       ...(credential.expiresAt !== undefined ? { githubTokenExpiresAt: credential.expiresAt } : {}),
       ...(credential.refreshToken ? { githubRefreshToken: credential.refreshToken } : {}),
       ...(credential.refreshToken && credential.refreshTokenExpiresAt !== undefined
         ? { githubRefreshTokenExpiresAt: credential.refreshTokenExpiresAt } : {}),
-    });
+    }, expected === undefined ? undefined : profile => profile.githubRefreshToken === expected);
   }
 
   /**
@@ -436,21 +470,28 @@ export class ConfigManager {
     await this.replaceActiveProfileCredential({});
   }
 
-  private async replaceActiveProfileCredential(credential: Partial<RemoteProfile>): Promise<void> {
-    const name = this.getActiveProfileName();
-    const previousProfiles = this.config.profiles;
-    const profiles = { ...(previousProfiles ?? {}) };
-    const profile: RemoteProfile = { ...(profiles[name] ?? {}) };
-    for (const key of GITHUB_CREDENTIAL_KEYS) delete profile[key];
-    profiles[name] = { ...profile, ...credential };
-    this.config.profiles = profiles;
-    try {
-      await this.save();
-    } catch (error) {
-      // Never leave a partially rotated credential in memory after a failed write.
-      this.config.profiles = previousProfiles;
-      throw error;
-    }
+  private replaceActiveProfileCredential(
+    credential: Partial<RemoteProfile>,
+    precondition?: (profile: RemoteProfile) => boolean,
+  ): Promise<boolean> {
+    return this.serializeProfileMutation(async () => {
+      if (precondition && !precondition(this.getActiveProfile())) return false;
+      const name = this.getActiveProfileName();
+      const previousProfiles = this.config.profiles;
+      const profiles = { ...(previousProfiles ?? {}) };
+      const profile: RemoteProfile = { ...(profiles[name] ?? {}) };
+      for (const key of GITHUB_CREDENTIAL_KEYS) delete profile[key];
+      profiles[name] = { ...profile, ...credential };
+      this.config.profiles = profiles;
+      try {
+        await this.save();
+      } catch (error) {
+        // Never leave a partially rotated credential in memory after a failed write.
+        this.config.profiles = previousProfiles;
+        throw error;
+      }
+      return true;
+    });
   }
 
   /**
@@ -521,6 +562,10 @@ export class ConfigManager {
    */
   async useRemoteProfile(name: string): Promise<{ created: boolean }> {
     const trimmed = this.normalizeProfileName(name);
+    return this.serializeProfileMutation(() => this.activateRemoteProfile(trimmed));
+  }
+
+  private async activateRemoteProfile(trimmed: string): Promise<{ created: boolean }> {
     const profiles = { ...(this.config.profiles ?? {}) };
     const created = !profiles[trimmed];
     if (created) {
@@ -538,6 +583,14 @@ export class ConfigManager {
     clear: Array<keyof RemoteProfile> = []
   ): Promise<void> {
     const trimmed = this.normalizeProfileName(name);
+    return this.serializeProfileMutation(() => this.patchRemoteProfile(trimmed, patch, clear));
+  }
+
+  private async patchRemoteProfile(
+    trimmed: string,
+    patch: Partial<RemoteProfile>,
+    clear: Array<keyof RemoteProfile>,
+  ): Promise<void> {
 
     const profiles = { ...(this.config.profiles ?? {}) };
     const nextProfile: RemoteProfile = {
