@@ -23,7 +23,7 @@ vi.mock('./hooks', () => ({
       handleStopExecution: vi.fn(), handleDeleteTask,
     };
   },
-  usePromptData: () => ({ fetchPrompt: vi.fn(), selectedPrompt: null, loadingPrompt: false, setSelectedPrompt: vi.fn() }),
+  usePromptData: () => ({ fetchPrompt: vi.fn(), selectedPrompt: null, loadingPrompt: false, closePrompt: vi.fn() }),
   useLogFilesData: () => ({ fetchLogFilesData: vi.fn(), logFiles: null, searchMatches: [], closeLogFiles: vi.fn() }),
 }));
 vi.mock('./useThinkingLog', () => ({
