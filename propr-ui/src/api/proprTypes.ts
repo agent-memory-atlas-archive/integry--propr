@@ -322,6 +322,16 @@ export interface PostFollowupResponse {
   commentId?: number;
   jobId?: string;
   sourceTaskId?: string;
+  /** Present when a failed implementation without a pull request was retried on its issue. */
+  intent?: 'issue';
+  issueNumber?: number;
+}
+
+/** The runs an issue follow-up started, for the signed-in user who posted it; none until its run starts. */
+export interface FollowupRunsResponse {
+  sourceTaskId: string;
+  commentId: number;
+  runs: Array<{ taskId: string; status: string }>;
 }
 
 export interface UserRepoPreference {

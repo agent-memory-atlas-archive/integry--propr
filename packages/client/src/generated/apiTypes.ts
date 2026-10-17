@@ -521,6 +521,18 @@ export interface TaskFollowupResult {
   message?: string;
 }
 
+/** The runs an issue follow-up started, for the signed-in user who posted it. */
+export interface TaskFollowupRuns {
+  sourceTaskId: string;
+  commentId: number;
+  /** Empty until the run the follow-up requested has started. */
+  runs: {
+    taskId: string;
+    /** The run's latest state, lowercased; `queued` until it records one. */
+    status: string;
+  }[];
+}
+
 /** A task together with its lifecycle events. */
 export interface TaskHistory {
   taskId: string;
@@ -673,6 +685,12 @@ export interface InstanceStorageResultQuery {
 export interface TaskAssigneesQuery {
   /** `false` serves the stored set without calling GitHub. */
   refresh?: "true" | "false";
+}
+
+/** Query parameters of `getTaskFollowupRuns`. */
+export interface TaskFollowupRunsQuery {
+  /** The `commentId` the follow-up's receipt returned. */
+  commentId: string;
 }
 
 /** Query parameters of `listTasks`. */

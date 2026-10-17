@@ -29,8 +29,8 @@ info:
     name: Apache-2.0
     identifier: Apache-2.0
   x-route-coverage:
-    total: 303
-    documented: 68
+    total: 304
+    documented: 69
     undocumented: 235
 servers:
   - url: "{origin}"
@@ -7990,6 +7990,63 @@ paths:
           $ref: "#/components/responses/LegacyUnexpectedError"
       x-propr-auth: member
       x-legacy-error: true
+  /api/tasks/{taskId}/followup-runs:
+    get:
+      operationId: getTaskFollowupRuns
+      summary: Read the runs an issue follow-up started
+      description: |-
+        Read-only. Returns the other runs of the task's repository and issue whose job carried the follow-up's own comment for the signed-in user, so the page that sent it can open the new run. Empty while the run has not started; it never posts or queues anything.
+
+        When the task, session or correlation id belongs to a goal, only the goal owner can use this route (others get `404`), and only for reads: other methods answer `409` and the goal controls must be used instead.
+      tags:
+        - Tasks
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          description: Task (run) identifier, as returned in `TaskSummary.id`.
+          schema:
+            type: string
+        - name: commentId
+          in: query
+          required: true
+          description: The `commentId` the follow-up's receipt returned.
+          schema:
+            type: string
+            pattern: ^[1-9]\d{0,15}$
+      responses:
+        "200":
+          description: The runs found, possibly none yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskFollowupRuns"
+        "400":
+          description: The task ID or comment ID is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "401":
+          description: Authentication required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "404":
+          description: Task not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-query-type: TaskFollowupRunsQuery
+      x-propr-auth: member
+      x-legacy-error: true
   /api/tasks/{taskId}/review:
     post:
       operationId: postTaskReview
@@ -10010,6 +10067,34 @@ components:
         - sourceTaskId
       additionalProperties: false
       description: "Result of posting a follow-up comment. `state: unknown` means inspect the job before retrying."
+    TaskFollowupRuns:
+      type: object
+      properties:
+        sourceTaskId:
+          type: string
+        commentId:
+          type: integer
+        runs:
+          type: array
+          items:
+            type: object
+            properties:
+              taskId:
+                type: string
+              status:
+                type: string
+                description: The run's latest state, lowercased; `queued` until it records one.
+            required:
+              - taskId
+              - status
+            additionalProperties: false
+          description: Empty until the run the follow-up requested has started.
+      required:
+        - sourceTaskId
+        - commentId
+        - runs
+      additionalProperties: false
+      description: The runs an issue follow-up started, for the signed-in user who posted it.
     TaskHistory:
       type: object
       properties:
