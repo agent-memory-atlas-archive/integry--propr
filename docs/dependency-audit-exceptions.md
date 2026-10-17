@@ -1,5 +1,11 @@
 # Dependency audit exception
 
+**Remediated 2026-10-17.** The `braces` dependency is now resolved to the
+reviewed, vendored depth-guard build in `vendor/braces` (see
+`vendor/braces/README.md` for provenance), so GHSA-vfj7-8cjw-p6xm no longer
+appears in the audits and this expired exception no longer applies to
+anything. The description below is kept for the audit wrapper's history.
+
 The runtime and desktop packaging audits temporarily accept only
 [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm),
 the high-severity stack-exhaustion denial of service in `braces <=3.0.3`.

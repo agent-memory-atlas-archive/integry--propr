@@ -12,7 +12,7 @@
   "overrides": {
     "@electron/packager": "20.3.0",
     "@electron/rebuild": "4.2.0",
-    "braces": "npm:@dieub/braces-depth-guard@3.0.3-pn.3",
+    "braces": "$braces",
     "hono": "4.13.12",
     "postcss-selector-parser": "7.1.6",
     "react": "19.2.7"
@@ -133,6 +133,7 @@
     "@propr/core": "^0.9.0",
     "@propr/local-setup": "^0.9.0",
     "better-sqlite3": "13.0.3",
+    "braces": "file:vendor/braces-3.0.4-depthguard.1.tgz",
     "bullmq": "^5.81.3",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
