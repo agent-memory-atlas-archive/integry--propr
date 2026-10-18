@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { SCROLL_ROUNDING_TOLERANCE, scrollGap, scrollMarginMiss } from './planner-outline-scroll';
 import { capture, executionSettingsRequests, fixture, implementRequests, queueRequests } from './planner-studio.fixture';
 
 test.beforeEach(async ({ page }) => {
@@ -47,7 +48,9 @@ test('review step lists the plan outline with titles instead of a blind numbered
   await expect(cronStep).toHaveAttribute('aria-current', 'step');
   await expect(page.locator('[data-task-index="11"]')).toContainText('agentScheduleSweep.ts');
   // The outline click scrolls the specification to step 12, leaving its scroll-mt-6 (24px) gap above the heading.
-  await expect.poll(() => page.locator('[data-task-index="11"]').evaluate(card => Math.round(card.getBoundingClientRect().top - card.closest('[data-task-list]')!.getBoundingClientRect().top))).toBe(24);
+  const cronCard = page.locator('[data-task-index="11"]');
+  await expect.poll(() => scrollMarginMiss(cronCard)).toBeLessThanOrEqual(SCROLL_ROUNDING_TOLERANCE);
+  expect((await scrollGap(cronCard)).margin).toBe(24);
   await cronStep.hover();
   const handle = (await outline.getByLabel('Reorder step 12').boundingBox())!;
   const row = (await cronStep.boundingBox())!;
