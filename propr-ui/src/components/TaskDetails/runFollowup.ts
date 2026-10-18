@@ -11,13 +11,15 @@ export interface RunFollowup {
 }
 
 /**
- * A review that found nothing has nothing to fix. The outcome the review's
- * completion recorded decides when the task carries one; otherwise its summary
- * is read as the Inbox reads the review's recap. A score alone never reads as
- * clean, so a nominal 10/10 with findings or a failed reviewer still offers /fix.
+ * A review that found nothing has nothing to fix. A server that reports the
+ * outcome decides it, including an explicit null for an outcome it could not
+ * confirm, which keeps /fix whatever the summary says. Only when the field is
+ * absent, from a server that predates it, is the summary read as the Inbox
+ * reads the review's recap. A score alone never reads as clean, so a nominal
+ * 10/10 with findings or a failed reviewer still offers /fix.
  */
 const isCleanReview = (run: TaskRunEntry): boolean => {
-  if (run.task.reviewOutcome) return run.task.reviewOutcome === 'clean';
+  if (run.task.reviewOutcome !== undefined) return run.task.reviewOutcome === 'clean';
   const recap = reviewRecapOutcome(run.summary);
   if (recap.reviewerFailed || recap.issueCount > 0 || recap.findings.length > 0) return false;
   return isIssueFreeReviewRecap(run.summary);

@@ -20,6 +20,9 @@ const serveProjection = (...overrides: Partial<ProjectedTask>[]) => vi.mocked(ge
   tasks: projectedTasks.filter(entry => typeof options === 'object' && entry.id === options.task).map(entry => Object.assign({}, entry, ...overrides)),
 }) as never);
 
+/** A run whose summary reads as a clean recap: a titled task, so the subtitle is the run's summary. */
+const recapSummary: Partial<ProjectedTask> = { title: 'Document the review flow', subtitle: 'Score 9/10 · 0 issues found' };
+
 const reviewNotification = (task: ProjectedTask, body: string) => notificationSchema.parse({
   id: `notification-${task.id}`, deduplicationKey: task.id, kind: 'review', severity: 'success',
   target: { type: 'review', repository: task.repository, prNumber: task.prNumber, taskId: task.id },
@@ -58,6 +61,23 @@ describe('follow-up commands read from the API task projection', () => {
   test('a projection from a server that predates the outcome keeps /fix', async () => {
     serveProjection({ reviewOutcome: undefined });
     expect(latestRunFollowup(await readTaskRuns('review-clean'), 'review-clean')?.commands).toEqual(['/fix']);
+  });
+
+  test('an outcome the API reports as unknown keeps /fix even when the run summary reads as a clean recap', async () => {
+    // The API answers null for this recap when no reviewer success was recorded (review-legacy).
+    serveProjection(recapSummary);
+    const runs = await readTaskRuns('review-legacy');
+    expect(runs![0]).toMatchObject({ summary: 'Score 9/10 · 0 issues found', task: { score: 9, reviewOutcome: null } });
+    expect(latestRunFollowup(runs, 'review-legacy')?.commands).toEqual(['/fix']);
+    const card = reviewNotification(projected('review-legacy'), 'GPT-6 Astra finished reviewing the pull request.');
+    expect(notificationRunFollowup(card, runs)?.commands).toEqual(['/fix']);
+    render(<ToastProvider><LatestRunCommands runs={runs!} taskId="review-legacy" /></ToastProvider>);
+    expect(screen.getByRole('button', { name: 'Send /fix to PR #36' })).toBeInTheDocument();
+  });
+
+  test('a server that predates the outcome still reads a clean recap summary as clean', async () => {
+    serveProjection(recapSummary, { reviewOutcome: undefined });
+    expect(latestRunFollowup(await readTaskRuns('review-legacy'), 'review-legacy')).toBeNull();
   });
 
   test('the task header offers no /fix for the clean review and sends nothing', async () => {
