@@ -82,13 +82,15 @@ export const followupHandoffKey = (scope: string, sourceTaskId: string) => `${ST
 
 const CHANGE_EVENT = 'propr:followup-handoff';
 
+const isExpired = (stored: StoredHandoff, now: number) => now - stored.acceptedAt > HANDOFF_TTL_MS;
+
 function readStored(key: string | null, now = Date.now()): StoredHandoff | null {
   if (!key) return null;
   try {
     const raw = sessionStorage.getItem(key);
     if (!raw) return null;
     const stored = JSON.parse(raw) as StoredHandoff;
-    if (typeof stored?.commentId !== 'number' || typeof stored.acceptedAt !== 'number' || now - stored.acceptedAt > HANDOFF_TTL_MS) return null;
+    if (typeof stored?.commentId !== 'number' || typeof stored.acceptedAt !== 'number' || isExpired(stored, now)) return null;
     return stored;
   } catch {
     return null;
@@ -105,9 +107,15 @@ const pageMemory = new Map<string, { cleared: number; value: StoredHandoff }>();
 // The desktop cleared this renderer's state for a replaced identity: nothing held for the old one remains.
 subscribeRendererProfileStateGeneration(() => pageMemory.clear());
 
-function readHeld(key: string | null): StoredHandoff | null {
+/** A held request is subject to the same retention as a stored one: once expired, it is forgotten. */
+function readHeld(key: string | null, now = Date.now()): StoredHandoff | null {
   const held = key ? pageMemory.get(key) : undefined;
-  return held && held.cleared === getRendererProfileStateGeneration() ? held.value : null;
+  if (!key || !held || held.cleared !== getRendererProfileStateGeneration()) return null;
+  if (isExpired(held.value, now)) {
+    pageMemory.delete(key);
+    return null;
+  }
+  return held.value;
 }
 
 /** Records the handoff in this tab's storage, or for this page when storage is unavailable and does not take it. */
