@@ -12,6 +12,7 @@ import {
 import AgentsListSection from './SettingsPage/AgentsListSection';
 import { useAgentHealth } from './SettingsPage/useAgentHealth';
 import ChatPanel, { type AgentModelSelection } from '../components/AgentChat/ChatPanel';
+import { usePlaygroundSession } from '../components/AgentChat/usePlaygroundSession';
 import { useDemoMode } from '../contexts/DemoModeContext';
 import { isCommittedConfigWriteError } from '../api/apiClient';
 import { getAgentTankStatus } from '../api/revertApi';
@@ -53,6 +54,10 @@ const AiAgentsPage: React.FC = () => {
   // Mobile tab state: 'config' or 'playground'
   const [mobileTab, setMobileTab] = useState<'config' | 'playground'>('playground');
   const [selectedModels, setSelectedModels] = useState<AgentModelSelection[]>([]);
+  // The page owns the Playground conversation: the mobile and desktop panels
+  // and the mobile tabs are views of it, so layout changes keep the draft,
+  // transcript and any pending response.
+  const playgroundSession = usePlaygroundSession();
 
   useEffect(() => {
     const loadAgents = async () => {
@@ -330,6 +335,7 @@ const AiAgentsPage: React.FC = () => {
                   syntheticAgents={syntheticAgents}
                   selectedModels={selectedModels}
                   onSelectedModelsChange={setSelectedModels}
+                  session={playgroundSession}
                   disabled={isDemoMode}
                 />
               )}
@@ -363,6 +369,7 @@ const AiAgentsPage: React.FC = () => {
             syntheticAgents={syntheticAgents}
             selectedModels={selectedModels}
             onSelectedModelsChange={setSelectedModels}
+            session={playgroundSession}
             disabled={isDemoMode}
           />
         )}

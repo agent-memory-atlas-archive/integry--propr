@@ -1,6 +1,6 @@
 import { formatModelName } from '../../utils/modelDisplay';
-import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { AgentConfig, chatWithAgents, ChatResult, ChatQuery } from '../../api/proprApi';
+import React, { useRef, useEffect, useMemo } from 'react';
+import { AgentConfig, ChatQuery } from '../../api/proprApi';
 import { MODEL_INFO_MAP } from '../../config/modelDefinitions';
 import { ProviderLogo } from '../ui/ProviderLogo';
 import { Bot, Layers3, Send, User } from 'lucide-react';
@@ -9,6 +9,7 @@ import ModelSelector, {
   type AgentModelOption,
   type AgentModelSelection,
 } from './ModelSelector';
+import type { PlaygroundSession } from './usePlaygroundSession';
 
 export type { AgentModelSelection } from './ModelSelector';
 
@@ -17,14 +18,9 @@ interface ChatPanelProps {
   syntheticAgents?: SyntheticAgentConfig[];
   selectedModels: AgentModelSelection[];
   onSelectedModelsChange: (selectedModels: AgentModelSelection[]) => void;
+  /** Conversation state owned outside this view so layouts can share it. */
+  session: PlaygroundSession;
   disabled?: boolean;
-}
-
-interface Message {
-  role: 'user' | 'assistant';
-  content?: string;
-  results?: ChatResult[];
-  timestamp: number;
 }
 
 const isSameAgentModel = (
@@ -45,11 +41,10 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
   syntheticAgents = [],
   selectedModels,
   onSelectedModelsChange,
+  session,
   disabled = false
 }) => {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+  const { messages, input, setInput, isLoading } = session;
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Build list of all enabled agent+model combinations
@@ -106,55 +101,19 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
     }
   }, [messages]);
 
-  const handleSend = async () => {
+  const handleSend = () => {
     if (!input.trim() || selectedModels.length === 0 || disabled) return;
 
-    const userMsg: Message = { role: 'user', content: input, timestamp: Date.now() };
-    setMessages(prev => [...prev, userMsg]);
-    setIsLoading(true);
-    setInput('');
-
-    try {
-      // Build Context (simplified string of past messages)
-      const context = messages.map(m =>
-        m.role === 'user' ? `User: ${m.content}` : `Assistant: (Previous response hidden)`
-      ).join('\n');
-
-      // Build queries with agent+model combinations
-      const queries: ChatQuery[] = selectedModels.map(selection => {
-        const option = agentModelOptions.find(candidate => isSameAgentModel(candidate, selection));
-        return {
-          agentId: selection.agentId,
-          ...(option?.syntheticConfigId ? { syntheticConfigId: option.syntheticConfigId } : {}),
-          model: selection.modelId,
-        };
-      });
-
-      const { results } = await chatWithAgents(queries, userMsg.content!, context);
-
-      const assistantMsg: Message = {
-        role: 'assistant',
-        results: results,
-        timestamp: Date.now()
+    // Build queries with agent+model combinations
+    const queries: ChatQuery[] = selectedModels.map(selection => {
+      const option = agentModelOptions.find(candidate => isSameAgentModel(candidate, selection));
+      return {
+        agentId: selection.agentId,
+        ...(option?.syntheticConfigId ? { syntheticConfigId: option.syntheticConfigId } : {}),
+        model: selection.modelId,
       };
-      setMessages(prev => [...prev, assistantMsg]);
-    } catch (err) {
-      console.error(err);
-      const errorMsg: Message = {
-        role: 'assistant',
-        results: [{
-          agentId: 'error',
-          agentAlias: 'System',
-          model: 'N/A',
-          error: (err as Error).message || 'Failed to get response',
-          durationMs: 0
-        }],
-        timestamp: Date.now()
-      };
-      setMessages(prev => [...prev, errorMsg]);
-    } finally {
-      setIsLoading(false);
-    }
+    });
+    void session.send(queries);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -170,13 +129,14 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
         options={agentModelOptions}
         selectedModels={selectedModels}
         onSelectedModelsChange={onSelectedModelsChange}
-        onClear={() => setMessages([])}
+        onClear={session.clear}
       />
 
       {/* Messages Area - Studio Assistant styling */}
       <div
         className="flex-1 space-y-4 overflow-y-auto overscroll-contain px-3 pb-3 sm:px-4 sm:pb-4"
         ref={scrollRef}
+        data-testid="ai-agents-playground-transcript"
         style={{
           scrollbarWidth: 'thin',
           scrollbarColor: '#d1d5db transparent'
