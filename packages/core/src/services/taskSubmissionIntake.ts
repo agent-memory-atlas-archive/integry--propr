@@ -1,7 +1,7 @@
 import type { Knex } from 'knex';
 import { db } from '../db/connection.js';
 import type { IssueJobData } from '../queue/taskQueue.types.js';
-import { findIssueSubmission, type TaskSubmission } from './taskSubmissionService.js';
+import { acquireDispatchLock, findIssueSubmission, type TaskSubmission } from './taskSubmissionService.js';
 
 /**
  * A submission's intake is the issue job the submission route enqueues once
@@ -71,7 +71,28 @@ export async function recordSubmissionIntakeFailure(database: Knex, id: string, 
 export const awaitingIntake = (row: TaskSubmission): boolean =>
   row.state === 'queued' && !row.dispatch_complete && !row.task_id && !row.latest_task_id && !row.dispatch_claim && Boolean(row.issue_number);
 
-export type IntakeFinalization = 'ignored' | 'retrying' | 'superseded' | 'recorded' | 'unchanged';
+export type IntakeSettlement = 'recorded' | 'unchanged' | 'busy';
+
+/**
+ * Records the failure `establish` reads from the queue, holding the
+ * submission's dispatch lock throughout. Evidence read before the lock may
+ * predate a retry that restored the submission to queued with a new intake;
+ * under the lock no retry can, so the submission is re-read and the evidence
+ * read again. While a retry or another settlement holds the lock, the
+ * submission is left as it is: a later read reconciles it.
+ */
+async function settleSubmissionIntake(database: Knex, id: string, establish: () => Promise<IntakeFailure | null>): Promise<IntakeSettlement> {
+  const release = await acquireDispatchLock(database, id);
+  if (!release) return 'busy';
+  try {
+    const row = await database<TaskSubmission>('task_submissions').where({ id }).first();
+    if (!row || !awaitingIntake(row)) return 'unchanged';
+    const failure = await establish();
+    return failure && await recordSubmissionIntakeFailure(database, id, failure) ? 'recorded' : 'unchanged';
+  } finally { await release(); }
+}
+
+export type IntakeFinalization = 'ignored' | 'retrying' | 'superseded' | IntakeSettlement;
 
 interface FinalizableJob {
   id?: string;
@@ -102,9 +123,15 @@ export async function finalizeSubmissionIntakeFailure(job: FinalizableJob | unde
   const database = deps.database ?? db;
   const submission = await (deps.findSubmission ?? findIssueSubmission)(job.data, database);
   if (!submission || !awaitingIntake(submission)) return 'ignored';
-  const current = await deps.job(job.id);
-  if (current.state !== 'absent' && (current.state !== 'failed' || current.timestamp !== job.timestamp)) return 'superseded';
-  return await recordSubmissionIntakeFailure(database, submission.id, { reason: error.message, attempts: job.attemptsMade }) ? 'recorded' : 'unchanged';
+  const jobId = job.id;
+  const { timestamp, attemptsMade } = job;
+  const establish = async (): Promise<IntakeFailure | null> => {
+    const current = await deps.job(jobId);
+    const superseded = current.state !== 'absent' && (current.state !== 'failed' || current.timestamp !== timestamp);
+    return superseded ? null : { reason: error.message, attempts: attemptsMade };
+  };
+  if (!await establish()) return 'superseded';
+  return settleSubmissionIntake(database, submission.id, establish);
 }
 
 /**
@@ -118,14 +145,17 @@ export async function finalizeSubmissionIntakeFailure(job: FinalizableJob | unde
 export async function reconcileSubmissionIntake(database: Knex, row: TaskSubmission, evidence: SubmissionIntakeEvidence): Promise<TaskSubmission> {
   if (!awaitingIntake(row)) return row;
   const [owner, repo] = row.repository.split('/');
-  const current = await evidence.job(submissionIntakeJobId(owner, repo, row.issue_number!));
-  let failure: IntakeFailure | null = null;
-  if (current.state === 'failed') failure = { reason: current.reason };
-  else if (current.state === 'absent') {
+  const jobId = submissionIntakeJobId(owner, repo, row.issue_number!);
+  const establish = async (): Promise<IntakeFailure | null> => {
+    const current = await evidence.job(jobId);
+    if (current.state === 'failed') return { reason: current.reason };
+    if (current.state !== 'absent') return null;
     const failures = await evidence.failures(row);
-    if (failures && failures.failures >= SUBMISSION_INTAKE_ATTEMPTS) failure = { reason: failures.reason, attempts: failures.failures };
-  }
-  if (!failure || !await recordSubmissionIntakeFailure(database, row.id, failure)) return row;
+    if (!failures || failures.failures < SUBMISSION_INTAKE_ATTEMPTS) return null;
+    // A delivery added while the log was read is the intake now.
+    return (await evidence.job(jobId)).state === 'absent' ? { reason: failures.reason, attempts: failures.failures } : null;
+  };
+  if (!await establish() || await settleSubmissionIntake(database, row.id, establish) !== 'recorded') return row;
   return (await database<TaskSubmission>('task_submissions').where({ id: row.id }).first()) ?? row;
 }
 
@@ -139,8 +169,8 @@ interface FailureLogClient {
 }
 
 const FAILURE_LOG = 'metrics:ai:log:v1';
-// Bounds a check of a long-stuck submission; entries are read from its creation on.
-const FAILURE_LOG_SCAN = 5000;
+// The log is shared by every job; it is read in pages from the submission's creation on.
+export const FAILURE_LOG_PAGE = 5000;
 
 const createdAt = (row: TaskSubmission & { created_at?: string | number | Date }) => {
   const value = row.created_at;
@@ -170,16 +200,22 @@ export function queueSubmissionIntakeEvidence(queueOf: () => IntakeQueue | Promi
     async failures(row) {
       const client = await (await queueOf()).client as FailureLogClient;
       // A minute's margin covers clock skew between the API and the worker host.
-      const entries = await client.zrangebyscore(FAILURE_LOG, Math.max(0, createdAt(row) - 60_000), '+inf', 'LIMIT', 0, FAILURE_LOG_SCAN);
+      const from = Math.max(0, createdAt(row) - 60_000);
       let latest: IntakeFailureEvidence | null = null;
-      for (const entry of entries) {
-        let parsed: { correlationId?: string; status?: string; timestamp?: number; error?: string };
-        try { parsed = JSON.parse(entry); } catch { continue; }
-        if (parsed.correlationId !== row.id || parsed.status !== 'failed' || typeof parsed.timestamp !== 'number') continue;
-        if (!latest || parsed.timestamp > latest.timestamp) latest = { timestamp: parsed.timestamp, failures: 0, reason: parsed.error || 'The intake job failed' };
-        if (parsed.timestamp === latest.timestamp) latest.failures++;
+      // An entry added below the offset meanwhile shifts the next page onto one already read.
+      const counted = new Set<string>();
+      for (let offset = 0; ; offset += FAILURE_LOG_PAGE) {
+        const entries = await client.zrangebyscore(FAILURE_LOG, from, '+inf', 'LIMIT', offset, FAILURE_LOG_PAGE);
+        for (const entry of entries) {
+          let parsed: { correlationId?: string; status?: string; timestamp?: number; error?: string };
+          try { parsed = JSON.parse(entry); } catch { continue; }
+          if (parsed.correlationId !== row.id || parsed.status !== 'failed' || typeof parsed.timestamp !== 'number' || counted.has(entry)) continue;
+          counted.add(entry);
+          if (!latest || parsed.timestamp > latest.timestamp) latest = { timestamp: parsed.timestamp, failures: 0, reason: parsed.error || 'The intake job failed' };
+          if (parsed.timestamp === latest.timestamp) latest.failures++;
+        }
+        if (entries.length < FAILURE_LOG_PAGE) return latest;
       }
-      return latest;
     },
   };
 }

@@ -184,8 +184,9 @@ test('the queue evidence reads the job by ID and counts only the latest instance
   try {
     const row = await read(database, id);
     const created = Date.parse(`${String((row as TaskSubmission & { created_at: string }).created_at).replace(' ', 'T')}Z`);
-    const entry = (correlationId: string, timestamp: number, status = 'failed') => JSON.stringify({ correlationId, timestamp, status, error: ADMISSION });
-    const log = [entry(id, created + 1), entry(id, created + 1), entry('other', created + 2), entry(id, created + 1, 'success'), 'not json', entry(id, created + 1)];
+    // A sorted set holds each member once; attempts differ by their execution time.
+    const entry = (correlationId: string, timestamp: number, attempt: number, status = 'failed') => JSON.stringify({ correlationId, timestamp, status, error: ADMISSION, executionTimeMs: attempt });
+    const log = [entry(id, created + 1, 1), entry(id, created + 1, 2), entry('other', created + 2, 1), entry(id, created + 1, 4, 'success'), 'not json', entry(id, created + 1, 3)];
     let jobs: Record<string, { timestamp: number; failedReason?: string; state: string }> = {};
     const calls: unknown[][] = [];
     const queue = {
@@ -236,5 +237,121 @@ test('a dispatcher attempt BullMQ will retry leaves the submission queued; only 
     await assert.rejects(attempt(2), /GitHub unavailable/);
     assert.deepEqual(failures, ['GitHub unavailable']);
     assert.equal((await read(database, id)).state, 'failed');
+  } finally { await database.destroy(); }
+});
+
+const gate = () => {
+  let open!: () => void;
+  const opened = new Promise<void>(resolve => { open = resolve; });
+  return { opened, open };
+};
+
+// A retry that enqueues a new intake, live under the same job ID, and restores the submission to queued.
+const retryInto = (queue: { current: IntakeJobState }) => ({
+  createIssue: async () => assert.fail('The existing issue is reused'),
+  reconcileIssue: async () => assert.fail('The existing issue is reused'),
+  dispatch: async () => { queue.current = { state: 'live', timestamp: 7_000 }; },
+});
+
+test('a poll that read an earlier intake\'s failures before a retry does not fail the retried, live intake', async () => {
+  const { database, id } = await fixture();
+  try {
+    const queue: { current: IntakeJobState } = { current: { state: 'absent' } };
+    const reading = gate();
+    const suspended = gate();
+    let first = true;
+    const stale: SubmissionIntakeEvidence = {
+      job: async () => queue.current,
+      failures: async () => {
+        // The first intake's three recorded failures, returned once a retry has replaced it.
+        if (first) { first = false; reading.open(); await suspended.opened; }
+        return { timestamp: 1_000, failures: 3, reason: ADMISSION };
+      },
+    };
+    const poll = reconcileSubmissionIntake(database, await read(database, id), stale);
+    await reading.opened;
+    // Meanwhile the worker records the exhausted intake, and the user retries it.
+    assert.equal(await finalizeSubmissionIntakeFailure(intakeJob(id), new Error(ADMISSION), finalizerDeps(database)), 'recorded');
+    assert.equal((await resumeTaskSubmission(database, id, retryInto(queue))).state, 'queued');
+    suspended.open();
+    assert.equal((await poll).state, 'queued');
+    const row = await read(database, id);
+    assert.equal(row.state, 'queued');
+    assert.equal(row.error, null);
+  } finally { await database.destroy(); }
+});
+
+test('a worker finalizer that checked the queue before a retry does not fail the retried, live intake', async () => {
+  const { database, id } = await fixture();
+  try {
+    const queue: { current: IntakeJobState } = { current: { state: 'absent' } };
+    const checking = gate();
+    const suspended = gate();
+    let first = true;
+    const finalizing = finalizeSubmissionIntakeFailure(intakeJob(id), new Error(ADMISSION), {
+      database, findSubmission: (issue: IssueJobData) => findIssueSubmission(issue, database),
+      job: async () => {
+        if (!first) return queue.current;
+        first = false; checking.open(); await suspended.opened;
+        return { state: 'absent' };
+      },
+    });
+    await checking.opened;
+    // A poll records the exhausted intake from its retained failure, and the user retries it.
+    const failed = await reconcileSubmissionIntake(database, await read(database, id), evidence({ state: 'failed', timestamp: 1_000, reason: ADMISSION }));
+    assert.equal(failed.state, 'failed');
+    assert.equal((await resumeTaskSubmission(database, id, retryInto(queue))).state, 'queued');
+    suspended.open();
+    assert.equal(await finalizing, 'unchanged');
+    assert.equal((await read(database, id)).state, 'queued');
+  } finally { await database.destroy(); }
+});
+
+test('an intake failure is not recorded while a retry holds the submission\'s dispatch lock', async () => {
+  const { database, id } = await fixture();
+  try {
+    await database('task_submissions').where({ id }).update({ state: 'failed', error: 'earlier' });
+    const dispatching = gate();
+    const dispatched = gate();
+    const retry = resumeTaskSubmission(database, id, {
+      createIssue: async () => assert.fail('The existing issue is reused'), reconcileIssue: async () => assert.fail('The existing issue is reused'),
+      dispatch: async () => { dispatching.open(); await dispatched.opened; },
+    });
+    await dispatching.opened;
+    // The retry's claim is cleared but its lock is held: a finalizer that read the row before must not write.
+    await database('task_submissions').where({ id }).update({ state: 'queued', dispatch_claim: null });
+    assert.equal(await finalizeSubmissionIntakeFailure(intakeJob(id), new Error(ADMISSION), finalizerDeps(database)), 'busy');
+    assert.equal((await read(database, id)).state, 'queued');
+    dispatched.open();
+    await retry;
+  } finally { await database.destroy(); }
+});
+
+test('the queue evidence finds an intake\'s failures past any number of unrelated log entries', async () => {
+  const { database, id } = await fixture();
+  try {
+    const { FAILURE_LOG_PAGE } = await import('../src/services/taskSubmissionIntake.js');
+    const row = await read(database, id);
+    const created = Date.parse(`${String((row as TaskSubmission & { created_at: string }).created_at).replace(' ', 'T')}Z`);
+    const entry = (correlationId: string, timestamp: number, attempt: number) =>
+      JSON.stringify({ correlationId, timestamp, status: 'failed', error: ADMISSION, executionTimeMs: attempt });
+    // Unrelated jobs from the skew margin on, then the intake's three failures, the first closing a page.
+    const unrelated = Array.from({ length: 2 * FAILURE_LOG_PAGE - 1 }, (_, n) => entry(`other-${n}`, created - 30_000 + n, 0));
+    const log = [...unrelated, entry(id, created + 2 * FAILURE_LOG_PAGE, 1), entry(id, created + 2 * FAILURE_LOG_PAGE, 2), entry(id, created + 2 * FAILURE_LOG_PAGE, 3)];
+    const pages: number[] = [];
+    const client = {
+      zrangebyscore: async (_key: string, _min: number, _max: string, _limit: string, offset: number, count: number) => {
+        pages.push(offset);
+        const page = log.slice(offset, offset + count);
+        // An older job's entry lands below the offset between pages, shifting the next page back by one.
+        if (pages.length === 2) log.unshift(entry('late', created - 40_000, 0));
+        return page;
+      },
+    };
+    const store = queueSubmissionIntakeEvidence(() => ({ getJob: async () => undefined, client }));
+    assert.deepEqual(await store.failures(row), { timestamp: created + 2 * FAILURE_LOG_PAGE, failures: 3, reason: ADMISSION });
+    assert.deepEqual(pages, [0, FAILURE_LOG_PAGE, 2 * FAILURE_LOG_PAGE]);
+    // And so a legacy submission waiting on that exhausted intake is settled.
+    assert.equal((await reconcileSubmissionIntake(database, row, { job: async () => ({ state: 'absent' }), failures: () => store.failures(row) })).state, 'failed');
   } finally { await database.destroy(); }
 });
