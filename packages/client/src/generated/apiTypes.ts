@@ -659,6 +659,8 @@ export interface TaskSummary {
   prState?: "merged";
   /** Final review score of the run, when it was reviewed. */
   score: number | null;
+  /** What the review that recorded `score` came to: `clean` when every reviewer succeeded and none reported an actionable finding. Null when the run was not a review or its outcome is unknown. */
+  reviewOutcome: "clean" | "findings" | "reviewer_failed" | null;
   /** Assignees of the GitHub issue or pull request, as last synced; empty when nobody is assigned. */
   assignees: AttributedUser[];
   [key: string]: unknown;

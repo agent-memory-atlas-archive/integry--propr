@@ -10425,6 +10425,15 @@ components:
           type:
             - number
             - "null"
+        reviewOutcome:
+          anyOf:
+            - type: string
+              enum:
+                - clean
+                - findings
+                - reviewer_failed
+            - type: "null"
+          description: "What the review that recorded `score` came to: `clean` when every reviewer succeeded and none reported an actionable finding. Null when the run was not a review or its outcome is unknown."
         assignees:
           type: array
           items:
@@ -10453,6 +10462,7 @@ components:
         - llmProvider
         - planIssueStatus
         - score
+        - reviewOutcome
         - assignees
       additionalProperties: {}
       description: One task run as listed by `GET /api/tasks`.

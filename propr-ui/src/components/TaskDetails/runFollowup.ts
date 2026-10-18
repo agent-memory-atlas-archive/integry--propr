@@ -11,14 +11,16 @@ export interface RunFollowup {
 }
 
 /**
- * A review that found nothing has nothing to fix; its summary is read as the
- * Inbox reads the review's recap. Findings or a failed reviewer in the recap
- * outweigh a perfect score, which only decides when the recap says neither.
+ * A review that found nothing has nothing to fix. The outcome the review's
+ * completion recorded decides when the task carries one; otherwise its summary
+ * is read as the Inbox reads the review's recap. A score alone never reads as
+ * clean, so a nominal 10/10 with findings or a failed reviewer still offers /fix.
  */
 const isCleanReview = (run: TaskRunEntry): boolean => {
+  if (run.task.reviewOutcome) return run.task.reviewOutcome === 'clean';
   const recap = reviewRecapOutcome(run.summary);
   if (recap.reviewerFailed || recap.issueCount > 0 || recap.findings.length > 0) return false;
-  return isIssueFreeReviewRecap(run.summary) || (run.task.score ?? 0) >= 10;
+  return isIssueFreeReviewRecap(run.summary);
 };
 
 /** The task's newest run when it is `taskId`, finished and has a pull request; else null. */

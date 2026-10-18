@@ -173,6 +173,7 @@ export const TaskSummary = component('TaskSummary', z.object({
   planIssueStatus: z.string().nullable(),
   prState: z.literal('merged').optional().describe('`merged` once the run\'s pull request has been merged; absent otherwise.'),
   score: z.number().nullable().describe('Final review score of the run, when it was reviewed.'),
+  reviewOutcome: z.enum(['clean', 'findings', 'reviewer_failed']).nullable().describe('What the review that recorded `score` came to: `clean` when every reviewer succeeded and none reported an actionable finding. Null when the run was not a review or its outcome is unknown.'),
   assignees: z.array(AttributedUser).describe('Assignees of the GitHub issue or pull request, as last synced; empty when nobody is assigned.'),
 }).loose(), 'One task run as listed by `GET /api/tasks`.');
 
