@@ -145,3 +145,25 @@ test('finds and frees the worktree a lost attempt left on its branch in the repo
         await fs.rm(root, { recursive: true, force: true });
     }
 });
+
+test('frees a branch held only by the registration of a worktree whose directory was deleted', async () => {
+    const { root, git, holder } = await leftoverWorktree();
+    try {
+        const head = (await git.revparse([`refs/heads/${BRANCH}`])).trim();
+        await fs.rm(holder, { recursive: true, force: true });
+        const retry = path.join(root, 'pr-3218-merge');
+        const error = await branchInUseError(git, retry);
+        assert.equal(worktreeHoldingBranch(error.message), holder);
+
+        assert.equal(await releaseBranchFromSettledWorktree(git, BRANCH, holder), true);
+
+        const listing = await git.raw(['worktree', 'list', '--porcelain']);
+        assert.ok(listing.includes(`worktree ${holder}\n`), 'the registration is kept');
+        assert.ok(listing.includes(`HEAD ${head}\ndetached`), 'pointing at the same commit, detached');
+        assert.equal((await git.revparse([`refs/heads/${BRANCH}`])).trim(), head, 'the branch keeps its commit');
+        await addWorktreeWithoutTracking(git, retry, BRANCH, { startPoint: `origin/${BRANCH}`, resetBranch: true });
+        assert.equal(await releaseBranchFromSettledWorktree(git, 'other', path.join(root, 'gone')), false, 'an unknown missing holder is left alone');
+    } finally {
+        await fs.rm(root, { recursive: true, force: true });
+    }
+});
