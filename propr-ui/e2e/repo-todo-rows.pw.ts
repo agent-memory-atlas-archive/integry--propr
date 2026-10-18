@@ -1,0 +1,342 @@
+import { expect, test, type Locator, type Page } from '@playwright/test';
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
+
+// Repository To-Do rows against a stateful local to-do store: every action is
+// performed on the real control (trusted touch on phones, mouse and keyboard
+// on desktop) and checked by the PUT/DELETE/reorder requests it sends and the
+// rows the store returns. Nothing else may be written, so no task starts.
+
+const octocat = { id: '583231', login: 'octocat', displayName: 'The Octocat', avatarUrl: null };
+const hubot = { id: '480938', login: 'hubot', displayName: null, avatarUrl: null };
+const NOTE = 'Teach the indexer to resume an interrupted crawl without rescanning';
+const LONG = 'Check invoice dates\nsee https://billing.example.test/invoices/2026/october/reconciliation-report-final';
+const DONE = 'Archive the old release notes';
+const repos = [{ id: 'propr', name: 'integry/propr', enabled: true, visualPreview: { enabled: false, types: ['image'] } }];
+
+const todo = (todoId: string, content: string, extra: Record<string, unknown> = {}) => ({
+  todoId, categoryId: null, content, orderIndex: 0, isCompleted: false, linkedDraftId: null, createdBy: null,
+  linkedIssueRepository: null, linkedIssueNumber: null, linkedTaskId: null,
+  createdAt: '2026-10-18T06:00:00.000Z', updatedAt: '2026-10-18T06:00:00.000Z', ...extra,
+});
+
+interface Write { method: string; path: string; body: unknown }
+
+async function todoStore(page: Page) {
+  const todos = [
+    todo('t-note', NOTE, { orderIndex: 0, createdBy: octocat, linkedDraftId: 'draft-1' }),
+    todo('t-long', LONG, { orderIndex: 1, linkedIssueRepository: 'integry/propr', linkedIssueNumber: 42 }),
+    todo('t-done', DONE, { orderIndex: 2, isCompleted: true, createdBy: hubot, linkedIssueRepository: 'integry/propr', linkedIssueNumber: 7 }),
+  ];
+  const writes: Write[] = [];
+  await page.routeWebSocket('**/socket.io/**', socket => socket.close());
+  await page.route('**/api/**', route => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    const method = request.method();
+    if (method !== 'GET') {
+      writes.push({ method, path: pathname, body: request.postData() ? request.postDataJSON() : null });
+      const item = todos.find(entry => pathname === `/api/repos/todos/${entry.todoId}`);
+      if (item && method === 'PUT') {
+        Object.assign(item, request.postDataJSON(), { updatedAt: '2026-10-18T07:00:00.000Z' });
+        return route.fulfill({ json: item });
+      }
+      if (item && method === 'DELETE') {
+        todos.splice(todos.indexOf(item), 1);
+        return route.fulfill({ json: { success: true } });
+      }
+      if (pathname === '/api/repos/todos/reorder' && method === 'POST') return route.fulfill({ json: { success: true } });
+      return route.fulfill({ status: 503, json: { error: 'Unexpected write in to-do row fixture' } });
+    }
+    const responses: Record<string, unknown> = {
+      '/api/auth/demo-mode': { demoMode: false },
+      '/api/auth/user': { id: octocat.id, login: 'octocat', username: 'octocat', displayName: 'The Octocat', email: null, avatarUrl: null, role: 'admin', permissions: ['instance.manage_settings'], authorizationSource: 'local' },
+      '/api/instance/catalog': { agents: [], repositories: repos },
+      '/api/config/repos': { success: true, repos_to_monitor: repos },
+      '/api/github/repos': { repos: [] },
+      '/api/config/settings': {},
+      '/api/user/repo-preferences': { preferences: {} },
+      '/api/repositories/indexing-status': { repositories: [] },
+      '/api/repos/chat/messages': { messages: [] },
+      '/api/repos/todos': { todos },
+      '/api/repos/todos/categories': { categories: [] },
+      '/api/tasks': { tasks: [], total: 0 },
+      '/api/queue/stats': { active: 0, waiting: 0, completed: 0, failed: 0 },
+      '/api/notifications/unread-count': { unreadCount: 0 },
+      '/api/notifications/preferences': { preferences: {}, quietHours: {}, badgeEnabled: false },
+    };
+    return route.fulfill(pathname in responses ? { json: responses[pathname] } : { status: 503, json: { error: 'Unavailable in to-do row fixture' } });
+  });
+  return { todos, writes };
+}
+
+async function openTodos(page: Page, press: (target: Locator) => Promise<void>) {
+  await page.goto('/repositories');
+  await press(page.getByRole('button', { name: 'Select integry/propr', exact: true }).first());
+  await press(page.getByRole('button', { name: 'To-Dos', exact: true }));
+  await expect(page.getByText(NOTE)).toBeVisible();
+}
+
+const rowOf = (page: Page, content: string) =>
+  page.getByTestId('repo-todo-row').filter({ has: page.getByText(content, { exact: true }) });
+const control = (row: Locator, action: string, content: string) =>
+  row.getByRole('button', { name: `${action} todo: ${content}`, exact: true });
+
+/** Opacity as painted: the product of the element's and every ancestor's opacity. */
+const paintedOpacity = (target: Locator) => target.evaluate(element => {
+  let opacity = 1;
+  for (let node: Element | null = element; node; node = node.parentElement) opacity *= Number(getComputedStyle(node).opacity);
+  return opacity;
+});
+
+type Box = { x: number; y: number; width: number; height: number };
+const overlaps = (a: Box, b: Box) =>
+  a.x < b.x + b.width - 0.5 && b.x < a.x + a.width - 0.5 && a.y < b.y + b.height - 0.5 && b.y < a.y + a.height - 0.5;
+const inside = (inner: Box, outer: Box) =>
+  inner.x >= outer.x - 0.5 && inner.y >= outer.y - 0.5
+  && inner.x + inner.width <= outer.x + outer.width + 0.5 && inner.y + inner.height <= outer.y + outer.height + 0.5;
+
+/** Touch rows: every control is visible, at least 44px square, hit at its centre, and clear of the note and each other. */
+async function expectTouchRow(row: Locator, content: string, controls: Locator[]) {
+  await row.scrollIntoViewIfNeeded();
+  const rowBox = (await row.boundingBox())!;
+  const text = row.getByText(content, { exact: true });
+  const textBox = (await text.boundingBox())!;
+  // The note gets the row's width instead of sharing it with a desktop action strip.
+  expect(textBox.width).toBeGreaterThanOrEqual(rowBox.width * 0.8);
+  expect(await text.evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(0);
+  const boxes: Box[] = [textBox];
+  for (const target of controls) {
+    await expect(target).toBeVisible();
+    await expect.poll(() => paintedOpacity(target)).toBeGreaterThanOrEqual(0.99);
+    const box = (await target.boundingBox())!;
+    expect(box.width).toBeGreaterThanOrEqual(44);
+    expect(box.height).toBeGreaterThanOrEqual(44);
+    expect(inside(box, rowBox)).toBe(true);
+    expect(await target.evaluate((element, { x, y }) => element.contains(document.elementFromPoint(x, y)),
+      { x: box.x + box.width / 2, y: box.y + box.height / 2 })).toBe(true);
+    for (const other of boxes) expect(overlaps(box, other)).toBe(false);
+    boxes.push(box);
+  }
+}
+
+const noPageOverflow = (page: Page) =>
+  page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+
+async function capture(page: Page, name: string) {
+  if (!process.env.PROPR_CAPTURE_PREVIEWS) return;
+  const directory = path.resolve('../.propr/previews');
+  await mkdir(directory, { recursive: true });
+  await page.screenshot({ path: path.join(directory, `${name}.png`), animations: 'disabled' });
+}
+
+for (const width of [320, 390]) {
+  test.describe(`${width}px touch`, () => {
+    test.use({ viewport: { width, height: 844 }, isMobile: true, hasTouch: true });
+
+    test('every row action is a visible 44px tap target and the note keeps its width', async ({ page }) => {
+      const { todos, writes } = await todoStore(page);
+      await openTodos(page, target => target.tap());
+      expect(await page.evaluate(() => matchMedia('(hover: hover)').matches)).toBe(false);
+
+      const note = rowOf(page, NOTE);
+      const long = rowOf(page, LONG);
+      for (const [row, content] of [[note, NOTE], [long, LONG]] as const) {
+        await expectTouchRow(row, content, [
+          row.getByRole('button', { name: `Reorder todo: ${content}` }),
+          control(row, 'Select', content), control(row, 'Complete', content),
+          control(row, 'Edit', content), control(row, 'Delete', content),
+        ]);
+      }
+      // A 65-character note reads in a couple of lines, not a narrow column.
+      const lineHeight = await note.getByText(NOTE).evaluate(node => parseFloat(getComputedStyle(node).lineHeight));
+      expect((await note.getByText(NOTE).boundingBox())!.height).toBeLessThanOrEqual(lineHeight * 3 + 1);
+      // Attribution and linked metadata stay on the row.
+      await expect(note.getByRole('group', { name: 'Created by @octocat' })).toBeVisible();
+      await expect(note.getByText('Linked to plan')).toBeVisible();
+      await expect(long.getByRole('link', { name: '#42' })).toBeVisible();
+
+      const completed = page.getByRole('button', { name: /Completed Items/ });
+      expect((await completed.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      await completed.tap();
+      const done = rowOf(page, DONE);
+      await expectTouchRow(done, DONE, [control(done, 'Restore', DONE), control(done, 'Delete', DONE)]);
+      await expect(done.getByRole('link', { name: '#7' })).toBeVisible();
+      expect(await noPageOverflow(page)).toBeLessThanOrEqual(0);
+      expect(writes).toEqual([]);
+      expect(todos).toHaveLength(3);
+      if (process.env.PROPR_CAPTURE_PREVIEWS) {
+        // Last step: a capture drops touch emulation. Show every row at once.
+        await page.setViewportSize({ width, height: 1000 });
+        await note.evaluate(node => node.closest('.overflow-y-auto')?.scrollTo(0, 0));
+        await capture(page, `todo-rows-touch-${width}`);
+      }
+    });
+
+    test('select, edit, complete, restore and delete by touch', async ({ page }) => {
+      const { todos, writes } = await todoStore(page);
+      await openTodos(page, target => target.tap());
+      const note = rowOf(page, NOTE);
+
+      await control(note, 'Select', NOTE).tap();
+      await expect(control(note, 'Select', NOTE)).toHaveAttribute('aria-pressed', 'true');
+      await expect(page.getByRole('button', { name: 'Create Plan from 1 Item' })).toBeVisible();
+
+      const long = rowOf(page, LONG);
+      await control(long, 'Edit', LONG).tap();
+      const editor = page.getByRole('textbox', { name: 'Edit todo' });
+      await expect(editor).toBeFocused();
+      await editor.fill('Check invoice dates against the account locale');
+      await editor.press('Enter');
+      await expect(page.getByText('Check invoice dates against the account locale', { exact: true })).toBeVisible();
+
+      await control(note, 'Complete', NOTE).tap();
+      await expect(page.getByRole('button', { name: 'Create Plan from 1 Item' })).toBeHidden();
+      await page.getByRole('button', { name: /Completed Items/ }).tap();
+      const done = rowOf(page, DONE);
+      await control(done, 'Restore', DONE).tap();
+      await expect(control(rowOf(page, DONE), 'Complete', DONE)).toBeVisible();
+      await control(rowOf(page, NOTE), 'Delete', NOTE).tap();
+      await expect(page.getByText(NOTE)).toHaveCount(0);
+      await control(rowOf(page, DONE), 'Delete', DONE).tap();
+      await expect(page.getByText(DONE)).toHaveCount(0);
+
+      expect(writes).toEqual([
+        { method: 'PUT', path: '/api/repos/todos/t-long', body: { content: 'Check invoice dates against the account locale' } },
+        { method: 'PUT', path: '/api/repos/todos/t-note', body: { isCompleted: true } },
+        { method: 'PUT', path: '/api/repos/todos/t-done', body: { isCompleted: false } },
+        { method: 'DELETE', path: '/api/repos/todos/t-note', body: null },
+        { method: 'DELETE', path: '/api/repos/todos/t-done', body: null },
+      ]);
+      expect(todos.map(item => [item.todoId, item.isCompleted])).toEqual([['t-long', false]]);
+    });
+  });
+}
+
+test.describe('desktop', () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test('rows stay compact and reveal edit/delete on hover', async ({ page }) => {
+    const { writes } = await todoStore(page);
+    await openTodos(page, target => target.click());
+    await page.mouse.move(0, 0);
+    const note = rowOf(page, NOTE);
+    const edit = control(note, 'Edit', NOTE);
+    // One dense row with no action bar under the note: the original 16px checkbox,
+    // 20px check and 20px icon buttons beside it.
+    const noteText = (await note.getByText(NOTE).boundingBox())!;
+    const noteContent = (await note.getByText(NOTE).locator('..').boundingBox())!;
+    expect((await note.boundingBox())!.height).toBeLessThanOrEqual(noteContent.height + 24);
+    expect((await edit.boundingBox())!.y).toBeLessThan(noteText.y + 12);
+    expect((await control(note, 'Select', NOTE).boundingBox())!).toMatchObject({ width: 16, height: 16 });
+    expect((await control(note, 'Complete', NOTE).boundingBox())!).toMatchObject({ width: 20, height: 20 });
+    expect((await edit.boundingBox())!).toMatchObject({ width: 20, height: 20 });
+    await expect.poll(() => paintedOpacity(edit)).toBe(0);
+
+    await note.hover();
+    await expect.poll(() => paintedOpacity(edit)).toBe(1);
+    await edit.click();
+    const editor = page.getByRole('textbox', { name: 'Edit todo' });
+    await editor.fill('Discarded edit');
+    await editor.press('Escape');
+    await expect(page.getByText(NOTE, { exact: true })).toBeVisible();
+    await expect(edit).toBeFocused();
+    await edit.click();
+    await editor.fill('Resume crawls from the last checkpoint');
+    // Clicking away saves, as before.
+    await page.getByRole('heading', { name: 'To-Dos' }).click();
+    await expect(page.getByText('Resume crawls from the last checkpoint', { exact: true })).toBeVisible();
+
+    const long = rowOf(page, LONG);
+    const grip = long.getByRole('button', { name: `Reorder todo: ${LONG}` });
+    const gripBox = (await grip.boundingBox())!;
+    const target = (await page.getByText('Resume crawls from the last checkpoint').boundingBox())!;
+    await page.mouse.move(gripBox.x + gripBox.width / 2, gripBox.y + gripBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(gripBox.x + gripBox.width / 2, target.y, { steps: 10 });
+    await page.mouse.move(gripBox.x + gripBox.width / 2, target.y - 4, { steps: 4 });
+    await page.mouse.up();
+    await expect.poll(() => writes.length).toBe(2);
+    // Reordering active rows leaves the category's completed to-do in place.
+    await expect(page.getByRole('button', { name: /Completed Items/ })).toContainText('1');
+
+    await page.getByRole('button', { name: /Completed Items/ }).click();
+    const done = rowOf(page, DONE);
+    const remove = control(done, 'Delete', DONE);
+    await page.mouse.move(0, 0);
+    await expect.poll(() => paintedOpacity(remove)).toBe(0);
+    await done.hover();
+    await expect.poll(() => paintedOpacity(remove)).toBeGreaterThan(0.5);
+    await remove.click();
+    await expect(page.getByText(DONE)).toHaveCount(0);
+
+    expect(writes).toEqual([
+      { method: 'PUT', path: '/api/repos/todos/t-note', body: { content: 'Resume crawls from the last checkpoint' } },
+      { method: 'POST', path: '/api/repos/todos/reorder', body: { repository: 'integry/propr', items: [{ id: 't-long', orderIndex: 0 }, { id: 't-note', orderIndex: 1 }] } },
+      { method: 'DELETE', path: '/api/repos/todos/t-done', body: null },
+    ]);
+  });
+
+  test('keyboard focus exposes every row action', async ({ page }) => {
+    const { writes } = await todoStore(page);
+    await openTodos(page, target => target.click());
+    await page.mouse.move(0, 0);
+    const note = rowOf(page, NOTE);
+    const select = control(note, 'Select', NOTE);
+    const edit = control(note, 'Edit', NOTE);
+
+    await note.getByRole('button', { name: `Reorder todo: ${NOTE}` }).focus();
+    await page.keyboard.press('Tab');
+    await expect(select).toBeFocused();
+    await page.keyboard.press('Space');
+    await expect(select).toHaveAttribute('aria-pressed', 'true');
+    await page.keyboard.press('Tab');
+    await expect(control(note, 'Complete', NOTE)).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(edit).toBeFocused();
+    // Focus, not hover, reveals the strip, with a visible focus ring.
+    await expect.poll(() => paintedOpacity(edit)).toBe(1);
+    expect(await edit.evaluate(node => getComputedStyle(node).boxShadow)).not.toBe('none');
+    await capture(page, 'todo-rows-desktop-keyboard-focus');
+    await page.keyboard.press('Enter');
+    const editor = page.getByRole('textbox', { name: 'Edit todo' });
+    await expect(editor).toBeFocused();
+    await page.keyboard.press('End');
+    await page.keyboard.type(' quickly');
+    await page.keyboard.press('Enter');
+    await expect(page.getByText(`${NOTE} quickly`, { exact: true })).toBeVisible();
+    const edited = rowOf(page, `${NOTE} quickly`);
+    // Leaving the editor from the keyboard hands focus back to Edit.
+    await expect(control(edited, 'Edit', `${NOTE} quickly`)).toBeFocused();
+    await page.keyboard.press('Tab');
+    const remove = control(edited, 'Delete', `${NOTE} quickly`);
+    await expect(remove).toBeFocused();
+    await expect.poll(() => paintedOpacity(remove)).toBe(1);
+
+    const long = rowOf(page, LONG);
+    await control(long, 'Complete', LONG).focus();
+    await page.keyboard.press('Enter');
+    const completed = page.getByRole('button', { name: /Completed Items/ });
+    await completed.focus();
+    await page.keyboard.press('Enter');
+    await expect(completed).toHaveAttribute('aria-expanded', 'true');
+    const restore = control(rowOf(page, DONE), 'Restore', DONE);
+    await restore.focus();
+    await page.keyboard.press('Tab');
+    await expect(rowOf(page, DONE).getByRole('link', { name: '#7' })).toBeFocused();
+    await page.keyboard.press('Tab');
+    const doneDelete = control(rowOf(page, DONE), 'Delete', DONE);
+    await expect(doneDelete).toBeFocused();
+    await expect.poll(() => paintedOpacity(doneDelete)).toBeGreaterThan(0.5);
+    await restore.focus();
+    await page.keyboard.press('Enter');
+    await expect(control(rowOf(page, DONE), 'Complete', DONE)).toBeVisible();
+
+    expect(writes).toEqual([
+      { method: 'PUT', path: '/api/repos/todos/t-note', body: { content: `${NOTE} quickly` } },
+      { method: 'PUT', path: '/api/repos/todos/t-long', body: { isCompleted: true } },
+      { method: 'PUT', path: '/api/repos/todos/t-done', body: { isCompleted: false } },
+    ]);
+    await expect(page.getByRole('button', { name: 'Create Plan from 1 Item' })).toBeVisible();
+  });
+});
