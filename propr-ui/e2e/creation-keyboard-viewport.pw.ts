@@ -9,6 +9,11 @@ const layout = { width: 384, height: 692 };
 const keyboard = { height: 382.133, offsetTop: 186.133 };
 const draft = 'Disposable draft typed above the keyboard';
 
+// Measured on an Android 16 Pixel 5 emulator in Chrome with Gboard in landscape: an 851×289 layout
+// viewport leaves a 65px band at the top, too short for the 41px header and a 44px action together.
+const shortLayout = { width: 851, height: 289 };
+const shortKeyboard: Band = { height: 65.09091186523438, offsetTop: 0 };
+
 // Measured on a Samsung SM-S908B (Android 16) in landscape: the layout viewport is 748×298 and
 // the keyboard (not an OS fullscreen editor) leaves an 89px band 208px down.
 const landscapeLayout = { width: 748, height: 298 };
@@ -118,9 +123,9 @@ test('New task opened with the keyboard up is placed from the current viewport, 
   await expectShown([dialog.getByRole('heading', { name: 'New task' }), dialog.getByRole('button', { name: 'Close task creation' })], keyboard);
 });
 
-/** The part of `target` the reader sees: inside the band, below the pane's sticky header, and not clipped by a scroll area. */
+/** The part of `target` the reader sees: inside the band, below the pane's header (unless in it), and not clipped by a scroll area. */
 const uncovered = async (target: Locator, header: Locator, band: Band) => header.evaluate((head, [element, { offsetTop, height }]) => {
-  let low = Math.max(offsetTop, head.getBoundingClientRect().bottom);
+  let low = head.contains(element) ? offsetTop : Math.max(offsetTop, head.getBoundingClientRect().bottom);
   let high = offsetTop + height;
   for (let parent = element.parentElement; parent; parent = parent.parentElement) {
     if (!/(auto|scroll|hidden|clip)/.test(getComputedStyle(parent).overflowY)) continue;
@@ -142,7 +147,8 @@ async function scrollToShow(page: Page, touch: CDPSession | null, header: Locato
     // The finger rests in the pane's side padding, below the header, so no drag starts on a control.
     const headerBox = (await header.boundingBox())!;
     const x = Math.round(headerBox.x + 8);
-    const y = Math.round((headerBox.y + headerBox.height + band.offsetTop + band.height) / 2);
+    // A header that scrolls with the pane (the shortest bands) may have left the band entirely.
+    const y = Math.round((Math.max(headerBox.y + headerBox.height, band.offsetTop) + band.offsetTop + band.height) / 2);
     for (let step = 0; step < 40; step++) {
       const { top, bottom } = await uncovered(target, header, band);
       if (top >= -0.5 && bottom >= -0.5) break;
@@ -205,6 +211,7 @@ for (const shell of shells) {
     await expectVisible([layer], landscapeKeyboard);
     await expectShown([heading, close], landscapeKeyboard);
     expect((await close.boundingBox())!.height).toBe(40);
+    expect(await header.evaluate(element => getComputedStyle(element).position)).toBe('sticky');
     await expect(prompt).toBeFocused();
     // The focused prompt shows its start below the header rather than under it.
     const field = await uncovered(prompt, header, landscapeKeyboard);
@@ -315,5 +322,79 @@ for (const shell of shells) {
     await expect(field).toHaveValue([...lines.slice(0, 8), 'Draft line 9 edited', ...lines.slice(9)].join('\n'));
     await expectCaretShown(taller);
     await captureVisible(page, `${shell.preview}-landscape-caret-line`, taller);
+  });
+}
+
+for (const shell of shells) {
+  test(`${shell.name} stays usable in the measured 65px landscape keyboard band, scrolling its header away`, async ({ page, browserName }) => {
+    await installKeyboardViewport(page, shortLayout);
+    const requests = await fixture(page);
+    await stubGoals(page);
+    await page.setViewportSize(shortLayout);
+    await page.goto(shell.path);
+    const dialog = page.getByRole('dialog', { name: shell.name });
+    const header = dialog.locator('header');
+    const heading = dialog.getByRole('heading', { name: shell.name });
+    const close = dialog.getByRole('button', { name: shell.close });
+    const prompt = dialog.getByLabel('Prompt', { exact: true });
+    const layer = page.locator('body > .app-modal-layer');
+    await expect(prompt).toBeFocused();
+    test.setTimeout(90_000);
+    const touch = browserName === 'chromium' ? await page.context().newCDPSession(page) : null;
+
+    const repository = dialog.getByText('Select a repository', { exact: true });
+    if (await repository.isVisible()) {
+      await repository.click();
+      await page.getByRole('button', { name: /acme.*billing/ }).click();
+    }
+    const lines = Array.from({ length: 6 }, (_, line) => `Draft line ${line + 1}`);
+    await prompt.fill(lines.join('\n'));
+    await dialog.locator('summary', { hasText: 'Advanced Options' }).click();
+    const agent = dialog.getByLabel('Agent', { exact: true });
+    const model = dialog.getByLabel('Model', { exact: true });
+    await agent.selectOption(shell.agent);
+    await model.selectOption('gpt-6-astra');
+    await prompt.focus();
+    await prompt.evaluate((element, at) => (element as HTMLTextAreaElement).setSelectionRange(at, at), lines.slice(0, 4).join('\n').length);
+
+    await setKeyboard(page, shortKeyboard);
+    await expectVisible([layer], shortKeyboard);
+    // The header scrolls with the pane instead of covering all but a sliver of it.
+    expect(await header.evaluate(element => getComputedStyle(element).position)).toBe('static');
+    await expect(prompt).toBeFocused();
+    const caret = await caretShown(prompt, header, shortKeyboard);
+    expect(caret.top, 'the caret line starts inside the band').toBeGreaterThanOrEqual(-0.5);
+    expect(caret.bottom, 'the caret line ends above the keyboard').toBeGreaterThanOrEqual(-0.5);
+    await captureVisible(page, `${shell.preview}-short-keyboard`, shortKeyboard);
+
+    // Each action scrolls wholly into the band and takes a tap at its centre, 44px tall,
+    // including at the pane's furthest scroll; the reader scrolls back up to Close.
+    const pane = header.locator('..');
+    const actions = shell.actions.map(name => dialog.getByRole('button', { name, exact: true }));
+    for (const target of [model, ...actions]) await scrollToShow(page, touch, header, target, shortKeyboard);
+    for (const action of actions) expect((await action.boundingBox())!.height).toBe(44);
+    await pane.evaluate(element => { element.scrollTop = element.scrollHeight; });
+    await expectShown([actions.at(-1)!], shortKeyboard);
+    await captureVisible(page, `${shell.preview}-short-keyboard-actions`, shortKeyboard);
+    for (const target of [agent, dialog.getByRole('button', { name: /billing/ }).first(), close]) await scrollToShow(page, touch, header, target, shortKeyboard);
+    await expectShown([heading, close], shortKeyboard);
+    expect((await close.boundingBox())!.height).toBe(40);
+    await captureVisible(page, `${shell.preview}-short-keyboard-close`, shortKeyboard);
+    await expect(prompt).toBeFocused();
+
+    // Typing still lands on the caret's line and keeps it in view as the band resizes.
+    await setKeyboard(page, { height: 70, offsetTop: 0 }, ['resize']);
+    await page.keyboard.type(' edited');
+    const edited = await caretShown(prompt, header, { height: 70, offsetTop: 0 });
+    expect(edited.top).toBeGreaterThanOrEqual(-0.5);
+    expect(edited.bottom).toBeGreaterThanOrEqual(-0.5);
+
+    // Dismissing the keyboard restores the stylesheet layout with everything kept.
+    await setKeyboard(page, { height: shortLayout.height, offsetTop: 0 });
+    await expectUnframed(layer);
+    await expect(prompt).toHaveValue([...lines.slice(0, 3), 'Draft line 4 edited', ...lines.slice(4)].join('\n'));
+    await expect(agent).toHaveValue(shell.agent);
+    await expect(model).toHaveValue('gpt-6-astra');
+    expect(requests.filter(request => !request.startsWith('GET '))).toEqual([]);
   });
 }

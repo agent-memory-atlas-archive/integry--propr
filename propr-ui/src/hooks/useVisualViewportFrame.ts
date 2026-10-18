@@ -107,8 +107,9 @@ function revealWithin(element: HTMLElement, layer: HTMLElement, top: number, bot
   const heading = labelledBy ? document.getElementById(labelledBy) : null;
   if (!heading || !container.contains(heading)) return;
   let hidden = edge - heading.getBoundingClientRect().top;
-  // Bringing the heading back must not push the line being edited under the keyboard.
-  if (editing) hidden = Math.min(hidden, high - caretLine(editing, editing.getBoundingClientRect()).bottom);
+  // Bringing the heading back must not push the line being edited under the keyboard
+  // (rounded down, as a scroll position may be whole pixels).
+  if (editing) hidden = Math.min(hidden, Math.floor(high - caretLine(editing, editing.getBoundingClientRect()).bottom));
   if (hidden > 0) container.scrollTop = Math.max(before, container.scrollTop - hidden);
 }
 
