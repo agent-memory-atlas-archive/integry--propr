@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { API_BASE_URL, getDesktopConnectionScope, subscribeDesktopConnectionScope } from '../../api/apiClient';
 import { getTaskFollowupRuns, type PostFollowupResponse } from '../../api/proprApi';
 import { useCurrentUser } from '../../contexts/AuthContext';
+import { getRendererProfileStateGeneration, subscribeRendererProfileStateGeneration } from '../../desktop/rendererProfileState';
 
 /** A run the accepted follow-up started, as the page shows it. */
 export interface FollowupHandoffRun {
@@ -37,17 +38,45 @@ const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 export const isTerminalRunStatus = (status: string) => TERMINAL_STATUSES.has(status.toLowerCase());
 
 /**
- * The instance and account a follow-up was sent from: the desktop profile and
- * transport (or the browser), the instance URL and the signed-in user. A
- * handoff recorded under one scope is never shown, polled or followed in
- * another, so a response that lands after a switch cannot cross it.
+ * The instance and account a follow-up was sent from: the saved desktop
+ * profile (or the browser), the instance URL and the signed-in user. A handoff
+ * is remembered under this scope, so reconnecting the same profile as the same
+ * user finds it again, while another account, profile or endpoint never sees it.
+ * The transport is deliberately not part of it: every activation renews that.
  */
 export const followupHandoffScope = (userId: string | null | undefined): string | null => {
   if (!userId) return null;
   const connection = getDesktopConnectionScope();
-  const instance = connection ? `${connection.profileId}\u0000${connection.transportScope ?? ''}` : 'browser';
-  return JSON.stringify([instance, API_BASE_URL || window.location.origin, userId]);
+  return JSON.stringify([connection ? connection.profileId : 'browser', API_BASE_URL || window.location.origin, userId]);
 };
+
+/**
+ * The live connection a post or lookup was sent over. A response is applied
+ * only while that same connection is still current; one that lands after a
+ * reconnect, even of the same profile, belongs to a connection that is gone.
+ * Nor is one applied once the desktop has cleared this renderer's state for a
+ * replaced identity, even before the new connection is published.
+ */
+interface ConnectionGeneration {
+  connection: ReturnType<typeof getDesktopConnectionScope>;
+  endpoint: string;
+  cleared: number;
+}
+
+const currentGeneration = (): ConnectionGeneration => ({
+  connection: getDesktopConnectionScope(), endpoint: API_BASE_URL, cleared: getRendererProfileStateGeneration(),
+});
+const isCurrentGeneration = (generation: ConnectionGeneration) => {
+  const current = currentGeneration();
+  return current.connection === generation.connection && current.endpoint === generation.endpoint
+    && current.cleared === generation.cleared;
+};
+
+/** What a submission captures when it starts: where its receipt is remembered, and the connection it must still be on. */
+export interface FollowupSendScope {
+  scope: string | null;
+  generation: ConnectionGeneration;
+}
 
 export const followupHandoffKey = (scope: string, sourceTaskId: string) => `${STORAGE_PREFIX}:${JSON.stringify([scope, sourceTaskId])}`;
 
@@ -66,12 +95,15 @@ function readStored(key: string | null, now = Date.now()): StoredHandoff | null 
   }
 }
 
-function writeStored(key: string, value: StoredHandoff | null): void {
+/** Records the handoff in this tab's storage; false when storage is unavailable and did not take it. */
+function writeStored(key: string, value: StoredHandoff | null): boolean {
   try {
     if (value) sessionStorage.setItem(key, JSON.stringify(value));
     else sessionStorage.removeItem(key);
+    return true;
   } catch {
     // Storage may be unavailable; the handoff then lasts as long as the page.
+    return false;
   } finally {
     window.dispatchEvent(new Event(CHANGE_EVENT));
   }
@@ -105,19 +137,28 @@ const sameRuns = (a: FollowupHandoffRun[] | undefined, b: FollowupHandoffRun[]) 
 export function useFollowupHandoff(sourceTaskId: string | undefined) {
   const user = useCurrentUser();
   const userId = user?.id ?? null;
-  // Republished with the desktop connection, so a profile or transport switch moves the scope with it.
+  // Republished with the desktop connection: a profile switch moves the scope, and any reconnect restarts the lookup on the new connection.
   const connection = useSyncExternalStore(subscribeDesktopConnectionScope, getDesktopConnectionScope);
   const scope = useMemo(() => followupHandoffScope(userId), [userId, connection]); // eslint-disable-line react-hooks/exhaustive-deps
   const key = scope && sourceTaskId ? followupHandoffKey(scope, sourceTaskId) : null;
   const raw = useSyncExternalStore(subscribeStored, () => {
     try { return key ? sessionStorage.getItem(key) : null; } catch { return null; }
   });
-  // Without storage, the request is held for this page only.
-  const [memory, setMemory] = useState<{ key: string; value: StoredHandoff } | null>(null);
+  // Only a request storage could not take is held here, for this page only. Once storage holds a
+  // request, storage alone is authoritative: an entry the desktop cleared on an identity change stays gone.
+  // A held request is bound to the renderer state it was recorded in, so it is dropped exactly when the
+  // desktop clears that state for a replaced identity, and survives a renewal of the same one as storage does.
+  const cleared = useSyncExternalStore(subscribeRendererProfileStateGeneration, getRendererProfileStateGeneration);
+  const [memory, setMemory] = useState<{ key: string; cleared: number; value: StoredHandoff } | null>(null);
+  const memoryCurrent = memory !== null && memory.key === key && memory.cleared === cleared;
   const stored = useMemo(() => {
     const fromStorage = raw ? readStored(key) : null;
-    return fromStorage ?? (memory && memory.key === key ? memory.value : null);
-  }, [raw, key, memory]);
+    return fromStorage ?? (memoryCurrent ? memory.value : null);
+  }, [raw, key, memory, memoryCurrent]);
+  // A held request from renderer state the desktop has since cleared is dropped rather than kept for a later match.
+  useEffect(() => {
+    if (memory && memory.cleared !== cleared) setMemory(null);
+  }, [memory, cleared]);
 
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
@@ -125,15 +166,17 @@ export function useFollowupHandoff(sourceTaskId: string | undefined) {
   keyRef.current = key;
 
   const save = useCallback((targetKey: string, value: StoredHandoff | null) => {
-    writeStored(targetKey, value);
-    setMemory(value ? { key: targetKey, value } : null);
+    const persisted = writeStored(targetKey, value);
+    setMemory(value && !persisted ? { key: targetKey, cleared: getRendererProfileStateGeneration(), value } : null);
   }, []);
 
-  /** The scope a submission starts in; `accept` records its receipt only while that scope is current. */
-  const captureScope = useCallback(() => scopeRef.current, []);
+  /** The scope and connection a submission starts in; `accept` records its receipt only while both are current. */
+  const captureScope = useCallback((): FollowupSendScope => ({ scope: scopeRef.current, generation: currentGeneration() }), []);
 
-  const accept = useCallback((receipt: PostFollowupResponse, sentScope: string | null): boolean => {
-    if (!sourceTaskId || !sentScope || sentScope !== scopeRef.current || !isAcceptedIssueRetry(receipt, sourceTaskId)) return false;
+  const accept = useCallback((receipt: PostFollowupResponse, sent: FollowupSendScope): boolean => {
+    const sentScope = sent.scope;
+    if (!sourceTaskId || !sentScope || sentScope !== scopeRef.current || !isCurrentGeneration(sent.generation)
+      || !isAcceptedIssueRetry(receipt, sourceTaskId)) return false;
     save(followupHandoffKey(sentScope, sourceTaskId), {
       sourceTaskId, commentId: receipt.commentId, issueNumber: receipt.issueNumber, acceptedAt: Date.now(),
     });
@@ -152,6 +195,7 @@ export function useFollowupHandoff(sourceTaskId: string | undefined) {
     if (!stored || !waiting || !key || !sourceTaskId) return;
     const requestScope = scope;
     const requestKey = key;
+    const requestGeneration = currentGeneration();
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let cancelled = false;
@@ -159,8 +203,8 @@ export function useFollowupHandoff(sourceTaskId: string | undefined) {
     const lookup = async () => {
       try {
         const result = await getTaskFollowupRuns(sourceTaskId, stored.commentId, { signal: controller.signal });
-        // A response that lands after the account, instance or task changed belongs to none of them.
-        if (cancelled || scopeRef.current !== requestScope || keyRef.current !== requestKey) return;
+        // A response that lands after the account, instance, connection or task changed belongs to none of them.
+        if (cancelled || scopeRef.current !== requestScope || keyRef.current !== requestKey || !isCurrentGeneration(requestGeneration)) return;
         if (result.sourceTaskId !== sourceTaskId || result.commentId !== stored.commentId || !Array.isArray(result.runs)) return;
         const found = result.runs
           .filter(run => typeof run?.taskId === 'string' && run.taskId !== sourceTaskId)
@@ -178,7 +222,7 @@ export function useFollowupHandoff(sourceTaskId: string | undefined) {
       controller.abort();
       if (timer) clearTimeout(timer);
     };
-  }, [stored, waiting, key, scope, sourceTaskId, save, pollTick]);
+  }, [stored, waiting, key, scope, connection, sourceTaskId, save, pollTick]);
 
   // A reconnect or a return to the tab looks again at once rather than at the next interval.
   useEffect(() => {
