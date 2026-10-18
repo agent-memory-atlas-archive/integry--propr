@@ -1,4 +1,5 @@
 import { sealSubmissionExtensions } from '../../core/src/services/taskSubmissionService.js';
+import { reconcileSubmissionIntake, type SubmissionIntakeEvidence } from '../../core/src/services/taskSubmissionIntake.js';
 import { ExtensionError, ExtensionProfileStore } from '../../core/src/extensions/extensionProfileStore.js';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'fs-extra';
@@ -323,6 +324,8 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
   enqueue: typeof enqueueIssueImplementationJob;
   images: SubmissionImageUploadServices;
   completeTodos: typeof completeTodosForIssue;
+  /** The queue's evidence of a queued submission's intake; without it a queued submission is reported as stored. */
+  intake: SubmissionIntakeEvidence;
 }> }) {
   const checkAccess = services.authorize ?? authorizeTaskSubmissionRepository;
   const resolveRouting = services.routing ?? routing;
@@ -394,10 +397,19 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
     } catch (error) { await sendError(req, res, error); }
     finally { await removeTemporaryGoalUploads(files); }
   };
+  // A queued submission whose intake ended before any task, unrecorded, is reported failed and so retryable.
+  const reconcileIntake = async (row: TaskSubmission) => {
+    if (!services.intake) return row;
+    try { return await reconcileSubmissionIntake(db, row, services.intake); }
+    catch (error) {
+      logger.warn({ error: (error as Error).message, submissionId: row.id }, 'Could not check a queued submission\'s intake');
+      return row;
+    }
+  };
   const get = async (req: Request, res: Response) => {
     const row = await db<TaskSubmission>('task_submissions').where({ submission_key: String(req.params.key), user_id: String(req.user?.id) }).first();
     if (!row) { res.status(404).json({ error: 'Submission not found' }); return; }
-    res.json(publicSubmission(row));
+    res.json(publicSubmission(await reconcileIntake(row)));
   };
   const retry = async (req: Request, res: Response) => {
     try {
@@ -406,6 +418,7 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
       await checkAccess(req, row.repository);
       const payload = JSON.parse(row.payload) as SubmissionPayload;
       await resolveRouting(payload);
+      await reconcileIntake(row);
       res.json(publicSubmission(await resume(row.id)));
     } catch (error) { await sendError(req, res, error); }
   };

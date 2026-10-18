@@ -104,7 +104,11 @@ interface SubmissionServices {
 // The OS releases its write lock on process death; a slow live attempt never expires.
 // Keep these files: unlinking a lock file would let callers lock different inodes.
 const memoryDispatchLocks = new WeakMap<Knex, Set<string>>();
-async function acquireDispatchLock(database: Knex, id: string): Promise<(() => Promise<void>) | null> {
+/**
+ * The submission's dispatch lock, or null while another holder has it. A
+ * retry restores a failed submission to queued only while holding it.
+ */
+export async function acquireDispatchLock(database: Knex, id: string): Promise<(() => Promise<void>) | null> {
   const filename = database.client.config.connection?.filename as string | undefined;
   if (!filename || filename === ':memory:') {
     let locks = memoryDispatchLocks.get(database);
