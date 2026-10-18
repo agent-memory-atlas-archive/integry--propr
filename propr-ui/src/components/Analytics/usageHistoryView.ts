@@ -6,7 +6,7 @@
  * shows up by default instead of being silently filtered away.
  */
 
-import { MAX_USAGE_SERIES, USAGE_SERIES_COLORS, type FlatUsageSeries } from '../usageHistory/usageHistoryModel';
+import type { FlatUsageSeries, UsageSeriesStyle } from '../usageHistory/usageHistoryModel';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -63,8 +63,7 @@ export function writeUsageHistoryView(params: URLSearchParams, view: UsageHistor
   return next;
 }
 
-export interface PlottedSeries extends FlatUsageSeries {
-  color: string;
+export interface PlottedSeries extends FlatUsageSeries, UsageSeriesStyle {
   /** Points as epoch ms, time-ordered. */
   plotted: Array<{ t: number; percent: number }>;
   latest: number | null;
@@ -72,7 +71,7 @@ export interface PlottedSeries extends FlatUsageSeries {
   max: number | null;
 }
 
-export function toPlottedSeries(series: FlatUsageSeries, color: string): PlottedSeries {
+export function toPlottedSeries(series: FlatUsageSeries, style: UsageSeriesStyle): PlottedSeries {
   const plotted = series.points
     .map(point => ({ t: Date.parse(point.t), percent: point.percent }))
     .filter((point): point is { t: number; percent: number } => Number.isFinite(point.t) && typeof point.percent === 'number')
@@ -80,31 +79,11 @@ export function toPlottedSeries(series: FlatUsageSeries, color: string): Plotted
   const values = plotted.map(point => point.percent);
   return {
     ...series,
-    color,
+    ...style,
     plotted,
     latest: values.length ? values[values.length - 1] : null,
     min: values.length ? Math.min(...values) : null,
     max: values.length ? Math.max(...values) : null,
-  };
-}
-
-/** Swatch of a series that is listed but has no line on the chart. */
-export const UNPLOTTED_SERIES_COLOR = '#94A3B8';
-
-/**
- * Which selected series the chart draws, and in what color. The chart draws
- * the first `MAX_USAGE_SERIES` selected ones; the rest stay selected (and in
- * the table) without a line. A drawn series keeps the color it was assigned
- * from the whole answer; one past the palette takes a color no other drawn
- * series is using, so swapping a line in never repaints the others.
- */
-export function planPlottedSeries(selected: PlottedSeries[]): { drawn: PlottedSeries[]; undrawn: PlottedSeries[] } {
-  const drawn = selected.slice(0, MAX_USAGE_SERIES);
-  const used = new Set(drawn.map(entry => entry.color));
-  const free = USAGE_SERIES_COLORS.filter(color => !used.has(color));
-  return {
-    drawn: drawn.map(entry => (entry.color === UNPLOTTED_SERIES_COLOR ? { ...entry, color: free.shift() ?? entry.color } : entry)),
-    undrawn: selected.slice(MAX_USAGE_SERIES).map(entry => ({ ...entry, color: UNPLOTTED_SERIES_COLOR })),
   };
 }
 

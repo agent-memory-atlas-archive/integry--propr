@@ -3,17 +3,25 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getAgentTankHistory, type AgentTankHistoryResponse } from '../../api/revertApi';
 import AgentUsageHistory from './AgentUsageHistory';
-import { USAGE_SERIES_COLORS } from '../usageHistory/usageHistoryModel';
+import { USAGE_SERIES_COLORS, usageSeriesStyle } from '../usageHistory/usageHistoryModel';
 import {
-  UNPLOTTED_SERIES_COLOR,
   buildChartRows,
   parseUsageHistoryView,
-  planPlottedSeries,
   toPlottedSeries,
   writeUsageHistoryView,
 } from './usageHistoryView';
 
 vi.mock('../../api/revertApi', () => ({ getAgentTankHistory: vi.fn() }));
+// jsdom has no layout, so give the chart a fixed size and it draws its lines.
+vi.mock('recharts', async importOriginal => {
+  const actual = await importOriginal<typeof import('recharts')>();
+  const { cloneElement } = await import('react');
+  return {
+    ...actual,
+    ResponsiveContainer: ({ children }: { children: React.ReactElement<{ width?: number; height?: number }> }) =>
+      cloneElement(children, { width: 800, height: 280 }),
+  };
+});
 
 const mockHistory = vi.mocked(getAgentTankHistory);
 const HOUR = 3_600_000;
@@ -168,28 +176,37 @@ describe('AgentUsageHistory', () => {
     await waitFor(() => expect(second.container.querySelector('[data-testid="analytics-usage-history"]')).toBeNull());
   });
 
-  it('keeps metrics past the eight-line limit selectable and swaps them onto the chart', async () => {
+  it('plots every selected metric past the eight-hue palette, telling repeated hues apart by dash', async () => {
     const many = Array.from({ length: 10 }, (_, index) => series(`model:Pool ${index + 1}`, `Pool ${index + 1}`, [index, index + 1]));
     mockHistory.mockResolvedValue({ enabled: true, source: 'propr', agents: [{ agent: 'antigravity', series: many }] });
-    renderPane();
+    const { container } = renderPane();
     const filters = await screen.findByRole('group', { name: 'Filter usage history' });
 
-    // Every metric has a chip; the two past the palette are selected but not drawn.
-    expect(within(filters).getAllByRole('button', { name: /Antigravity · Pool/ })).toHaveLength(10);
-    expect(within(filters).getByRole('button', { name: /Pool 9 9%, not plotted/, pressed: true })).toBeInTheDocument();
-    expect(within(filters).getByRole('button', { name: /Pool 10 10%, not plotted/, pressed: true })).toBeInTheDocument();
-    expect(screen.getByText(/2 selected metrics are not plotted/)).toBeInTheDocument();
+    // All ten metrics are drawn; nothing is left "not plotted".
+    const strokes = () => [...container.querySelectorAll('.recharts-line-curve')]
+      .map(path => [path.getAttribute('stroke'), path.getAttribute('stroke-dasharray')]);
+    await waitFor(() => expect(strokes()).toHaveLength(10));
+    expect(new Set(strokes().map(stroke => stroke.join('|'))).size).toBe(10);
+    expect(strokes()[0]).toEqual([USAGE_SERIES_COLORS[0], null]);
+    expect(strokes()[8]).toEqual([USAGE_SERIES_COLORS[0], usageSeriesStyle(8).dash]);
+    expect(screen.queryByText(/not plotted/)).not.toBeInTheDocument();
+    expect(within(filters).getAllByRole('button', { name: /Antigravity · Pool/, pressed: true })).toHaveLength(10);
+    // A chip's swatch shows the line's dash, so the legend matches the chart.
+    expect(within(filters).getByRole('button', { name: /Pool 9 9%/ }).querySelector('line'))
+      .toHaveAttribute('stroke-dasharray', usageSeriesStyle(8).dash);
 
-    // Hiding a drawn metric hands its line to the next selected one.
+    // Hiding one metric removes only its line; the others keep their style.
     fireEvent.click(within(filters).getByRole('button', { name: /Pool 1 1%/ }));
-    expect(within(filters).getByRole('button', { name: /^Antigravity · Pool 9 9%$/, pressed: true })).toBeInTheDocument();
-    expect(within(filters).getByRole('button', { name: /Pool 10 10%, not plotted/ })).toBeInTheDocument();
-    expect(screen.getByText(/1 selected metric is not plotted/)).toBeInTheDocument();
+    await waitFor(() => expect(strokes()).toHaveLength(9));
+    expect(strokes()[7]).toEqual([USAGE_SERIES_COLORS[0], usageSeriesStyle(8).dash]);
 
-    // The table lists every selected metric, drawn or not.
+    fireEvent.click(screen.getByRole('button', { name: 'Show all' }));
+    await waitFor(() => expect(strokes()).toHaveLength(10));
+
+    // The table lists every selected metric too.
     fireEvent.click(screen.getByRole('button', { name: 'Table' }));
     const table = screen.getByTestId('agent-usage-history-table');
-    expect(within(table).getAllByRole('row')).toHaveLength(1 + 9);
+    expect(within(table).getAllByRole('row')).toHaveLength(1 + 10);
     expect(within(table).getByRole('row', { name: /Pool 10/ })).toHaveTextContent('10%');
   });
 
@@ -210,27 +227,18 @@ describe('usage history view', () => {
       .toBe('period=7d');
   });
 
-  it('gives a series past the palette a color no drawn series is using', () => {
-    const make = (index: number, color: string) => toPlottedSeries({
-      ...series(`k${index}`, `k${index}`, [1]), id: `x:k${index}`, agent: 'x', displayLabel: `k${index}`,
-    }, color);
-    const palette = [...USAGE_SERIES_COLORS];
-    const all = [...palette.map((color, index) => make(index, color)), make(8, UNPLOTTED_SERIES_COLOR), make(9, UNPLOTTED_SERIES_COLOR)];
-
-    const full = planPlottedSeries(all);
-    expect(full.drawn.map(entry => entry.color)).toEqual(palette);
-    expect(full.undrawn.map(entry => entry.id)).toEqual(['x:k8', 'x:k9']);
-
-    const swapped = planPlottedSeries(all.filter(entry => entry.id !== 'x:k2'));
-    expect(swapped.drawn.map(entry => entry.color)).toEqual([...palette.filter((_, index) => index !== 2), palette[2]]);
-    expect(swapped.undrawn.map(entry => [entry.id, entry.color])).toEqual([['x:k9', UNPLOTTED_SERIES_COLOR]]);
+  it('gives every series up to 32 a distinct style, solid for the first eight', () => {
+    const styles = Array.from({ length: 32 }, (_, index) => usageSeriesStyle(index));
+    expect(styles.slice(0, 8)).toEqual(USAGE_SERIES_COLORS.map(color => ({ color })));
+    expect(styles.slice(8).every(style => style.dash)).toBe(true);
+    expect(new Set(styles.map(style => `${style.color}|${style.dash ?? ''}`)).size).toBe(32);
   });
 
   it('carries each series forward between its own readings and not past them', () => {
     const a = toPlottedSeries({ ...series('a', 'a', []), id: 'x:a', agent: 'x', displayLabel: 'a',
-      points: [{ t: new Date(1000).toISOString(), percent: 10 }, { t: new Date(3000).toISOString(), percent: 30 }] }, '#000');
+      points: [{ t: new Date(1000).toISOString(), percent: 10 }, { t: new Date(3000).toISOString(), percent: 30 }] }, { color: '#000' });
     const b = toPlottedSeries({ ...series('b', 'b', []), id: 'x:b', agent: 'x', displayLabel: 'b',
-      points: [{ t: new Date(2000).toISOString(), percent: 50 }] }, '#111');
+      points: [{ t: new Date(2000).toISOString(), percent: 50 }] }, { color: '#111' });
     expect(buildChartRows([a, b])).toEqual([
       { t: 1000, 'x:a': 10, 'x:b': null },
       { t: 2000, 'x:a': 10, 'x:b': 50 },

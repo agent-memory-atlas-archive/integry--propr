@@ -5,12 +5,15 @@
  * the chart exists for. Lines carry their value from one reading to the next,
  * since a quota holds its last measured level until it is measured again. The
  * dashed 50% and 80% rules are the sidebar's warning and critical levels.
+ * Every selected series is drawn; past eight, lines repeat a hue with a dash
+ * pattern rather than being left off.
  */
 
 import React, { useMemo } from 'react';
 import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { axisProps, tooltipStyle } from '../chartConstants';
 import { formatHistoryTick, formatHistoryTime } from '../usageHistory/usageHistoryModel';
+import UsageSeriesSwatch from './UsageSeriesSwatch';
 import { buildChartRows, type ChartRow, type PlottedSeries } from './usageHistoryView';
 
 interface AgentUsageHistoryChartProps {
@@ -42,7 +45,7 @@ const UsageTooltip: React.FC<{
       <ul className="space-y-0.5">
         {values.map(({ entry, value }) => (
           <li key={entry.id} className="flex items-center gap-2">
-            <span className="h-2 w-2 flex-none rounded-full" style={{ backgroundColor: entry.color }} aria-hidden="true" />
+            <UsageSeriesSwatch color={entry.color} dash={entry.dash} />
             <span className="min-w-0 flex-1 truncate text-slate-600">{entry.displayLabel}</span>
             <span className="font-semibold tabular-nums text-slate-800">{Math.round(value * 10) / 10}%</span>
           </li>
@@ -101,6 +104,7 @@ const AgentUsageHistoryChart: React.FC<AgentUsageHistoryChartProps> = ({ series,
               dataKey={entry.id}
               name={entry.displayLabel}
               stroke={entry.color}
+              strokeDasharray={entry.dash}
               strokeWidth={2}
               dot={false}
               activeDot={{ r: 4, stroke: '#FFFFFF', strokeWidth: 2 }}

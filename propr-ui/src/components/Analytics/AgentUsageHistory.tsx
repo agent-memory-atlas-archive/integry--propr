@@ -6,9 +6,8 @@
  * some agents; the series chips are the legend as well as the metric filter,
  * each with its latest value, so identity is never color alone. Colors come
  * from the order of every series the answer holds, not of the visible ones,
- * so hiding a line never repaints the others. Past eight series there is no
- * ninth hue: every series stays selectable and in the table, but the chart draws
- * the first eight selected ones, and hiding one lets the next take its color.
+ * so hiding a line never repaints the others. Past eight series the hues
+ * repeat with a dash pattern, so the chart can draw every selected series.
  *
  * History only reaches back about two weeks, so the pane has its own range
  * instead of following the page timeframe. It renders nothing when Agent Tank
@@ -22,16 +21,15 @@ import { getProviderDisplayName } from '../agentTankMetrics';
 import { SectionHeading } from '../Dashboard/sectionPrimitives';
 import { SkeletonBlock } from '../ui/Skeleton';
 import { SystemAlert } from '../ui/SystemAlert';
-import { MAX_USAGE_SERIES, assignUsageSeriesColors, flattenUsageHistory, readableSeriesLabel, usageMetricLabel } from '../usageHistory/usageHistoryModel';
+import { flattenUsageHistory, readableSeriesLabel, usageMetricLabel, usageSeriesStyle } from '../usageHistory/usageHistoryModel';
 import AgentUsageHistoryChart from './AgentUsageHistoryChart';
 import AgentUsageHistoryTable from './AgentUsageHistoryTable';
+import UsageSeriesSwatch from './UsageSeriesSwatch';
 import {
   USAGE_RANGES,
   USAGE_RANGE_LABELS,
   USAGE_RANGE_MS,
-  UNPLOTTED_SERIES_COLOR,
   parseUsageHistoryView,
-  planPlottedSeries,
   toPlottedSeries,
   writeUsageHistoryView,
   type UsageHistoryView,
@@ -108,16 +106,11 @@ const AgentUsageHistory: React.FC = () => {
 
   const all = useMemo(() => {
     if (read.status !== 'ready') return [];
-    const flat = flattenUsageHistory(read.data.agents);
-    const colors = assignUsageSeriesColors(flat.map(series => series.id));
-    return flat.map(series => toPlottedSeries(series, colors.get(series.id) ?? UNPLOTTED_SERIES_COLOR));
+    return flattenUsageHistory(read.data.agents).map((series, index) => toPlottedSeries(series, usageSeriesStyle(index)));
   }, [read]);
   const agents = useMemo(() => [...new Set(all.map(series => series.agent))], [all]);
   const offered = all.filter(series => !view.hiddenAgents.has(series.agent));
-  const { drawn, undrawn } = planPlottedSeries(offered.filter(series => !view.hiddenSeries.has(series.id)));
-  // The table lists every selected series; only the chart is capped.
-  const visible = [...drawn, ...undrawn];
-  const drawnColors = new Map(drawn.map(series => [series.id, series.color]));
+  const visible = offered.filter(series => !view.hiddenSeries.has(series.id));
 
   if (read.status === 'hidden') return null;
 
@@ -152,7 +145,7 @@ const AgentUsageHistory: React.FC = () => {
   } else {
     body = showTable
       ? <AgentUsageHistoryTable series={visible} />
-      : <AgentUsageHistoryChart series={drawn} since={read.since} until={read.until} />;
+      : <AgentUsageHistoryChart series={visible} since={read.since} until={read.until} />;
   }
 
   return (
@@ -192,23 +185,17 @@ const AgentUsageHistory: React.FC = () => {
                   {offered.filter(series => series.agent === agent).map(series => {
                     const on = !view.hiddenSeries.has(series.id);
                     const value = series.latest === null ? '' : ` ${Math.round(series.latest)}%`;
-                    const color = drawnColors.get(series.id);
-                    const unplotted = on && !color;
                     return (
                       <button
                         key={series.id}
                         type="button"
                         aria-pressed={on}
-                        aria-label={`${series.displayLabel}${value}${unplotted ? ', not plotted' : ''}`}
+                        aria-label={`${series.displayLabel}${value}`}
                         onClick={() => toggleSeries(series.id)}
                         className={chipClass(on)}
-                        title={unplotted ? `${readableSeriesLabel(series)} (not plotted: hide another metric to plot it)` : readableSeriesLabel(series)}
+                        title={readableSeriesLabel(series)}
                       >
-                        <span
-                          className={`h-2 w-2 flex-none rounded-full ${unplotted ? 'border border-slate-400' : ''}`}
-                          style={{ backgroundColor: color ?? (on ? 'transparent' : '#CBD5E1') }}
-                          aria-hidden="true"
-                        />
+                        <UsageSeriesSwatch color={on ? series.color : '#CBD5E1'} dash={series.dash} />
                         <span className="max-w-[160px] truncate">{usageMetricLabel(series)}</span>
                         {value && <span className="tabular-nums text-slate-500">{value.trim()}</span>}
                       </button>
@@ -223,12 +210,6 @@ const AgentUsageHistory: React.FC = () => {
               </button>
             )}
           </div>
-        )}
-        {undrawn.length > 0 && !showTable && (
-          <p className="text-xs text-slate-500">
-            {undrawn.length} selected {undrawn.length === 1 ? 'metric is' : 'metrics are'} not plotted. The chart shows
-            up to {MAX_USAGE_SERIES} at once: hide one to plot another, or see them all in the table.
-          </p>
         )}
         {body}
       </div>

@@ -105,23 +105,24 @@ test('the Analytics page plots every agent and metric, and narrows to a few', as
   await page.screenshot({ path: `${PREVIEWS}/analytics-usage-desktop.png`, clip: await pane.boundingBox() ?? undefined });
 });
 
-test('metrics past the eight-line limit stay selectable and can replace a drawn line', async ({ page }) => {
+test('metrics past the eight-hue palette are all plotted, repeated hues dashed', async ({ page }) => {
   await fixture(page, { width: 1440, height: 900 });
   await stubHistory(page, [], { antigravity: EXTRA_POOLS });
   await page.goto('/analytics');
 
   const pane = page.getByTestId('analytics-usage-history');
-  const lines = pane.getByTestId('agent-usage-history-chart').locator('.recharts-line');
-  await expect(lines).toHaveCount(8);
-  await expect(pane.getByRole('button', { name: /, not plotted$/ })).toHaveCount(2);
-  await expect(pane.getByText('2 selected metrics are not plotted.', { exact: false })).toBeVisible();
+  const lines = pane.getByTestId('agent-usage-history-chart').locator('.recharts-line-curve');
+  await expect(lines).toHaveCount(10);
+  await expect(lines.nth(8)).toHaveAttribute('stroke-dasharray', /\d/);
+  await expect(lines.nth(9)).toHaveAttribute('stroke-dasharray', /\d/);
+  await expect(pane.getByText(/not plotted/)).toHaveCount(0);
+
+  await pane.getByTestId('agent-usage-history-chart').hover({ position: { x: 900, y: 120 } });
+  await expect(page.locator('.recharts-tooltip-wrapper')).toContainText('GPT-OSS Weekly');
+  await page.screenshot({ path: `${PREVIEWS}/analytics-usage-all-metrics.png`, clip: await pane.boundingBox() ?? undefined });
 
   await pane.getByRole('button', { name: /^Claude · Fable/ }).click();
-  await expect(lines).toHaveCount(8);
-  await expect(pane.getByRole('button', { name: /GPT-OSS Weekly \d+%, not plotted$/ })).toBeVisible();
-  await expect(pane.getByRole('button', { name: /Gemini 4 Flash Weekly \d+%$/ })).toBeVisible();
-  await page.screenshot({ path: `${PREVIEWS}/analytics-usage-over-limit.png`, clip: await pane.boundingBox() ?? undefined });
-
+  await expect(lines).toHaveCount(9);
   await pane.getByRole('button', { name: 'Table' }).click();
   await expect(pane.getByTestId('agent-usage-history-table').getByRole('row')).toHaveCount(1 + 9);
   await expect(pane.getByTestId('agent-usage-history-table').getByRole('row', { name: /GPT-OSS/ })).toBeVisible();

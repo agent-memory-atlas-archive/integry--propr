@@ -5,6 +5,7 @@
  */
 
 import React from 'react';
+import UsageSeriesSwatch from './UsageSeriesSwatch';
 import type { PlottedSeries } from './usageHistoryView';
 
 const percent = (value: number | null) => (value === null ? '—' : `${Math.round(value * 10) / 10}%`);
@@ -26,7 +27,7 @@ const AgentUsageHistoryTable: React.FC<{ series: PlottedSeries[] }> = ({ series 
           <tr key={entry.id}>
             <th scope="row" className="py-1.5 pr-3 font-normal">
               <span className="inline-flex items-center gap-2">
-                <span className="h-2 w-2 flex-none rounded-full" style={{ backgroundColor: entry.color }} aria-hidden="true" />
+                <UsageSeriesSwatch color={entry.color} dash={entry.dash} />
                 {entry.displayLabel}
               </span>
             </th>

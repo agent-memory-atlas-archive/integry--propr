@@ -14,7 +14,8 @@ import { stripRemainingSuffix } from '../../utils/usageMetricLabels';
  * Categorical slots in fixed order (validated: adjacent CVD ΔE ≥ 9.1, normal
  * vision ≥ 19.6 on the white surface). Aqua, yellow and magenta sit under 3:1
  * contrast, so every chart that uses them ships a legend with values and a
- * table view. A ninth series reuses no hue; callers fold it away instead.
+ * table view. Past the eighth series the hues repeat with a dash pattern, so
+ * every series can be drawn without two lines looking alike.
  */
 export const USAGE_SERIES_COLORS = [
   '#2a78d6', // blue
@@ -27,7 +28,14 @@ export const USAGE_SERIES_COLORS = [
   '#e34948', // red
 ] as const;
 
-export const MAX_USAGE_SERIES = USAGE_SERIES_COLORS.length;
+/** Stroke patterns for each further round of the palette; solid comes first. */
+export const USAGE_SERIES_DASHES = [undefined, '6 4', '2 3', '10 3 2 3'] as const;
+
+/** How a series is drawn: its hue, and a dash pattern once the hues run out. */
+export interface UsageSeriesStyle {
+  color: string;
+  dash?: string;
+}
 
 /** Stable identity of one agent's metric series. */
 export function usageSeriesId(agent: string, key: string): string {
@@ -98,15 +106,17 @@ export function flattenUsageHistory(agents: AgentTankHistoryAgent[]): FlatUsageS
 }
 
 /**
- * Colors keyed by series id, assigned from a stable ordering of every known id
- * (not of the visible ones), so hiding a series never repaints the others.
+ * The style of the series at `index` in a stable ordering of every known id
+ * (not of the visible ones), so hiding a series never repaints the others. The
+ * first eight are solid; each later round of eight reuses the hues with the
+ * next dash pattern, so every series gets a style no other one has (up to 32,
+ * past which the rounds repeat; the legend's labels still tell them apart).
  */
-export function assignUsageSeriesColors(ids: string[]): Map<string, string> {
-  const colors = new Map<string, string>();
-  ids.forEach((id, index) => {
-    if (index < USAGE_SERIES_COLORS.length) colors.set(id, USAGE_SERIES_COLORS[index]);
-  });
-  return colors;
+export function usageSeriesStyle(index: number): UsageSeriesStyle {
+  const hues = USAGE_SERIES_COLORS.length;
+  const color = USAGE_SERIES_COLORS[index % hues];
+  const dash = USAGE_SERIES_DASHES[Math.floor(index / hues) % USAGE_SERIES_DASHES.length];
+  return dash ? { color, dash } : { color };
 }
 
 /** The overlay's range: the last two periods of the metric's cycle, ending now. */
