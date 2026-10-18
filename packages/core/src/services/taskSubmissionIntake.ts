@@ -42,8 +42,15 @@ export interface SubmissionIntakeEvidence {
 /** How an intake ended: the last attempt's error, and how many attempts failed, when known. */
 export interface IntakeFailure { reason: string; attempts?: number }
 
+/** Drops trailing periods and whitespace with a linear scan; an anchored regex backtracks on long runs. */
+const trimTrailingPunctuation = (text: string): string => {
+  let end = text.length;
+  while (end > 0 && (text[end - 1] === '.' || /\s/.test(text.charAt(end - 1)))) end -= 1;
+  return text.slice(0, end);
+};
+
 const intakeFailureMessage = ({ reason, attempts }: IntakeFailure) =>
-  `Implementation did not start${attempts && attempts > 1 ? ` after ${attempts} attempts` : ''}: ${reason.replace(/[.\s]+$/, '')}. `
+  `Implementation did not start${attempts && attempts > 1 ? ` after ${attempts} attempts` : ''}: ${trimTrailingPunctuation(reason)}. `
   + 'Once the cause is fixed, Retry agent starts this same issue again without creating another.';
 
 /**
