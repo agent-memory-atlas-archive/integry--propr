@@ -99,7 +99,9 @@ export const DesktopExperience: React.FC<DesktopExperienceProps> = ({ adapters, 
         // Drop the old renderer scope immediately; persist no selection before probing.
         // Reload during a failed or interrupted switch must not restore the old account.
         adapters.connection.deactivate?.();
-        await enqueueProfileMutation(() => adapters.profiles.setActiveId(null));
+        await enqueueProfileMutation(() => adapters.connection.fenceSelection
+          ? adapters.connection.fenceSelection(profile.id)
+          : adapters.profiles.setActiveId(null));
         if (!isCurrentAttempt()) return;
         activeProfileId.current = null;
       }

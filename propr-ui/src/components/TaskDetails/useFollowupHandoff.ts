@@ -82,31 +82,55 @@ export const followupHandoffKey = (scope: string, sourceTaskId: string) => `${ST
 
 const CHANGE_EVENT = 'propr:followup-handoff';
 
+const isExpired = (stored: StoredHandoff, now: number) => now - stored.acceptedAt > HANDOFF_TTL_MS;
+
 function readStored(key: string | null, now = Date.now()): StoredHandoff | null {
   if (!key) return null;
   try {
     const raw = sessionStorage.getItem(key);
     if (!raw) return null;
     const stored = JSON.parse(raw) as StoredHandoff;
-    if (typeof stored?.commentId !== 'number' || typeof stored.acceptedAt !== 'number' || now - stored.acceptedAt > HANDOFF_TTL_MS) return null;
+    if (typeof stored?.commentId !== 'number' || typeof stored.acceptedAt !== 'number' || isExpired(stored, now)) return null;
     return stored;
   } catch {
     return null;
   }
 }
 
-/** Records the handoff in this tab's storage; false when storage is unavailable and did not take it. */
-function writeStored(key: string, value: StoredHandoff | null): boolean {
+/**
+ * Requests storage could not take, held for this page only: they outlive the
+ * task view, as through a reconnect that unmounts it, but each is bound to the
+ * renderer state it was recorded in. Once storage holds a request, storage alone
+ * is authoritative: an entry the desktop cleared on an identity change stays gone.
+ */
+const pageMemory = new Map<string, { cleared: number; value: StoredHandoff }>();
+// The desktop cleared this renderer's state for a replaced identity: nothing held for the old one remains.
+subscribeRendererProfileStateGeneration(() => pageMemory.clear());
+
+/** A held request is subject to the same retention as a stored one: once expired, it is forgotten. */
+function readHeld(key: string | null, now = Date.now()): StoredHandoff | null {
+  const held = key ? pageMemory.get(key) : undefined;
+  if (!key || !held || held.cleared !== getRendererProfileStateGeneration()) return null;
+  if (isExpired(held.value, now)) {
+    pageMemory.delete(key);
+    return null;
+  }
+  return held.value;
+}
+
+/** Records the handoff in this tab's storage, or for this page when storage is unavailable and does not take it. */
+function writeStored(key: string, value: StoredHandoff | null): void {
+  let persisted = false;
   try {
     if (value) sessionStorage.setItem(key, JSON.stringify(value));
     else sessionStorage.removeItem(key);
-    return true;
+    persisted = true;
   } catch {
     // Storage may be unavailable; the handoff then lasts as long as the page.
-    return false;
-  } finally {
-    window.dispatchEvent(new Event(CHANGE_EVENT));
   }
+  if (value && !persisted) pageMemory.set(key, { cleared: getRendererProfileStateGeneration(), value });
+  else pageMemory.delete(key);
+  window.dispatchEvent(new Event(CHANGE_EVENT));
 }
 
 const subscribeStored = (listener: () => void) => {
@@ -144,31 +168,17 @@ export function useFollowupHandoff(sourceTaskId: string | undefined) {
   const raw = useSyncExternalStore(subscribeStored, () => {
     try { return key ? sessionStorage.getItem(key) : null; } catch { return null; }
   });
-  // Only a request storage could not take is held here, for this page only. Once storage holds a
-  // request, storage alone is authoritative: an entry the desktop cleared on an identity change stays gone.
-  // A held request is bound to the renderer state it was recorded in, so it is dropped exactly when the
-  // desktop clears that state for a replaced identity, and survives a renewal of the same one as storage does.
+  // The desktop clears renderer state just after announcing it, so the page re-reads both once it has.
   const cleared = useSyncExternalStore(subscribeRendererProfileStateGeneration, getRendererProfileStateGeneration);
-  const [memory, setMemory] = useState<{ key: string; cleared: number; value: StoredHandoff } | null>(null);
-  const memoryCurrent = memory !== null && memory.key === key && memory.cleared === cleared;
-  const stored = useMemo(() => {
-    const fromStorage = raw ? readStored(key) : null;
-    return fromStorage ?? (memoryCurrent ? memory.value : null);
-  }, [raw, key, memory, memoryCurrent]);
-  // A held request from renderer state the desktop has since cleared is dropped rather than kept for a later match.
-  useEffect(() => {
-    if (memory && memory.cleared !== cleared) setMemory(null);
-  }, [memory, cleared]);
+  const held = useSyncExternalStore(subscribeStored, () => readHeld(key));
+  const stored = useMemo(() => (raw ? readStored(key) : null) ?? readHeld(key), [raw, key, held, cleared]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
   const keyRef = useRef(key);
   keyRef.current = key;
 
-  const save = useCallback((targetKey: string, value: StoredHandoff | null) => {
-    const persisted = writeStored(targetKey, value);
-    setMemory(value && !persisted ? { key: targetKey, cleared: getRendererProfileStateGeneration(), value } : null);
-  }, []);
+  const save = useCallback((targetKey: string, value: StoredHandoff | null) => writeStored(targetKey, value), []);
 
   /** The scope and connection a submission starts in; `accept` records its receipt only while both are current. */
   const captureScope = useCallback((): FollowupSendScope => ({ scope: scopeRef.current, generation: currentGeneration() }), []);

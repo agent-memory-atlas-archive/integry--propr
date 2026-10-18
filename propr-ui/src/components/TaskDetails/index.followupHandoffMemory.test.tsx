@@ -244,3 +244,59 @@ describe('a request storage refused follows the identity, as a stored one does',
     expect(api.getTaskFollowupRuns).not.toHaveBeenCalled();
   });
 });
+
+describe('a request storage refused keeps the stored retention boundary across task views', () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  let clock: { mockRestore(): void } | undefined;
+  afterEach(() => clock?.mockRestore());
+  // Every session storage write fails while the follow-up is accepted; the view is then left.
+  async function acceptAndLeave(acceptedAt: number) {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('QuotaExceededError'); });
+    const now = vi.spyOn(Date, 'now').mockReturnValue(acceptedAt);
+    try {
+      const view = renderPage();
+      await flush();
+      await postFollowup();
+      expect(handoffKeys()).toHaveLength(0);
+      expect(banner()).toHaveAttribute('data-phase', 'starting');
+      view.unmount();
+    } finally {
+      setItem.mockRestore();
+    }
+    api.getTaskFollowupRuns.mockClear();
+    clock = now;
+    return now;
+  }
+
+  it('restores it on returning to the task within the retention period', async () => {
+    const acceptedAt = Date.UTC(2026, 9, 18, 9);
+    const now = await acceptAndLeave(acceptedAt);
+    now.mockReturnValue(acceptedAt + DAY_MS - 60_000);
+    renderPage();
+    await flush();
+    expect(banner()).toHaveAttribute('data-phase', 'starting');
+    expect(api.getTaskFollowupRuns).toHaveBeenCalledWith(SOURCE, 500, expect.anything());
+    expect(api.postTaskFollowup).toHaveBeenCalledTimes(1);
+  });
+
+  it('forgets it once expired, showing no banner and looking nothing up', async () => {
+    const acceptedAt = Date.UTC(2026, 9, 18, 9);
+    const now = await acceptAndLeave(acceptedAt);
+    now.mockReturnValue(acceptedAt + DAY_MS + 60_000);
+    const view = renderPage();
+    await flush();
+    expect(banner()).toBeNull();
+    await poll();
+    expect(banner()).toBeNull();
+    expect(api.getTaskFollowupRuns).not.toHaveBeenCalled();
+    view.unmount();
+
+    // It was removed, not merely hidden: nothing comes back even if the clock reads earlier again.
+    now.mockReturnValue(acceptedAt + 60_000);
+    renderPage();
+    await flush();
+    expect(banner()).toBeNull();
+    expect(api.getTaskFollowupRuns).not.toHaveBeenCalled();
+    expect(api.postTaskFollowup).toHaveBeenCalledTimes(1);
+  });
+});

@@ -115,6 +115,14 @@ export type DesktopGuidedLocalSetupAdapter = Required<Omit<DesktopLocalSetupAdap
 
 export interface DesktopConnectionAdapter {
   probe(profile: DesktopProfile): Promise<DesktopConnectionResult>;
+  /**
+   * Persists no active selection before (re)connecting `profileId`, as
+   * `profiles.setActiveId(null)` does, so a failed or interrupted attempt
+   * restores no account. Unlike a plain deselection, it lets a later
+   * activation of the same published profile, endpoint and identity keep its
+   * renderer state; any other selection change in between forfeits that.
+   */
+  fenceSelection?(profileId: string): Promise<void>;
   activate?(
     profile: DesktopProfile,
     result: Extract<DesktopConnectionResult, { status: 'ready' }>,
