@@ -25,6 +25,11 @@ export interface Task {
   commitHash?: string | null;
   /** The score the run recorded when it completed (a review's `6/10`), when it was scored. */
   score?: number | null;
+  /**
+   * What the review that recorded `score` came to; null when the run was not a
+   * review or its outcome is unknown, absent when the server predates it.
+   */
+  reviewOutcome?: 'clean' | 'findings' | 'reviewer_failed' | null;
   /** Users assigned to the task's issue or pull request; absent from servers that predate assignment. */
   assignees?: AttributedUser[];
 }

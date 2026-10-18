@@ -89,6 +89,31 @@ export function worktreeHoldingBranch(message: string): string | null {
 }
 
 /**
+ * Frees a branch held only by the registration of a worktree whose checkout
+ * directory is gone (removed while worktree pruning is disabled). With no
+ * checkout there are no uncommitted changes, and the branch ref keeps every
+ * commit, so the registration's HEAD is pointed at the branch's commit,
+ * detached: the registration itself is kept, as retention requires.
+ */
+async function detachMissingWorktreeRegistration(git: SimpleGit, branchName: string, holderPath: string): Promise<boolean> {
+    const commonDir = (await git.raw(['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+    const registrations = path.join(commonDir, 'worktrees');
+    if (!await fs.pathExists(registrations)) return false;
+    for (const id of await fs.readdir(registrations)) {
+        const admin = path.join(registrations, id);
+        const gitdir = (await fs.readFile(path.join(admin, 'gitdir'), 'utf8').catch(() => '')).trim();
+        if (gitdir !== path.join(holderPath, '.git')) continue;
+        const head = (await fs.readFile(path.join(admin, 'HEAD'), 'utf8').catch(() => '')).trim();
+        if (head !== `ref: refs/heads/${branchName}`) return false;
+        const commit = (await git.raw(['rev-parse', '--verify', `refs/heads/${branchName}^{commit}`])).trim();
+        await git.raw(['update-ref', '--no-deref', `worktrees/${id}/HEAD`, commit]);
+        logger.warn({ branchName, holderPath, commit }, 'Released branch from the registration of a worktree whose checkout is missing; the registration is kept with a detached HEAD');
+        return true;
+    }
+    return false;
+}
+
+/**
  * Frees a branch held by a worktree that has nothing left to lose: no
  * uncommitted or untracked changes, and a HEAD already contained in the
  * freshly fetched remote branch. Such a holder is typically left by an attempt
@@ -97,7 +122,12 @@ export function worktreeHoldingBranch(message: string): string | null {
  * only its HEAD is detached. Returns false, changing nothing, when it is unsafe.
  */
 export async function releaseBranchFromSettledWorktree(git: SimpleGit, branchName: string, holderPath: string): Promise<boolean> {
-    if (!await fs.pathExists(holderPath)) return false;
+    if (!await fs.pathExists(holderPath)) {
+        return detachMissingWorktreeRegistration(git, branchName, holderPath).catch(error => {
+            logger.warn({ branchName, holderPath, error: redactAuthenticatedGitUrl((error as Error).message) }, 'Could not release the branch from a missing worktree\'s registration');
+            return false;
+        });
+    }
     const holderGit = createHooklessGit(holderPath);
     const holder = (args: string[]) => holderGit.raw(['-c', `safe.directory=${holderPath}`, ...args]);
     try {
@@ -155,6 +185,9 @@ export async function releaseLostAttemptBranch(owner: string, repoName: string, 
         .find(lines => lines.includes(`branch refs/heads/${branchName}`))
         ?.find(line => line.startsWith('worktree '))?.slice('worktree '.length);
     if (!holder || holder === localRepoPath) return null;
+    if (!await fs.pathExists(holder)) {
+        return await detachMissingWorktreeRegistration(createHooklessGit(localRepoPath), branchName, holder) ? holder : null;
+    }
     return await releaseBranchFromLostAttemptWorktree(branchName, holder) ? holder : null;
 }
 

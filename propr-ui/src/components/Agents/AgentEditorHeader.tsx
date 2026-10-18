@@ -66,7 +66,8 @@ export const AgentDetailTabs: React.FC<{ definitionId: string; section: AgentDet
   );
 };
 
-const CRUMB_LINK_CLASSES = 'truncate text-slate-500 hover:text-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500';
+// Block-level so `truncate` bounds the text; the vertical padding makes each crumb a 44px touch target.
+const CRUMB_LINK_CLASSES = 'block truncate rounded py-3 text-slate-500 hover:text-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500';
 
 /** A short, stable name for a run: the start of its id. */
 const runShortLabel = (runId: string): string => `Run ${runId.slice(0, 8)}`;
@@ -74,19 +75,20 @@ const runShortLabel = (runId: string): string => `Run ${runId.slice(0, 8)}`;
 /**
  * Where an open run sits: automation / Runs / this run. It takes the place of
  * the Settings/Runs tabs, so the Runs tab and a "back to Runs" link are never
- * stacked on top of each other.
+ * stacked on top of each other. Only the automation name gives way on a narrow
+ * pane; it truncates with its full name kept as text and title.
  */
 export const AgentRunBreadcrumb: React.FC<{ definitionId: string; name: string; runId: string }> = ({ definitionId, name, runId }) => {
   const base = `/automations/${encodeURIComponent(definitionId)}`;
   const separator = <ChevronRight className="h-3.5 w-3.5 flex-none text-slate-300" aria-hidden="true" />;
   return (
-    <nav aria-label="Breadcrumb" className="flex-none border-b border-slate-200 bg-white px-4 py-2.5" data-testid="agent-run-breadcrumb">
+    <nav aria-label="Breadcrumb" className="flex-none border-b border-slate-200 bg-white px-4" data-testid="agent-run-breadcrumb">
       <ol className="flex min-w-0 items-center gap-1.5 text-sm">
-        <li className="min-w-0"><Link to={base} className={CRUMB_LINK_CLASSES}>{name}</Link></li>
-        <li className="flex flex-none items-center gap-1.5">{separator}<Link to={`${base}/runs`} className={CRUMB_LINK_CLASSES}>Runs</Link></li>
-        <li className="flex min-w-0 items-center gap-1.5">
+        <li className="min-w-0"><Link to={base} title={name} className={CRUMB_LINK_CLASSES} data-testid="agent-run-breadcrumb-automation">{name}</Link></li>
+        <li className="flex flex-none items-center gap-1.5">{separator}<Link to={`${base}/runs`} className={`${CRUMB_LINK_CLASSES} px-1.5`}>Runs</Link></li>
+        <li className="flex flex-none items-center gap-1.5">
           {separator}
-          <span aria-current="page" className="truncate font-medium text-slate-900" title={runId}>{runShortLabel(runId)}</span>
+          <span aria-current="page" className="block whitespace-nowrap py-3 font-medium text-slate-900" title={runId} data-testid="agent-run-breadcrumb-current">{runShortLabel(runId)}</span>
         </li>
       </ol>
     </nav>

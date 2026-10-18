@@ -371,6 +371,11 @@ async function enqueueChildren(
     return true;
 }
 
+/** An attempt BullMQ retries leaves the submission queued; only the last one fails it. */
+function isLastAttempt(job: Job<IssueJobData>): boolean {
+    return (job.attemptsMade ?? 0) + 1 >= (job.opts?.attempts ?? 1);
+}
+
 export async function handleDispatchWithDeps(job: Job<IssueJobData>, deps: DispatcherDeps): Promise<JobResult> {
     const { id: jobId, name: jobName, data: issueRef } = job;
     const { submission, run, trigger } = await resolveCurrentRun(issueRef, deps);
@@ -471,7 +476,7 @@ export async function handleDispatchWithDeps(job: Job<IssueJobData>, deps: Dispa
         return { status: 'dispatched', jobsEnqueued, issueNumber: issueRef.number };
 
     } catch (error) {
-        if (submission) await deps.recordDispatchFailure(submission.id, (error as Error).message);
+        if (submission && isLastAttempt(job)) await deps.recordDispatchFailure(submission.id, (error as Error).message);
         correlatedLogger.error({
             jobId,
             issue: issueRef.number,

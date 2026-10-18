@@ -7,6 +7,7 @@ import { getTasksFromDb, type TaskQuery } from './taskHelpers.js';
 import { validateTaskId, validateRepositoryFilter, validateStringLength, validatePositiveInteger } from './validation.js';
 import { validateRevertRequestBody, formatCommit, validateRevertPreviewParams, checkRevertAuthorization, checkRevertPreviewAuthorization, lookupPr, buildRevertJobData, verifyCommitBelongsToPr, resolveRepoAndCheckAccess } from './revertHelpers.js';
 import { createTaskFollowupRoutes, type TaskFollowupDeps } from './taskFollowupRoutes.js';
+import { createTaskFollowupRunRoutes } from './taskFollowupRunRoutes.js';
 export { resolveFollowupThread } from './taskFollowupRoutes.js';
 
 interface TaskRoutesDeps extends TaskFollowupDeps {
@@ -309,5 +310,5 @@ export function createTaskRoutes(deps: TaskRoutesDeps) {
     }
   }
 
-  return { getTasks, revertChanges, getRevertPreview, deleteTask, ...createTaskFollowupRoutes(deps) };
+  return { getTasks, revertChanges, getRevertPreview, deleteTask, ...createTaskFollowupRoutes(deps), ...createTaskFollowupRunRoutes(deps) };
 }

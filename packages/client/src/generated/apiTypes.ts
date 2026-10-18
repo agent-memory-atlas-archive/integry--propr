@@ -521,6 +521,18 @@ export interface TaskFollowupResult {
   message?: string;
 }
 
+/** The runs an issue follow-up started, for the signed-in user who posted it. */
+export interface TaskFollowupRuns {
+  sourceTaskId: string;
+  commentId: number;
+  /** Empty until the run the follow-up requested has started. */
+  runs: {
+    taskId: string;
+    /** The run's latest state, lowercased; `queued` until it records one. */
+    status: string;
+  }[];
+}
+
 /** A task together with its lifecycle events. */
 export interface TaskHistory {
   taskId: string;
@@ -647,6 +659,8 @@ export interface TaskSummary {
   prState?: "merged";
   /** Final review score of the run, when it was reviewed. */
   score: number | null;
+  /** What the review that recorded `score` came to: `clean` when every reviewer succeeded and none reported an actionable finding. Null when the run was not a review or its outcome is unknown. */
+  reviewOutcome: "clean" | "findings" | "reviewer_failed" | null;
   /** Assignees of the GitHub issue or pull request, as last synced; empty when nobody is assigned. */
   assignees: AttributedUser[];
   [key: string]: unknown;
@@ -673,6 +687,12 @@ export interface InstanceStorageResultQuery {
 export interface TaskAssigneesQuery {
   /** `false` serves the stored set without calling GitHub. */
   refresh?: "true" | "false";
+}
+
+/** Query parameters of `getTaskFollowupRuns`. */
+export interface TaskFollowupRunsQuery {
+  /** The `commentId` the follow-up's receipt returned. */
+  commentId: string;
 }
 
 /** Query parameters of `listTasks`. */

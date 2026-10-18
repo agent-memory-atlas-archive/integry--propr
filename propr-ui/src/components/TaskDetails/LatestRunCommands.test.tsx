@@ -44,8 +44,20 @@ describe('latestRunFollowup', () => {
   });
 
   test('offers nothing on a clean review', () => {
-    expect(latestRunFollowup([run(1, 'review', { score: 10 })], 'run-1')).toBeNull();
+    expect(latestRunFollowup([run(1, 'review', { score: 9, reviewOutcome: 'clean' })], 'run-1')).toBeNull();
     expect(latestRunFollowup([{ ...run(1, 'review', { score: 9 }), summary: 'Score 9/10 · 0 issues found' }], 'run-1')).toBeNull();
+  });
+
+  test('a score alone is not a clean outcome: an unconfirmed 10/10 still offers /fix', () => {
+    expect(latestRunFollowup([run(1, 'review', { score: 10 })], 'run-1')?.commands).toEqual(['/fix']);
+    expect(latestRunFollowup([run(1, 'review', { score: 10, reviewOutcome: null })], 'run-1')?.commands).toEqual(['/fix']);
+  });
+
+  test('the recorded outcome decides over the run summary and the score', () => {
+    const request = { ...run(1, 'review', { score: 9, reviewOutcome: 'clean' }), summary: 'Review requested: fix the 2 issues found last time' };
+    expect(latestRunFollowup([request], 'run-1')).toBeNull();
+    expect(latestRunFollowup([run(1, 'review', { score: 10, reviewOutcome: 'findings' })], 'run-1')?.commands).toEqual(['/fix']);
+    expect(latestRunFollowup([run(1, 'review', { score: 10, reviewOutcome: 'reviewer_failed' })], 'run-1')?.commands).toEqual(['/fix']);
   });
 
   test('reads a review summary as the Inbox reads its recap: a failed reviewer leaves something to fix', () => {

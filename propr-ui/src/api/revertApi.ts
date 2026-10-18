@@ -6,7 +6,7 @@ import {
   type AgentTankHistoryResponse,
   type AgentTankMode,
 } from '@propr/shared';
-import type { PostFollowupResponse, SummarizationSettings } from './proprTypes';
+import type { FollowupRunsResponse, PostFollowupResponse, SummarizationSettings } from './proprTypes';
 
 export type { SummarizationSettings };
 export type { AgentTankHistoryAgent, AgentTankHistoryPoint, AgentTankHistoryResponse, AgentTankHistorySeries } from '@propr/shared';
@@ -231,6 +231,14 @@ export const enableAgentTank = async (mode: AgentTankMode, url?: string): Promis
 export type { PostFollowupResponse };
 export const postTaskFollowup = async (taskId: string, body: string, target?: 'pull_request'): Promise<PostFollowupResponse> => {
   const response = await apiFetch(`${API_BASE_URL}/api/tasks/${encodeURIComponent(taskId)}/followup`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(target ? { body, target } : { body }), credentials: 'include' });
+  await handleApiResponse(response);
+  return response.json();
+};
+
+export type { FollowupRunsResponse };
+/** Read-only: the runs the follow-up posted as `commentId` started, which never reposts or queues it. */
+export const getTaskFollowupRuns = async (taskId: string, commentId: number, options: { signal?: AbortSignal } = {}): Promise<FollowupRunsResponse> => {
+  const response = await apiFetch(`${API_BASE_URL}/api/tasks/${encodeURIComponent(taskId)}/followup-runs?commentId=${encodeURIComponent(String(commentId))}`, { credentials: 'include', signal: options.signal });
   await handleApiResponse(response);
   return response.json();
 };

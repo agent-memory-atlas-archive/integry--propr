@@ -216,12 +216,37 @@ export async function fixture(page: Page) {
 /**
  * Stands in for the socket.io server: completes the engine.io handshake and answers each
  * `subscribe:draft` with the given `draft:update` payloads, so live progress renders without a backend.
+ * Repeat timers stop when their socket, the page, or its context closes; closing the page does not
+ * reliably reach `socket.onClose`, and a timer left running would keep sending into a closed page.
  */
 export async function liveDraftUpdates(page: Page, updates: Record<string, Array<Record<string, unknown>>>) {
+  const context = page.context();
+  const sockets = new Set<() => void>();
+  let closed = false;
+  const closeAll = () => {
+    if (closed) return;
+    closed = true;
+    page.off('close', closeAll);
+    context.off('close', closeAll);
+    sockets.forEach(stop => stop());
+  };
+  page.on('close', closeAll);
+  context.on('close', closeAll);
   await page.routeWebSocket('**/socket.io/**', socket => {
-    const timers: ReturnType<typeof setInterval>[] = [];
+    const timers = new Set<ReturnType<typeof setInterval>>();
+    const stop = () => {
+      sockets.delete(stop);
+      timers.forEach(clearInterval);
+      timers.clear();
+    };
+    // A socket the page opened just before closing can still reach this handler afterwards.
+    if (closed || page.isClosed()) return;
+    sockets.add(stop);
+    socket.onClose(stop);
     socket.send(`0${JSON.stringify({ sid: 'preview', upgrades: [], pingInterval: 300_000, pingTimeout: 300_000, maxPayload: 1_000_000 })}`);
     socket.onMessage(message => {
+      // A subscription delivered after cleanup must not start a timer nobody will clear.
+      if (!sockets.has(stop)) return;
       const text = String(message);
       if (text.startsWith('40')) socket.send('40{"sid":"preview-socket"}');
       if (!text.startsWith('42')) return;
@@ -231,9 +256,8 @@ export async function liveDraftUpdates(page: Page, updates: Record<string, Array
       // Each payload gets its own timestamp: the page drops an event that repeats the previous one's.
       const send = () => { const now = Date.now(); updates[draftId].forEach((payload, index) => socket.send(`42${JSON.stringify(['draft:update', { eventType: 'draft:update', draftId, timestamp: new Date(now + index).toISOString(), ...payload }])}`)); };
       send();
-      timers.push(setInterval(send, 1_000));
+      timers.add(setInterval(send, 1_000));
     });
-    socket.onClose(() => timers.forEach(clearInterval));
   });
 }
 

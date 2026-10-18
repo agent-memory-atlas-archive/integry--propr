@@ -5,6 +5,7 @@ import { getDesktopConnectionScope, setDesktopConnectionScope } from '../api/api
 import { DesktopAuthenticationError, type DesktopAdapters, type DesktopPlatform, type DesktopProfile } from './types';
 import type { DesktopPairingApprovalActionResult } from './types';
 import { reportPackagedAcceptanceRendererLifecycle } from './packagedAcceptanceRendererLifecycle';
+import { markRendererProfileStateCleared } from './rendererProfileState';
 
 const platform = (value: string): DesktopPlatform => {
   const normalized = value.toLowerCase();
@@ -67,6 +68,7 @@ const restoreStorage = (storage: Storage, snapshot: [string, string][]): void =>
 };
 
 const clearRendererProfileState = (): boolean => {
+  markRendererProfileStateCleared();
   let localSnapshot: [string, string][] = [];
   let sessionSnapshot: [string, string][] = [];
   try {
@@ -95,6 +97,16 @@ const safePairingApprovalActionResult = (value: unknown): DesktopPairingApproval
 
 export const createElectronDesktopAdapters = (bridge: DesktopBridge): DesktopAdapters => {
   let publishedProfile: { id: string; origin: string; identityEpoch: string } | null = null;
+  // The published profile whose main selection this renderer itself withdrew to
+  // reconnect it. Any other selection change forgets it, so only that reconnect
+  // counts as the same selection when activation compares identities.
+  let fencedReconnectProfileId: string | null = null;
+  const setActiveSelection = async (profileId: string | null) => {
+    await bridge.profiles.setActive(profileId);
+    if (profileId === null) {
+      setDesktopConnectionScope(null);
+    }
+  };
   const pairingOperations = new Map<string, string>();
   const desktopPlatform = platform(navigator.platform || navigator.userAgent);
   return {
@@ -123,6 +135,7 @@ export const createElectronDesktopAdapters = (bridge: DesktopBridge): DesktopAda
       await bridge.profiles.save(toStoredProfile(profile));
     },
     async remove(profileId) {
+      fencedReconnectProfileId = null;
       await bridge.authentication.cancel(profileId);
       await bridge.profiles.remove(profileId);
     },
@@ -130,10 +143,8 @@ export const createElectronDesktopAdapters = (bridge: DesktopBridge): DesktopAda
       return (await bridge.profiles.list()).activeProfileId;
     },
     async setActiveId(profileId) {
-      await bridge.profiles.setActive(profileId);
-      if (profileId === null) {
-        setDesktopConnectionScope(null);
-      }
+      fencedReconnectProfileId = null;
+      await setActiveSelection(profileId);
     },
   },
   discovery: {
@@ -209,9 +220,17 @@ export const createElectronDesktopAdapters = (bridge: DesktopBridge): DesktopAda
     async probe(profile) {
       return bridge.connection.probe(toStoredProfile(profile));
     },
+    async fenceSelection(profileId) {
+      const previousProfileId = (await bridge.profiles.list()).activeProfileId;
+      const reconnecting = publishedProfile?.id === profileId
+        && (previousProfileId === profileId || (previousProfileId === null && fencedReconnectProfileId === profileId));
+      fencedReconnectProfileId = null;
+      await setActiveSelection(null);
+      fencedReconnectProfileId = reconnecting ? profileId : null;
+    },
     async activate(profile, result, isCurrent = () => true) {
       if (result.activationTicket === undefined) throw new Error('Desktop activation ticket is missing.');
-      const previousProfileId = (await bridge.profiles.list()).activeProfileId;
+      const previousProfileId = (await bridge.profiles.list()).activeProfileId ?? fencedReconnectProfileId;
       const activated = await bridge.connection.activate(result.activationTicket);
       const discard = async () => {
         await bridge.connection.discard({
