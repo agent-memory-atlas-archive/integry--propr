@@ -5,7 +5,7 @@
  */
 
 import { agentTankCyclePeriodMs } from '@propr/shared';
-import type { AgentTankHistoryAgent, AgentTankHistorySeries } from '../../api/revertApi';
+import type { AgentTankHistoryAgent, AgentTankHistoryPoint, AgentTankHistorySeries } from '../../api/revertApi';
 import { getProviderDisplayName, getProviderRank } from '../agentTankMetrics';
 import { stripRemainingSuffix } from '../../utils/usageMetricLabels';
 
@@ -90,4 +90,80 @@ export function twoPeriodWindow(cycle: string | null | undefined, now: number = 
 } {
   const periodMs = agentTankCyclePeriodMs(cycle);
   return { since: now - 2 * periodMs, until: now, periodMs };
+}
+
+/** Seconds in an Agent Tank countdown ("2h 14m", "3d 4h", "136h 1m", "45m"); null when unreadable. */
+export function parseResetCountdown(text: string | undefined): number | null {
+  if (!text) return null;
+  const units: Record<string, number> = { d: 86_400, h: 3_600, m: 60, s: 1 };
+  let seconds = 0;
+  let matched = false;
+  for (const match of text.matchAll(/(\d+(?:\.\d+)?)\s*([dhms])\b/gi)) {
+    seconds += Number(match[1]) * units[match[2].toLowerCase()];
+    matched = true;
+  }
+  return matched ? seconds : null;
+}
+
+/**
+ * Where the current period began, from the live reset countdown when there is
+ * one, otherwise one period before `until`.
+ */
+export function currentPeriodStart(
+  window: { until: number; periodMs: number },
+  resetsIn?: string,
+): number {
+  const seconds = parseResetCountdown(resetsIn);
+  if (seconds === null || seconds * 1000 > window.periodMs) return window.until - window.periodMs;
+  return window.until + seconds * 1000 - window.periodMs;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Axis tick: clock time up to two days, weekday and hour up to four (where a
+ * bare date would repeat across neighbouring ticks), a date beyond that.
+ */
+export function formatHistoryTick(t: number, spanMs: number): string {
+  const date = new Date(t);
+  if (spanMs <= 2 * DAY_MS) return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  if (spanMs <= 4 * DAY_MS) return date.toLocaleString(undefined, { weekday: 'short', hour: 'numeric' });
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+/** Tooltip time, always with both date and clock time. */
+export function formatHistoryTime(t: number): string {
+  return new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+/** The last recorded value at or before `t`, or null before the series starts. */
+export function valueAt(points: Array<{ t: number; percent: number }>, t: number): number | null {
+  let value: number | null = null;
+  for (const point of points) {
+    if (point.t > t) break;
+    value = point.percent;
+  }
+  return value;
+}
+
+export interface ChartPoint {
+  t: number;
+  percent: number;
+}
+
+export function toChartPoints(
+  points: AgentTankHistoryPoint[],
+  since: number,
+  until: number,
+  currentPercent: number,
+): ChartPoint[] {
+  const plotted = points
+    .map(point => ({ t: Date.parse(point.t), percent: point.percent }))
+    .filter((point): point is ChartPoint => Number.isFinite(point.t) && typeof point.percent === 'number'
+      && point.t >= since && point.t <= until)
+    .sort((a, b) => a.t - b.t);
+  // Extend to now with the live value, so the line ends where the row's bar is.
+  const last = plotted[plotted.length - 1];
+  if (!last || last.t < until) plotted.push({ t: until, percent: currentPercent });
+  return plotted;
 }

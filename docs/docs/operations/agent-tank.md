@@ -16,7 +16,7 @@ It is **not** an API-spend tracker. For pay-as-you-go API key billing or per-req
 |---|---|---|
 | Claude (`claude`) | Runs the CLI's `/usage` command, or the Anthropic OAuth usage API in `--claude-api` mode | Current session, weekly (all models), and per-model weekly windows (Sonnet/Opus/Haiku) |
 | Codex (`codex`) | JSON-RPC `account/rateLimits/read`, falling back to `/status` | 5-hour session limit and weekly limit |
-| Antigravity (`agy`) | Runs the CLI's `/usage` command | Per-model quota availability and reset windows |
+| Antigravity (`agy`) | Runs the CLI's `/usage` command | Per-model and per-pool quota availability and reset windows, including the separately tracked **Gemini 4 Argon** weekly quota |
 
 OpenCode and Vibe are not tracked: neither CLI exposes a subscription usage endpoint for Agent Tank to read.
 
@@ -140,6 +140,8 @@ Because this is a backend setting rather than a stack container, `propr tank` ta
 ## What You See Once Enabled
 
 - **Sidebar usage bars.** A per-provider Usage section shows each provider's windows (Claude session/weekly, Codex 5-hour/weekly, Antigravity per-model) as color-coded bars with reset countdowns, refreshed every 60 seconds, with a manual refresh button.
+- **Usage history overlay.** Hover a metric row in the sidebar (tap it on a touch screen) to see how that metric moved over its last two periods: a 5-hour session shows the last 10 hours, a weekly limit the last 14 days. A dashed marker separates the previous period from the current one.
+- **Usage chart in Analytics.** The Analytics page plots every provider's metrics on one 0–100% usage chart over the last 24 hours to 14 days, with toggles to show only some providers or metrics, and a table view of each series' latest, lowest and highest value.
 - **Per-call usage deltas.** Around each agent run ProPR snapshots usage before and after the call, computes the delta per metric, and stores it next to the [LLM Log](./metrics.md) entry. The task detail context strip shows a compact session/weekly delta chip for the run.
 - **Agents cost gate.** Before an unattended [agent](../features/agents.md#cost-control) run (scheduled, API, CLI or MCP trigger, or an `auto` acting step) starts, ProPR compares the agent provider's session and weekly usage with the instance's pause threshold (`agent_run_usage_pause_percent`, default 90%). Over the threshold, the run is deferred until the session window resets or skipped. The **Run now** button on the Agents page warns first when the provider is over the threshold. The gate only reads the snapshot Agent Tank already has (at most an hour old) and never starts a refresh or a bundled container.
 - **Capacity in your metrics.** Provider capacity pressure becomes a first-class signal alongside cost and cycle time — see [Metrics](./metrics.md).
@@ -147,6 +149,14 @@ Because this is a backend setting rather than a stack container, `propr tank` ta
 In bundled mode a baseline must be fresh when acquired near the start of the call; it does not expire while a long task runs. The post-call snapshot comes from a refresh started after the call finishes. A short call that finishes before its baseline is ready, a failed or timed-out refresh, or unchanged provider data produces no delta rather than a guessed measurement.
 
 {/* SCREENSHOT PLACEHOLDER (P3 — needs a running Agent Tank instance; interim: the site's ui-agent-tank.png): Capture the sidebar Usage section with Agent Tank enabled, showing provider rows (for example Claude and Codex) with colored usage bars and percentages, and one provider expanded to show its session and weekly metrics. Requires a running Agent Tank instance configured in Settings. */}
+
+### Where Usage History Comes From
+
+ProPR records a point for every metric each time it reads Agent Tank (the sidebar, the 60-second usage watcher while anyone is connected, and the MCP usage tool), storing a changed value at once and an unchanged one at most every 10 minutes. It keeps 15 days, enough for two weekly periods. Bundled mode relies on this record alone, because its Agent Tank container is discarded after every run.
+
+In external mode, ProPR prefers the daemon's own history when the daemon is Agent Tank 0.10 or newer with history enabled (`GET /history/:id` reports `store: "sqlite"`): the daemon keeps refreshing while no ProPR tab is open, so its history has fewer gaps. An older daemon, or one with `--no-history`, falls back to ProPR's record. Both use the same metric keys, so switching modes doesn't split a series.
+
+ProPR reads both Agent Tank response formats: the 0.10 `{ "providers": [...] }` format and the 0.9.x map keyed by agent. An external daemon can be upgraded before or after ProPR. The bundled image ships Agent Tank 0.10.0.
 
 ## Best-Effort By Design
 

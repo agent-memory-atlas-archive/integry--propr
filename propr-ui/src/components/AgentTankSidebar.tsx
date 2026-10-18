@@ -14,6 +14,7 @@ import {
 } from './agentTankMetrics';
 import { SIDEBAR_ICON_STROKE_WIDTH, SIDEBAR_ICON_STROKE_CLASS } from './icons/sidebarIconStroke';
 import { useLiveResource } from '../hooks/useLiveResource';
+import { UsageMetricHistoryTrigger } from './usageHistory/UsageMetricHistoryOverlay';
 
 // Which provider rows are expanded is a preference, not session state: someone
 // watching Claude's weekly quotas wants the same rows open after a reload.
@@ -193,7 +194,10 @@ export const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle })
                 }`}
               />
               {child.metric ? (
-                <MetricRow metric={child.metric} compact />
+                // Hovering or tapping a metric opens its last two periods of history.
+                <UsageMetricHistoryTrigger agent={agent.name} metric={child.metric}>
+                  <MetricRow metric={child.metric} compact />
+                </UsageMetricHistoryTrigger>
               ) : (
                 <div className="flex h-5 min-w-0 items-center">
                   <span className="min-w-0 truncate text-[10px] font-medium text-gray-600" title={child.group}>
