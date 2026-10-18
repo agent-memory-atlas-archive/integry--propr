@@ -9,12 +9,6 @@ export default {
   },
   theme: {
     extend: {
-      // Layouts for a finger rather than a mouse: a coarse primary pointer, or
-      // any phone-width viewport. `touch:` rows get 44px targets and no
-      // hover-only controls; fine-pointer desktop rows stay compact.
-      screens: {
-        touch: { raw: '(pointer: coarse), (max-width: 639.98px)' },
-      },
       // Keep `font-sans` identical to the body font so explicit resets never fall
       // back to a different stack than the rest of the UI.
       fontFamily: {
@@ -45,5 +39,14 @@ export default {
       },
     },
   },
-  plugins: [],
+  plugins: [
+    // Layouts for a finger rather than a mouse: a coarse primary pointer, or
+    // any phone-width viewport. `touch:` rows get 44px targets and no
+    // hover-only controls; fine-pointer desktop rows stay compact. This is a
+    // variant, not a `screens` entry: a raw screen disables every `max-*` and
+    // `min-*` variant (such as `max-lg:min-h-11`) across the app.
+    ({ addVariant }) => {
+      addVariant('touch', '@media (pointer: coarse), (max-width: 639.98px)');
+    },
+  ],
 }
