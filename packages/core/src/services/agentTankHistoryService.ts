@@ -32,28 +32,53 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Thin a series to at most `maxPoints` by keeping the last point of each equal
- * time bucket. The first and last points always survive, so the line still
- * spans the whole range and ends on the current value.
+ * Thin a series to at most `maxPoints` by keeping the lowest and the highest
+ * reading of each equal time bucket, in time order. Every recorded extreme
+ * therefore survives, so a short spike still reaches the chart and the range's
+ * lowest and highest readings are the recorded ones. The first and last points
+ * always survive too, so the line still spans the whole range and ends on the
+ * current value.
  */
 export function downsampleHistoryPoints(
     points: AgentTankHistoryPoint[],
     maxPoints: number = MAX_HISTORY_POINTS_PER_SERIES,
 ): AgentTankHistoryPoint[] {
-    if (points.length <= maxPoints || maxPoints < 3) return points;
+    if (points.length <= maxPoints || maxPoints < 4) return points;
     const first = Date.parse(points[0].t);
     const last = Date.parse(points[points.length - 1].t);
     const span = last - first;
-    if (!Number.isFinite(span) || span <= 0) return points.slice(-maxPoints);
-    const buckets = maxPoints - 2;
+    // Without a usable time span every interior point shares one bucket.
+    const timed = Number.isFinite(span) && span > 0;
+    const buckets = Math.floor((maxPoints - 2) / 2);
     const kept: AgentTankHistoryPoint[] = [points[0]];
+    let bucketStart = 1;
+    const flush = (end: number) => {
+        if (end <= bucketStart) return;
+        let low = bucketStart;
+        let high = bucketStart;
+        for (let index = bucketStart + 1; index < end; index++) {
+            const value = points[index].percent;
+            if (value === null) continue;
+            const lowest = points[low].percent;
+            const highest = points[high].percent;
+            if (lowest === null || value < lowest) low = index;
+            if (highest === null || value > highest) high = index;
+        }
+        kept.push(points[Math.min(low, high)]);
+        if (low !== high) kept.push(points[Math.max(low, high)]);
+    };
     let currentBucket = -1;
     for (let index = 1; index < points.length - 1; index++) {
-        const bucket = Math.min(buckets - 1, Math.floor(((Date.parse(points[index].t) - first) / span) * buckets));
-        if (bucket === currentBucket) kept[kept.length - 1] = points[index];
-        else kept.push(points[index]);
-        currentBucket = bucket;
+        const bucket = timed
+            ? Math.max(0, Math.min(buckets - 1, Math.floor(((Date.parse(points[index].t) - first) / span) * buckets)))
+            : 0;
+        if (bucket !== currentBucket) {
+            flush(index);
+            bucketStart = index;
+            currentBucket = bucket;
+        }
     }
+    flush(points.length - 1);
     kept.push(points[points.length - 1]);
     return kept;
 }

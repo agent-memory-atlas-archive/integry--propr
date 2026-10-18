@@ -45,7 +45,12 @@ const SERIES: Record<string, Array<{ key: string; label: string; cycle: string; 
   ],
 };
 
-async function stubHistory(page: Page, requests: URL[] = []) {
+/** Three more Antigravity pools, taking the answer past the eight-color palette. */
+const EXTRA_POOLS = ['Claude Fable 5.1', 'Gemini 4 Flash', 'GPT-OSS'].map((name, index) => ({
+  key: `model:${name} Weekly Limit`, label: `${name} Weekly Limit`, cycle: 'weekly', period: 168, peak: 20 + index * 12, offset: 30 + index * 25,
+}));
+
+async function stubHistory(page: Page, requests: URL[] = [], extra: typeof SERIES = {}) {
   await page.route('**/api/config/agent-tank/usage', route => route.fulfill({ json: usage }));
   await page.route('**/api/config/agent-tank/history?**', (route: Route) => {
     const url = new URL(route.request().url());
@@ -57,7 +62,7 @@ async function stubHistory(page: Page, requests: URL[] = []) {
     const metric = url.searchParams.get('metric');
     return route.fulfill({ json: { enabled: true, source: 'propr', retentionDays: 15, agents: agents.map(agent => ({
       agent,
-      series: (SERIES[agent] ?? []).filter(entry => !metric || entry.key === metric).map(entry => ({
+      series: [...(SERIES[agent] ?? []), ...(extra[agent] ?? [])].filter(entry => !metric || entry.key === metric).map(entry => ({
         key: entry.key, label: entry.label, model: null, cycle: entry.cycle,
         points: sawtooth(entry.period, entry.peak, until, hours, entry.offset),
       })),
@@ -94,6 +99,28 @@ test('the Analytics page plots every agent and metric, and narrows to a few', as
   await pane.getByTestId('agent-usage-history-chart').hover({ position: { x: 900, y: 120 } });
   await expect(page.locator('.recharts-tooltip-wrapper')).toContainText('Claude · Session');
   await page.screenshot({ path: `${PREVIEWS}/analytics-usage-desktop.png`, clip: await pane.boundingBox() ?? undefined });
+});
+
+test('metrics past the eight-line limit stay selectable and can replace a drawn line', async ({ page }) => {
+  await fixture(page, { width: 1440, height: 900 });
+  await stubHistory(page, [], { antigravity: EXTRA_POOLS });
+  await page.goto('/analytics');
+
+  const pane = page.getByTestId('analytics-usage-history');
+  const lines = pane.getByTestId('agent-usage-history-chart').locator('.recharts-line');
+  await expect(lines).toHaveCount(8);
+  await expect(pane.getByRole('button', { name: /, not plotted$/ })).toHaveCount(2);
+  await expect(pane.getByText('2 selected metrics are not plotted.', { exact: false })).toBeVisible();
+
+  await pane.getByRole('button', { name: /^Claude · Fable/ }).click();
+  await expect(lines).toHaveCount(8);
+  await expect(pane.getByRole('button', { name: /GPT-OSS Weekly \d+%, not plotted$/ })).toBeVisible();
+  await expect(pane.getByRole('button', { name: /Gemini 4 Flash Weekly \d+%$/ })).toBeVisible();
+  await page.screenshot({ path: `${PREVIEWS}/analytics-usage-over-limit.png`, clip: await pane.boundingBox() ?? undefined });
+
+  await pane.getByRole('button', { name: 'Table' }).click();
+  await expect(pane.getByTestId('agent-usage-history-table').getByRole('row')).toHaveCount(1 + 9);
+  await expect(pane.getByTestId('agent-usage-history-table').getByRole('row', { name: /GPT-OSS/ })).toBeVisible();
 });
 
 test('the Analytics usage chart fits a phone', async ({ page }) => {

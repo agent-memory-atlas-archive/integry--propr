@@ -40,6 +40,12 @@ interface LastRecorded {
 /** Last row written per `${agent}\u0000${metric}`, process-local by design. */
 const lastRecorded = new Map<string, LastRecorded>();
 let lastPrunedAt = 0;
+/**
+ * Tail of the recording queue. Each attempt reads the baselines, writes, and
+ * only then advances them, so a concurrent attempt must not read baselines a
+ * write still in flight may yet fail to earn.
+ */
+let recordingTail: Promise<unknown> = Promise.resolve();
 
 export const AGENT_TANK_HISTORY_RETENTION_MS = AGENT_TANK_HISTORY_RETENTION_DAYS * DAY_MS;
 
@@ -60,9 +66,20 @@ interface HistoryRow {
     recorded_at_ms: number;
 }
 
-/** Rows this snapshot adds, after per-series deduplication. */
-function rowsToRecord(agents: Record<string, AgentStatusResponse>, now: number): HistoryRow[] {
+interface PendingRecord {
+    rows: HistoryRow[];
+    /** Baselines to commit once the rows are stored. */
+    baselines: Map<string, LastRecorded>;
+}
+
+/**
+ * Rows this snapshot adds, after per-series deduplication. Reads the
+ * baselines without moving them: an insert that fails must leave the
+ * snapshot eligible for the next attempt.
+ */
+function rowsToRecord(agents: Record<string, AgentStatusResponse>, now: number): PendingRecord {
     const rows: HistoryRow[] = [];
+    const baselines = new Map<string, LastRecorded>();
     for (const [key, status] of Object.entries(agents)) {
         // A failed read keeps cached usage upstream; recording it again would
         // claim a fresh observation of a value nobody re-measured.
@@ -71,13 +88,13 @@ function rowsToRecord(agents: Record<string, AgentStatusResponse>, now: number):
         const capturedAtMs = captureTime(status, now);
         for (const metric of extractAgentTankUsageMetrics(agent, status.usage)) {
             const seriesKey = `${agent}\u0000${metric.key}`;
-            const previous = lastRecorded.get(seriesKey);
+            const previous = baselines.get(seriesKey) ?? lastRecorded.get(seriesKey);
             if (previous) {
                 if (capturedAtMs <= previous.capturedAtMs) continue;
                 const unchanged = previous.percent === metric.percentUsed;
                 if (unchanged && capturedAtMs - previous.capturedAtMs < UNCHANGED_HEARTBEAT_MS) continue;
             }
-            lastRecorded.set(seriesKey, { capturedAtMs, percent: metric.percentUsed });
+            baselines.set(seriesKey, { capturedAtMs, percent: metric.percentUsed });
             rows.push({
                 agent,
                 metric_key: metric.key,
@@ -90,7 +107,7 @@ function rowsToRecord(agents: Record<string, AgentStatusResponse>, now: number):
             });
         }
     }
-    return rows;
+    return { rows, baselines };
 }
 
 /**
@@ -104,9 +121,18 @@ export async function recordAgentTankUsageHistory(
     { database = db, now = Date.now() }: { database?: Knex; now?: number } = {},
 ): Promise<number> {
     if (!agents) return 0;
+    const attempt = recordingTail.then(() => recordSnapshot(agents, database, now));
+    recordingTail = attempt;
+    return attempt;
+}
+
+async function recordSnapshot(agents: Record<string, AgentStatusResponse>, database: Knex, now: number): Promise<number> {
     try {
-        const rows = rowsToRecord(agents, now);
-        if (rows.length > 0) await database(TABLE).insert(rows);
+        const { rows, baselines } = rowsToRecord(agents, now);
+        if (rows.length > 0) {
+            await database(TABLE).insert(rows);
+            for (const [seriesKey, baseline] of baselines) lastRecorded.set(seriesKey, baseline);
+        }
         if (now - lastPrunedAt >= PRUNE_INTERVAL_MS) {
             lastPrunedAt = now;
             await database(TABLE).where('recorded_at_ms', '<', now - AGENT_TANK_HISTORY_RETENTION_MS).delete();

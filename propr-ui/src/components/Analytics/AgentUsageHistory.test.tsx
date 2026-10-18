@@ -3,7 +3,15 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getAgentTankHistory, type AgentTankHistoryResponse } from '../../api/revertApi';
 import AgentUsageHistory from './AgentUsageHistory';
-import { buildChartRows, parseUsageHistoryView, toPlottedSeries, writeUsageHistoryView } from './usageHistoryView';
+import { USAGE_SERIES_COLORS } from '../usageHistory/usageHistoryModel';
+import {
+  UNPLOTTED_SERIES_COLOR,
+  buildChartRows,
+  parseUsageHistoryView,
+  planPlottedSeries,
+  toPlottedSeries,
+  writeUsageHistoryView,
+} from './usageHistoryView';
 
 vi.mock('../../api/revertApi', () => ({ getAgentTankHistory: vi.fn() }));
 
@@ -125,6 +133,31 @@ describe('AgentUsageHistory', () => {
     await waitFor(() => expect(second.container.querySelector('[data-testid="analytics-usage-history"]')).toBeNull());
   });
 
+  it('keeps metrics past the eight-line limit selectable and swaps them onto the chart', async () => {
+    const many = Array.from({ length: 10 }, (_, index) => series(`model:Pool ${index + 1}`, `Pool ${index + 1}`, [index, index + 1]));
+    mockHistory.mockResolvedValue({ enabled: true, source: 'propr', agents: [{ agent: 'antigravity', series: many }] });
+    renderPane();
+    const filters = await screen.findByRole('group', { name: 'Filter usage history' });
+
+    // Every metric has a chip; the two past the palette are selected but not drawn.
+    expect(within(filters).getAllByRole('button', { name: /Antigravity · Pool/ })).toHaveLength(10);
+    expect(within(filters).getByRole('button', { name: /Pool 9 9%, not plotted/, pressed: true })).toBeInTheDocument();
+    expect(within(filters).getByRole('button', { name: /Pool 10 10%, not plotted/, pressed: true })).toBeInTheDocument();
+    expect(screen.getByText(/2 selected metrics are not plotted/)).toBeInTheDocument();
+
+    // Hiding a drawn metric hands its line to the next selected one.
+    fireEvent.click(within(filters).getByRole('button', { name: /Pool 1 1%/ }));
+    expect(within(filters).getByRole('button', { name: /^Antigravity · Pool 9 9%$/, pressed: true })).toBeInTheDocument();
+    expect(within(filters).getByRole('button', { name: /Pool 10 10%, not plotted/ })).toBeInTheDocument();
+    expect(screen.getByText(/1 selected metric is not plotted/)).toBeInTheDocument();
+
+    // The table lists every selected metric, drawn or not.
+    fireEvent.click(screen.getByRole('button', { name: 'Table' }));
+    const table = screen.getByTestId('agent-usage-history-table');
+    expect(within(table).getAllByRole('row')).toHaveLength(1 + 9);
+    expect(within(table).getByRole('row', { name: /Pool 10/ })).toHaveTextContent('10%');
+  });
+
   it('explains an empty history', async () => {
     mockHistory.mockResolvedValue({ enabled: true, agents: [] });
     renderPane();
@@ -140,6 +173,22 @@ describe('usage history view', () => {
     expect(parseUsageHistoryView(new URLSearchParams('usageRange=1y')).range).toBe('7d');
     expect(writeUsageHistoryView(new URLSearchParams('period=7d'), { ...view, range: '7d', hiddenAgents: new Set() }).toString())
       .toBe('period=7d');
+  });
+
+  it('gives a series past the palette a color no drawn series is using', () => {
+    const make = (index: number, color: string) => toPlottedSeries({
+      ...series(`k${index}`, `k${index}`, [1]), id: `x:k${index}`, agent: 'x', displayLabel: `k${index}`,
+    }, color);
+    const palette = [...USAGE_SERIES_COLORS];
+    const all = [...palette.map((color, index) => make(index, color)), make(8, UNPLOTTED_SERIES_COLOR), make(9, UNPLOTTED_SERIES_COLOR)];
+
+    const full = planPlottedSeries(all);
+    expect(full.drawn.map(entry => entry.color)).toEqual(palette);
+    expect(full.undrawn.map(entry => entry.id)).toEqual(['x:k8', 'x:k9']);
+
+    const swapped = planPlottedSeries(all.filter(entry => entry.id !== 'x:k2'));
+    expect(swapped.drawn.map(entry => entry.color)).toEqual([...palette.filter((_, index) => index !== 2), palette[2]]);
+    expect(swapped.undrawn.map(entry => [entry.id, entry.color])).toEqual([['x:k9', UNPLOTTED_SERIES_COLOR]]);
   });
 
   it('carries each series forward between its own readings and not past them', () => {

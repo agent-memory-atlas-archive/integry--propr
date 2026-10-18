@@ -7,7 +7,8 @@
  * each with its latest value, so identity is never color alone. Colors come
  * from the order of every series the answer holds, not of the visible ones,
  * so hiding a line never repaints the others. Past eight series there is no
- * ninth hue: the extra series start hidden and showing one means hiding another.
+ * ninth hue: every series stays selectable and in the table, but the chart draws
+ * the first eight selected ones, and hiding one lets the next take its color.
  *
  * History only reaches back about two weeks, so the pane has its own range
  * instead of following the page timeframe. It renders nothing when Agent Tank
@@ -28,7 +29,9 @@ import {
   USAGE_RANGES,
   USAGE_RANGE_LABELS,
   USAGE_RANGE_MS,
+  UNPLOTTED_SERIES_COLOR,
   parseUsageHistoryView,
+  planPlottedSeries,
   toPlottedSeries,
   writeUsageHistoryView,
   type UsageHistoryView,
@@ -107,14 +110,14 @@ const AgentUsageHistory: React.FC = () => {
     if (read.status !== 'ready') return [];
     const flat = flattenUsageHistory(read.data.agents);
     const colors = assignUsageSeriesColors(flat.map(series => series.id));
-    return flat.map(series => toPlottedSeries(series, colors.get(series.id) ?? '#94A3B8'));
+    return flat.map(series => toPlottedSeries(series, colors.get(series.id) ?? UNPLOTTED_SERIES_COLOR));
   }, [read]);
   const agents = useMemo(() => [...new Set(all.map(series => series.agent))], [all]);
-  // Series past the palette have no color of their own and stay off the chart.
-  const colored = all.slice(0, MAX_USAGE_SERIES);
-  const uncolored = all.length - colored.length;
-  const offered = colored.filter(series => !view.hiddenAgents.has(series.agent));
-  const visible = offered.filter(series => !view.hiddenSeries.has(series.id));
+  const offered = all.filter(series => !view.hiddenAgents.has(series.agent));
+  const { drawn, undrawn } = planPlottedSeries(offered.filter(series => !view.hiddenSeries.has(series.id)));
+  // The table lists every selected series; only the chart is capped.
+  const visible = [...drawn, ...undrawn];
+  const drawnColors = new Map(drawn.map(series => [series.id, series.color]));
 
   if (read.status === 'hidden') return null;
 
@@ -149,7 +152,7 @@ const AgentUsageHistory: React.FC = () => {
   } else {
     body = showTable
       ? <AgentUsageHistoryTable series={visible} />
-      : <AgentUsageHistoryChart series={visible} since={read.since} until={read.until} />;
+      : <AgentUsageHistoryChart series={drawn} since={read.since} until={read.until} />;
   }
 
   return (
@@ -189,17 +192,23 @@ const AgentUsageHistory: React.FC = () => {
                   {offered.filter(series => series.agent === agent).map(series => {
                     const on = !view.hiddenSeries.has(series.id);
                     const value = series.latest === null ? '' : ` ${Math.round(series.latest)}%`;
+                    const color = drawnColors.get(series.id);
+                    const unplotted = on && !color;
                     return (
                       <button
                         key={series.id}
                         type="button"
                         aria-pressed={on}
-                        aria-label={`${series.displayLabel}${value}`}
+                        aria-label={`${series.displayLabel}${value}${unplotted ? ', not plotted' : ''}`}
                         onClick={() => toggleSeries(series.id)}
                         className={chipClass(on)}
-                        title={series.label}
+                        title={unplotted ? `${series.label} (not plotted: hide another metric to plot it)` : series.label}
                       >
-                        <span className="h-2 w-2 flex-none rounded-full" style={{ backgroundColor: on ? series.color : '#CBD5E1' }} aria-hidden="true" />
+                        <span
+                          className={`h-2 w-2 flex-none rounded-full ${unplotted ? 'border border-slate-400' : ''}`}
+                          style={{ backgroundColor: color ?? (on ? 'transparent' : '#CBD5E1') }}
+                          aria-hidden="true"
+                        />
                         <span className="max-w-[160px] truncate">{usageMetricLabel(series)}</span>
                         {value && <span className="tabular-nums text-slate-500">{value.trim()}</span>}
                       </button>
@@ -215,9 +224,10 @@ const AgentUsageHistory: React.FC = () => {
             )}
           </div>
         )}
-        {uncolored > 0 && (
+        {undrawn.length > 0 && !showTable && (
           <p className="text-xs text-slate-500">
-            {uncolored} more {uncolored === 1 ? 'metric is' : 'metrics are'} not plotted. The chart shows up to {MAX_USAGE_SERIES} at once.
+            {undrawn.length} selected {undrawn.length === 1 ? 'metric is' : 'metrics are'} not plotted. The chart shows
+            up to {MAX_USAGE_SERIES} at once: hide one to plot another, or see them all in the table.
           </p>
         )}
         {body}
