@@ -5,6 +5,7 @@ import { getDesktopConnectionScope, setDesktopConnectionScope } from '../api/api
 import { DesktopAuthenticationError, type DesktopAdapters, type DesktopPlatform, type DesktopProfile } from './types';
 import type { DesktopPairingApprovalActionResult } from './types';
 import { reportPackagedAcceptanceRendererLifecycle } from './packagedAcceptanceRendererLifecycle';
+import { markRendererProfileStateCleared } from './rendererProfileState';
 
 const platform = (value: string): DesktopPlatform => {
   const normalized = value.toLowerCase();
@@ -67,6 +68,7 @@ const restoreStorage = (storage: Storage, snapshot: [string, string][]): void =>
 };
 
 const clearRendererProfileState = (): boolean => {
+  markRendererProfileStateCleared();
   let localSnapshot: [string, string][] = [];
   let sessionSnapshot: [string, string][] = [];
   try {

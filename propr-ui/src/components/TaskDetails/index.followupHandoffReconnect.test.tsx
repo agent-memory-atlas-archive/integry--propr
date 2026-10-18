@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import TaskDetails from './index';
-import { AuthProvider } from '../../contexts/AuthContext';
-import type { CurrentUser, FollowupRunsResponse, PostFollowupResponse } from '../../api/proprTypes';
+import { act, fireEvent, screen, within } from '@testing-library/react';
+import type { FollowupRunsResponse, PostFollowupResponse } from '../../api/proprTypes';
 import { API_BASE_URL, getDesktopConnectionScope, setDesktopConnectionScope } from '../../api/apiClient';
-import { createElectronDesktopAdapters } from '../../desktop/electronAdapters';
-import { bridgeFixture, fromProfile, storedProfile } from '../../desktop/electronAdapters.test-fixture';
-import { HANDOFF_POLL_MS } from './useFollowupHandoff';
+import { storedProfile } from '../../desktop/electronAdapters.test-fixture';
+import {
+  SOURCE, accepted, banner, deferred, desktopConnection, expectOriginalUntouched, flush, handoffKeys, poll, postFollowup, renderPage, runsOf,
+} from './index.followupHandoffReconnect.testSupport';
+
 const api = vi.hoisted(() => ({
   postTaskFollowup: vi.fn<(taskId: string, body: string) => Promise<PostFollowupResponse>>(),
   getTaskFollowupRuns: vi.fn<(taskId: string, commentId: number, options?: { signal?: AbortSignal }) => Promise<FollowupRunsResponse>>(),
@@ -60,70 +59,6 @@ vi.mock('./useTaskHeadSummary', async importOriginal => ({ ...await importOrigin
 vi.mock('./ProgressBar', () => ({ default: () => null }));
 vi.mock('./LeftPaneBody', () => ({ default: () => <div data-testid="source-timeline">Original failed timeline</div> }));
 vi.mock('./TaskVisualPreviews', () => ({ default: () => null }));
-
-const SOURCE = 'failed-issue-run';
-const USER_ID = '297689653';
-const user = (id: string) => ({ id, login: `user-${id}`, permissions: [] }) as unknown as CurrentUser;
-const accepted: PostFollowupResponse = {
-  success: true, state: 'queued', jobId: 'issue-acme-widgets-32', posted: true, commentId: 500,
-  sourceTaskId: SOURCE, intent: 'issue', issueNumber: 32, message: 'Retry queued on issue #32.',
-};
-const runsOf = (runs: FollowupRunsResponse['runs']): FollowupRunsResponse => ({ sourceTaskId: SOURCE, commentId: 500, runs });
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>(r => { resolve = r; });
-  return { promise, resolve };
-}
-
-const renderPage = (userId = USER_ID) => render(
-  <AuthProvider user={user(userId)}>
-    <MemoryRouter initialEntries={[`/tasks/${SOURCE}`]}>
-      <Routes>
-        <Route path="/tasks/:taskId" element={<TaskDetails taskId={SOURCE} />} />
-      </Routes>
-    </MemoryRouter>
-  </AuthProvider>,
-);
-
-const flush = () => act(async () => {});
-const poll = () => act(async () => { await vi.advanceTimersByTimeAsync(HANDOFF_POLL_MS); });
-const banner = () => screen.queryByTestId('followup-handoff');
-const handoffKeys = () => Object.keys(sessionStorage).filter(key => key.startsWith('propr.followupHandoff.v1'));
-
-async function postFollowup() {
-  fireEvent.click(screen.getAllByRole('button', { name: 'Follow Up' })[0]);
-  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Post Comment' })); });
-}
-
-const expectOriginalUntouched = () => {
-  for (const status of screen.getAllByTestId('source-status')) expect(status).toHaveAttribute('data-status', 'failed');
-  expect(screen.getByTestId('source-timeline')).toBeInTheDocument();
-  expect(new Set(loadedTaskIds)).toEqual(new Set([SOURCE]));
-};
-
-/**
- * The desktop's own activation path: every activation of a saved profile gets
- * a new transport generation, as the credential service issues one, and a
- * renewal of the same identity keeps this tab's session storage.
- */
-function desktopConnection() {
-  const fixture = bridgeFixture();
-  const adapters = createElectronDesktopAdapters(fixture.bridge);
-  const otherProfile = { ...storedProfile, id: 'profile-2', label: 'Second server' };
-  const connect = async (transportScope: string, stored = storedProfile, identityEpoch = 'AAAAAAAAAAAAAAAAAAAAAA') => {
-    fixture.activate.mockResolvedValueOnce({ status: 'ready', profileId: stored.id, transportScope, identityEpoch });
-    const profile = fromProfile(stored);
-    const activated = await adapters.connection.activate!(profile, { status: 'ready', version: '0.8.15', activationTicket: `ticket-${transportScope}` });
-    if (activated.status !== 'ready') throw new Error(`activation was ${activated.status}`);
-    await act(async () => {
-      adapters.connection.publishActivation!(profile, activated);
-      await fixture.bridge.profiles.setActive(stored.id);
-    });
-  };
-  const disconnect = () => act(() => adapters.connection.deactivate!());
-  return { connect, disconnect, otherProfile };
-}
 
 const initialBaseUrl = API_BASE_URL;
 
@@ -179,7 +114,7 @@ describe('an accepted issue follow-up survives a same-profile desktop reconnect'
     expect(banner()).toHaveTextContent('The new run completed');
     expect(within(banner()!).getByRole('link', { name: /View new run/ })).toBeInTheDocument();
     expect(api.postTaskFollowup).toHaveBeenCalledTimes(1);
-    expectOriginalUntouched();
+    expectOriginalUntouched(loadedTaskIds);
   });
 
   it('keeps the started run across a reconnect while the view stays mounted', async () => {
@@ -243,88 +178,6 @@ describe('a same-profile credential replacement clears the handoff for good', ()
     expect(banner()).toBeNull();
     expect(screen.queryByRole('link', { name: /View new run/ })).toBeNull();
     expect(handoffKeys()).toHaveLength(0);
-  });
-});
-
-describe('without session storage the handoff lasts as long as the page', () => {
-  it('keeps the request in memory on the mounted view when storage refuses it', async () => {
-    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('QuotaExceededError'); });
-    try {
-      renderPage();
-      await flush();
-      await postFollowup();
-      expect(handoffKeys()).toHaveLength(0);
-      expect(banner()).toHaveAttribute('data-phase', 'starting');
-
-      api.getTaskFollowupRuns.mockResolvedValue(runsOf([{ taskId: 'fresh-run', status: 'processing' }]));
-      await poll();
-      expect(within(banner()!).getByRole('link', { name: /View new run/ })).toHaveAttribute('href', '/tasks/fresh-run');
-      expect(api.postTaskFollowup).toHaveBeenCalledTimes(1);
-    } finally {
-      setItem.mockRestore();
-    }
-  });
-
-  // Only handoff writes fail, as with full storage; the desktop's own clearing still succeeds.
-  const refuseHandoffWrites = () => {
-    const original = Storage.prototype.setItem;
-    return vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
-      if (key.startsWith('propr.followupHandoff.v1')) throw new Error('QuotaExceededError');
-      original.call(this, key, value);
-    });
-  };
-
-  it('drops a starting request held in memory when the same profile’s credentials are replaced, and never looks it up or writes it back', async () => {
-    const setItem = refuseHandoffWrites();
-    try {
-      const desktop = desktopConnection();
-      await desktop.connect('first-transport-generation');
-      renderPage();
-      await flush();
-      await postFollowup();
-      expect(handoffKeys()).toHaveLength(0);
-      expect(banner()).toHaveAttribute('data-phase', 'starting');
-
-      await desktop.disconnect();
-      setItem.mockRestore();
-      api.getTaskFollowupRuns.mockClear();
-      api.getTaskFollowupRuns.mockResolvedValue(runsOf([{ taskId: 'fresh-run', status: 'processing' }]));
-      await desktop.connect('replaced-identity-generation', storedProfile, 'BBBBBBBBBBBBBBBBBBBBBB');
-      await flush();
-      expect(banner()).toBeNull();
-
-      await poll();
-      expect(banner()).toBeNull();
-      expect(handoffKeys()).toHaveLength(0);
-      expect(api.getTaskFollowupRuns).not.toHaveBeenCalled();
-      expect(api.postTaskFollowup).toHaveBeenCalledTimes(1);
-    } finally {
-      setItem.mockRestore();
-    }
-  });
-
-  it('drops a run link held in memory when the same profile’s credentials are replaced', async () => {
-    const setItem = refuseHandoffWrites();
-    try {
-      const desktop = desktopConnection();
-      await desktop.connect('first-transport-generation');
-      renderPage();
-      await flush();
-      api.getTaskFollowupRuns.mockResolvedValue(runsOf([{ taskId: 'fresh-run', status: 'completed' }]));
-      await postFollowup();
-      await flush();
-      expect(handoffKeys()).toHaveLength(0);
-      expect(within(banner()!).getByRole('link', { name: /View new run/ })).toHaveAttribute('href', '/tasks/fresh-run');
-
-      await desktop.disconnect();
-      await desktop.connect('replaced-identity-generation', storedProfile, 'BBBBBBBBBBBBBBBBBBBBBB');
-      await flush();
-      expect(banner()).toBeNull();
-      expect(screen.queryByRole('link', { name: /View new run/ })).toBeNull();
-      expect(handoffKeys()).toHaveLength(0);
-    } finally {
-      setItem.mockRestore();
-    }
   });
 });
 

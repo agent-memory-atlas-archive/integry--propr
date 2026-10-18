@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { API_BASE_URL, getDesktopConnectionScope, subscribeDesktopConnectionScope } from '../../api/apiClient';
 import { getTaskFollowupRuns, type PostFollowupResponse } from '../../api/proprApi';
 import { useCurrentUser } from '../../contexts/AuthContext';
+import { getRendererProfileStateGeneration, subscribeRendererProfileStateGeneration } from '../../desktop/rendererProfileState';
 
 /** A run the accepted follow-up started, as the page shows it. */
 export interface FollowupHandoffRun {
@@ -53,16 +54,22 @@ export const followupHandoffScope = (userId: string | null | undefined): string 
  * The live connection a post or lookup was sent over. A response is applied
  * only while that same connection is still current; one that lands after a
  * reconnect, even of the same profile, belongs to a connection that is gone.
+ * Nor is one applied once the desktop has cleared this renderer's state for a
+ * replaced identity, even before the new connection is published.
  */
 interface ConnectionGeneration {
   connection: ReturnType<typeof getDesktopConnectionScope>;
   endpoint: string;
+  cleared: number;
 }
 
-const currentGeneration = (): ConnectionGeneration => ({ connection: getDesktopConnectionScope(), endpoint: API_BASE_URL });
+const currentGeneration = (): ConnectionGeneration => ({
+  connection: getDesktopConnectionScope(), endpoint: API_BASE_URL, cleared: getRendererProfileStateGeneration(),
+});
 const isCurrentGeneration = (generation: ConnectionGeneration) => {
   const current = currentGeneration();
-  return current.connection === generation.connection && current.endpoint === generation.endpoint;
+  return current.connection === generation.connection && current.endpoint === generation.endpoint
+    && current.cleared === generation.cleared;
 };
 
 /** What a submission captures when it starts: where its receipt is remembered, and the connection it must still be on. */
@@ -139,18 +146,19 @@ export function useFollowupHandoff(sourceTaskId: string | undefined) {
   });
   // Only a request storage could not take is held here, for this page only. Once storage holds a
   // request, storage alone is authoritative: an entry the desktop cleared on an identity change stays gone.
-  // A held request is bound to the connection it was accepted or found on, since the stable key cannot tell
-  // a renewal from a credential replacement and nothing clears page memory when credentials change.
-  const [memory, setMemory] = useState<{ key: string; generation: ConnectionGeneration; value: StoredHandoff } | null>(null);
-  const memoryCurrent = memory !== null && memory.key === key && isCurrentGeneration(memory.generation);
+  // A held request is bound to the renderer state it was recorded in, so it is dropped exactly when the
+  // desktop clears that state for a replaced identity, and survives a renewal of the same one as storage does.
+  const cleared = useSyncExternalStore(subscribeRendererProfileStateGeneration, getRendererProfileStateGeneration);
+  const [memory, setMemory] = useState<{ key: string; cleared: number; value: StoredHandoff } | null>(null);
+  const memoryCurrent = memory !== null && memory.key === key && memory.cleared === cleared;
   const stored = useMemo(() => {
     const fromStorage = raw ? readStored(key) : null;
     return fromStorage ?? (memoryCurrent ? memory.value : null);
   }, [raw, key, memory, memoryCurrent]);
-  // A held request from a connection that is gone is dropped rather than kept for a later match.
+  // A held request from renderer state the desktop has since cleared is dropped rather than kept for a later match.
   useEffect(() => {
-    if (memory && !isCurrentGeneration(memory.generation)) setMemory(null);
-  }, [memory, connection]);
+    if (memory && memory.cleared !== cleared) setMemory(null);
+  }, [memory, cleared]);
 
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
@@ -159,7 +167,7 @@ export function useFollowupHandoff(sourceTaskId: string | undefined) {
 
   const save = useCallback((targetKey: string, value: StoredHandoff | null) => {
     const persisted = writeStored(targetKey, value);
-    setMemory(value && !persisted ? { key: targetKey, generation: currentGeneration(), value } : null);
+    setMemory(value && !persisted ? { key: targetKey, cleared: getRendererProfileStateGeneration(), value } : null);
   }, []);
 
   /** The scope and connection a submission starts in; `accept` records its receipt only while both are current. */
