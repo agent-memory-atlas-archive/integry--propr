@@ -245,3 +245,75 @@ for (const shell of shells) {
     expect(requests.filter(request => !request.startsWith('GET '))).toEqual([]);
   });
 }
+
+/**
+ * Where the line holding `field`'s caret sits relative to what the reader sees (inside the band, below the
+ * sticky header, inside every scroll area): `top`/`bottom` are non-negative when the whole line shows. The
+ * draft's lines are too short to wrap, so the caret's line is the number of line breaks before it.
+ */
+const caretShown = async (field: Locator, header: Locator, band: Band) => header.evaluate((head, [element, { offsetTop, height }]) => {
+  const area = element as HTMLTextAreaElement;
+  let low = Math.max(offsetTop, head.getBoundingClientRect().bottom);
+  let high = offsetTop + height;
+  for (let parent = area.parentElement; parent; parent = parent.parentElement) {
+    if (!/(auto|scroll|hidden|clip)/.test(getComputedStyle(parent).overflowY)) continue;
+    const clip = parent.getBoundingClientRect();
+    low = Math.max(low, clip.top); high = Math.min(high, clip.bottom);
+  }
+  const style = getComputedStyle(area);
+  const lineHeight = parseFloat(style.lineHeight);
+  const index = area.value.slice(0, area.selectionEnd).split('\n').length - 1;
+  const lineTop = area.getBoundingClientRect().top + area.clientTop + parseFloat(style.paddingTop) + index * lineHeight - area.scrollTop;
+  return { top: lineTop - low, bottom: high - (lineTop + lineHeight), fieldTop: area.getBoundingClientRect().top - low };
+}, [await field.elementHandle(), band] as const);
+
+for (const shell of shells) {
+  test(`${shell.name} keeps the caret's line of a long draft in view as the 89px landscape band pans and resizes`, async ({ page }) => {
+    await installKeyboardViewport(page, landscapeLayout);
+    await fixture(page);
+    await stubGoals(page);
+    await page.setViewportSize(landscapeLayout);
+    await page.goto(shell.path);
+    const dialog = page.getByRole('dialog', { name: shell.name });
+    const header = dialog.locator('header');
+    const heading = dialog.getByRole('heading', { name: shell.name });
+    const close = dialog.getByRole('button', { name: shell.close });
+    const field = dialog.getByLabel('Prompt', { exact: true });
+    await expect(field).toBeFocused();
+    const lines = Array.from({ length: 12 }, (_, line) => `Draft line ${line + 1}`);
+    await field.fill(lines.join('\n'));
+    // The caret goes to the end of line 9, well below what fits under the header.
+    await field.evaluate((element, at) => (element as HTMLTextAreaElement).setSelectionRange(at, at), lines.slice(0, 9).join('\n').length);
+    const expectCaretShown = async (band: Band) => {
+      const { top, bottom, fieldTop } = await caretShown(field, header, band);
+      expect(top, 'the caret line starts below the sticky header').toBeGreaterThanOrEqual(-0.5);
+      expect(bottom, 'the caret line ends above the keyboard').toBeGreaterThanOrEqual(-0.5);
+      // Showing the editing line means the field's start has scrolled away.
+      expect(fieldTop).toBeLessThan(0);
+      await expectShown([heading, close], band);
+    };
+
+    await setKeyboard(page, landscapeKeyboard);
+    await expectCaretShown(landscapeKeyboard);
+    // The reader scrolls the pane a little further down; the editing line still shows and stays put.
+    const pane = header.locator('..');
+    await pane.evaluate(element => { element.scrollTop += 2; });
+    await expectCaretShown(landscapeKeyboard);
+    const kept = await pane.evaluate(element => element.scrollTop);
+
+    // A pan alone, then a resize alone, each change the frame.
+    const panned: Band = { height: landscapeKeyboard.height, offsetTop: 200 };
+    await setKeyboard(page, panned, ['scroll']);
+    await expectCaretShown(panned);
+    expect(await pane.evaluate(element => element.scrollTop)).toBe(kept);
+    const taller: Band = { height: 107.866, offsetTop: 190 };
+    await setKeyboard(page, taller, ['resize']);
+    await expectCaretShown(taller);
+
+    // Typing lands on the caret's line, which is still in view.
+    await page.keyboard.type(' edited');
+    await expect(field).toHaveValue([...lines.slice(0, 8), 'Draft line 9 edited', ...lines.slice(9)].join('\n'));
+    await expectCaretShown(taller);
+    await captureVisible(page, `${shell.preview}-landscape-caret-line`, taller);
+  });
+}

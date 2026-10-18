@@ -199,6 +199,17 @@ test('Logs keeps its close, search and match controls above the keyboard and res
   expect(await scrollTop()).toBe(settled);
   await expectShown([title, close, current], logsBand);
   await expectReadableLines(content, logsBand, 3);
+  // A resize that changes the band's height (the keyboard's suggestion strip appearing, then
+  // going) reflows the shortened log; the last match stays selected and in view.
+  const shorter: Band = { height: logsBand.height - 40, offsetTop: logsBand.offsetTop + 40 };
+  await setKeyboard(page, shorter, ['resize']);
+  await expect(status).toHaveText(`${matches} / ${matches}`);
+  await currentShown(shorter);
+  await expectShown([title, close], shorter);
+  await setKeyboard(page, logsBand, ['resize']);
+  await expect(status).toHaveText(`${matches} / ${matches}`);
+  await currentShown(logsBand);
+  await expectShown([title, close, current], logsBand);
   await expect(search).toBeFocused();
 
   // Every file stays reachable from the shortened list, and switching files works above the keyboard.
