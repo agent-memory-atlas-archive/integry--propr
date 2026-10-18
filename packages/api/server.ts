@@ -84,6 +84,7 @@ import {
   getActiveTasksForPR,
   AGENT_RUNTIME_BUILD_QUEUE_NAME,
   notificationService,
+  queueSubmissionIntakeEvidence,
   runMigrations
 } from '@propr/core';
 import { initializeUltrafix } from './services/ultrafixInit.js';
@@ -443,7 +444,7 @@ export function setupRoutes(): void {
   storageSweep.unref();
   const agentVersionRoutes = createAgentVersionRoutes();
   const activeWorkRoutes = createActiveWorkRoutes({ db, taskQueue });
-  const taskSubmissionRoutes = createTaskSubmissionRoutes({ db });
+  const taskSubmissionRoutes = createTaskSubmissionRoutes({ db, services: demoMode ? {} : { intake: queueSubmissionIntakeEvidence(() => taskQueue) } });
   const goalRoutes = createGoalRoutes({ db, taskQueue, redisClient });
   const automationDefinitionRoutes = createAutomationDefinitionRoutes({ db, redisClient });
 

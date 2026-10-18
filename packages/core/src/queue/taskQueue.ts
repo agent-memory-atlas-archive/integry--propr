@@ -208,6 +208,23 @@ async function syncPlanRefinementForJobAttempt(job: Job | undefined): Promise<vo
 }
 
 /**
+ * A submission's intake job can fail for good before its processor runs, as
+ * when worktree admission refuses it, so nothing else records that it ended.
+ * Best effort: a submission left queued is still reconciled when it is read.
+ */
+async function finalizeSubmissionIntakeAttempt(job: Job | undefined, err: Error): Promise<void> {
+    if (!job) return;
+    try {
+        const { finalizeSubmissionIntakeFailure, queueSubmissionIntakeEvidence } = await import('../services/taskSubmissionIntake.js');
+        const evidence = queueSubmissionIntakeEvidence(() => getIssueQueue());
+        const outcome = await finalizeSubmissionIntakeFailure(job as unknown as Parameters<typeof finalizeSubmissionIntakeFailure>[0], err, { job: jobId => evidence.job(jobId) });
+        if (outcome === 'recorded') logger.warn({ jobId: job.id, errMessage: err.message }, 'Submission intake failed before any task; recorded it as retryable');
+    } catch (error) {
+        logger.warn({ jobId: job.id, error: (error as Error).message }, 'Failed to record a submission intake failure');
+    }
+}
+
+/**
  * Create a worker for processing jobs. Initializes Redis connection if needed.
  */
 export async function createWorker<T extends JobData = JobData, R extends JobResult = JobResult>(
@@ -273,6 +290,7 @@ export async function createWorker<T extends JobData = JobData, R extends JobRes
     worker.on('failed', async (job: Job<T> | undefined, err: Error) => {
         // BullMQ emits this after moving the job to delayed for its retry, or to failed for good.
         void syncPlanRefinementForJobAttempt(job as unknown as Job | undefined);
+        if (queueName === GITHUB_ISSUE_QUEUE_NAME) void finalizeSubmissionIntakeAttempt(job as unknown as Job | undefined, err);
         const jobData = job?.data as unknown as IssueJobData | undefined;
         logger.error({
             jobId: job?.id,

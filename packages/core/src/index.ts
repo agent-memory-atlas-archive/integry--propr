@@ -601,6 +601,7 @@ export * from './services/visualPreviewCapacityService.js';
 export * from './services/previewStorage/v1.js';
 export { createManagedPreviewStorageClient } from './services/previewStorage/runtime.js';
 export * from './services/taskSubmissionService.js';
+export * from './services/taskSubmissionIntake.js';
 export * from './services/taskSubmissionRetry.js';
 export * from './services/issueRetryRequest.js';
 export * from './services/issueRetryRun.js';
