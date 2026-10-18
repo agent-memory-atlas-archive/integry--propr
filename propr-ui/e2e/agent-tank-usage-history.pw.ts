@@ -4,7 +4,7 @@
  */
 
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { fixture, now } from './dashboard-sections.fixture';
+import { fixture, now, user } from './dashboard-sections.fixture';
 
 const HOUR = 3_600_000;
 const PREVIEWS = '../.propr/previews';
@@ -51,6 +51,10 @@ const EXTRA_POOLS = ['Claude Fable 5.1', 'Gemini 4 Flash', 'GPT-OSS'].map((name,
 }));
 
 async function stubHistory(page: Page, requests: URL[] = [], extra: typeof SERIES = {}) {
+  // History is real installation data, so it is read by an agent manager, not
+  // the fixture's demo viewer (who sees only the synthetic usage feed).
+  await page.route('**/api/auth/demo-mode', route => route.fulfill({ json: { demoMode: false } }));
+  await page.route('**/api/auth/user', route => route.fulfill({ json: { ...user, permissions: ['instance.manage_agents'] } }));
   await page.route('**/api/config/agent-tank/usage', route => route.fulfill({ json: usage }));
   await page.route('**/api/config/agent-tank/history?**', (route: Route) => {
     const url = new URL(route.request().url());

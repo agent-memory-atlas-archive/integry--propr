@@ -116,7 +116,9 @@ export function createManagementRouteEntries({
     ['post', '/api/config/agent-tank', requireManageAgents, configRoutes.postAgentTankSettings],
     ['get', '/api/config/agent-tank/status', requireManageAgents, configRoutes.getAgentTankStatus],
     ['get', '/api/config/agent-tank/usage', requireAgentTankUsageAccess, configRoutes.getAgentTankUsage],
-    ['get', '/api/config/agent-tank/history', requireAgentTankUsageAccess, configRoutes.getAgentTankHistory],
+    // History is read from this installation's own records and daemon; there is
+    // no synthetic demo history, so the demo exception does not extend to it.
+    ['get', '/api/config/agent-tank/history', requireManageAgents, configRoutes.getAgentTankHistory],
     ['post', '/api/config/agent-tank/refresh', requireManageAgents, configRoutes.postAgentTankRefresh],
     ['get', '/api/config/agent-tank/detect', requireManageAgents, configRoutes.getAgentTankDetect],
     ['get', '/api/config/preview-storage', requireManageSettings, visualPreviewAuthRoutes.getManagedStorageStatus],

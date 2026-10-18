@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { getAgentTankHistory, type AgentTankHistorySeries } from '../../api/revertApi';
 import { twoPeriodWindow } from './usageHistoryModel';
 
@@ -15,17 +15,50 @@ interface CachedHistory {
 
 const cache = new Map<string, CachedHistory>();
 
-/** Set once the backend reports history is off, so rows stop offering it. */
+/**
+ * Set when the backend reports history is off, so closed rows stop offering
+ * it. It lapses with the cache, and clears as soon as anything sees Agent Tank
+ * enabled again, so re-enabling never needs a reload to bring history back.
+ */
 let historyDisabled = false;
+let disabledExpiry: ReturnType<typeof setTimeout> | undefined;
+const listeners = new Set<() => void>();
+
+function setHistoryDisabled(disabled: boolean): void {
+  clearTimeout(disabledExpiry);
+  disabledExpiry = disabled ? setTimeout(() => setHistoryDisabled(false), CACHE_TTL_MS) : undefined;
+  if (!disabled) {
+    // A remembered "off" answer would otherwise keep showing for its TTL.
+    for (const [key, entry] of cache) if (!entry.enabled) cache.delete(key);
+  }
+  if (historyDisabled === disabled) return;
+  historyDisabled = disabled;
+  listeners.forEach(listener => listener());
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
 
 export function isUsageHistoryDisabled(): boolean {
   return historyDisabled;
 }
 
+/** Re-renders when history becomes unavailable or available again. */
+export function useUsageHistoryDisabled(): boolean {
+  return useSyncExternalStore(subscribe, isUsageHistoryDisabled);
+}
+
+/** Agent Tank reported enabled usage, so history is worth offering again. */
+export function noteAgentTankUsageEnabled(): void {
+  setHistoryDisabled(false);
+}
+
 /** Test-only seam. */
 export function resetUsageMetricHistoryCache(): void {
   cache.clear();
-  historyDisabled = false;
+  setHistoryDisabled(false);
 }
 
 export type UsageMetricHistoryState =
@@ -62,8 +95,8 @@ export function useUsageMetricHistory(
         const series = response.agents
           .find(entry => entry.agent === agent)?.series
           .find(entry => entry.key === historyKey) ?? null;
-        if (!response.enabled) historyDisabled = true;
         cache.set(cacheKey, { fetchedAt: until, since, until, series, enabled: response.enabled });
+        setHistoryDisabled(!response.enabled);
         setState({ status: 'ready', since, until, periodMs, series, enabled: response.enabled });
       })
       .catch((error: unknown) => {

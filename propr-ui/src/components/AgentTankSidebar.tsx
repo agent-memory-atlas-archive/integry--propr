@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { ChevronDown, ChevronRight, Gauge, RefreshCw } from 'lucide-react';
 import { getAgentTankUsage, refreshAgentTank, AgentTankUsageResponse, AgentUsageData } from '../api/revertApi';
 import { ProviderLogo } from './ui/ProviderLogo';
@@ -15,6 +15,7 @@ import {
 import { SIDEBAR_ICON_STROKE_WIDTH, SIDEBAR_ICON_STROKE_CLASS } from './icons/sidebarIconStroke';
 import { useLiveResource } from '../hooks/useLiveResource';
 import { UsageMetricHistoryTrigger } from './usageHistory/UsageMetricHistoryOverlay';
+import { noteAgentTankUsageEnabled } from './usageHistory/useUsageMetricHistory';
 
 // Which provider rows are expanded is a preference, not session state: someone
 // watching Claude's weekly quotas wants the same rows open after a reload.
@@ -246,6 +247,10 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({
   // A failed read keeps the last good numbers; with nothing read yet the widget
   // stays out of the sidebar rather than showing an empty frame.
   const data = usage ?? (usageError ? { enabled: false } : null);
+  // Enabled usage means history is back too, after an earlier read found it off.
+  useEffect(() => {
+    if (usage?.enabled) noteAgentTankUsageEnabled();
+  }, [usage]);
 
   const handleManualRefresh = useCallback(async () => {
     setRefreshing(true);

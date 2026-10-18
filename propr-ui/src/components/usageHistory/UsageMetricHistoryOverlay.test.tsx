@@ -3,7 +3,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { getAgentTankHistory, getAgentTankUsage, refreshAgentTank } from '../../api/revertApi';
 import type { AgentTankHistoryResponse, AgentTankUsageResponse } from '../../api/revertApi';
 import AgentTankSidebar from '../AgentTankSidebar';
-import { HOVER_OPEN_DELAY_MS } from './UsageMetricHistoryOverlay';
+import { DemoModeContext } from '../../contexts/DemoModeContext';
+import { HOVER_OPEN_DELAY_MS, UsageMetricHistoryTrigger } from './UsageMetricHistoryOverlay';
 import { resetUsageMetricHistoryCache } from './useUsageMetricHistory';
 import { currentPeriodStart, parseResetCountdown } from './usageHistoryModel';
 
@@ -197,7 +198,20 @@ describe('sidebar usage history overlay', () => {
     expect(await screen.findByText(/Not enough history yet/)).toBeInTheDocument();
   });
 
-  it('stops offering history once the backend reports it disabled', async () => {
+  it('stops offering history while the backend reports it disabled', async () => {
+    mockHistory.mockResolvedValue({ enabled: false, agents: [] });
+    render(<AgentTankSidebar />);
+    await expandProvider(/^Claude/);
+    fireEvent.click(metricRow('Session'));
+    expect(await screen.findByText(/not available/)).toBeInTheDocument();
+
+    // The other, closed rows go inert at once rather than on their next render.
+    expect(screen.getByText('Weekly').closest('[aria-haspopup="dialog"]')).toBeNull();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(document.querySelector('[aria-haspopup="dialog"]')).toBeNull();
+  });
+
+  it('offers history again once Agent Tank is re-enabled', async () => {
     mockHistory.mockResolvedValue({ enabled: false, agents: [] });
     const { unmount } = render(<AgentTankSidebar />);
     await expandProvider(/^Claude/);
@@ -205,9 +219,59 @@ describe('sidebar usage history overlay', () => {
     expect(await screen.findByText(/not available/)).toBeInTheDocument();
     await act(async () => { unmount(); });
 
+    // Re-enabled: the sidebar reads enabled usage again, and history is back.
+    mockHistory.mockImplementation(async query => history(query.agents?.[0] ?? '', query.metric ?? '', [5, 12, 17]));
     render(<AgentTankSidebar />);
     await screen.findByText('Usage');
+    await waitFor(() => expect(metricRow('Session')).not.toBeNull());
+    fireEvent.click(metricRow('Session'));
+
+    // The remembered "off" answer is not replayed: the row asks again.
+    expect(await screen.findByTestId('usage-metric-history-chart')).toBeInTheDocument();
+    expect(mockHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it('lets a disabled answer lapse, so rows outside the sidebar can retry', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true });
+    try {
+      mockHistory.mockResolvedValue({ enabled: false, agents: [] });
+      const metric = { label: 'Session', percent: 17, historyKey: 'session', cycle: 'session' };
+      render(
+        <>
+          <UsageMetricHistoryTrigger agent="claude" metric={metric}><span>Claude session</span></UsageMetricHistoryTrigger>
+          <UsageMetricHistoryTrigger agent="codex" metric={{ ...metric, historyKey: 'fiveHour' }}><span>Codex session</span></UsageMetricHistoryTrigger>
+        </>,
+      );
+      fireEvent.click(metricRow('Claude session'));
+      expect(await screen.findByText(/not available/)).toBeInTheDocument();
+      fireEvent.keyDown(document, { key: 'Escape' });
+      expect(document.querySelector('[aria-haspopup="dialog"]')).toBeNull();
+
+      mockHistory.mockImplementation(async query => history(query.agents?.[0] ?? '', query.metric ?? '', [5, 12, 17]));
+      await act(async () => { vi.advanceTimersByTime(60_000); });
+
+      expect(document.querySelectorAll('[aria-haspopup="dialog"]')).toHaveLength(2);
+      fireEvent.click(metricRow('Claude session'));
+      expect(await screen.findByTestId('usage-metric-history-chart')).toBeInTheDocument();
+      expect(mockHistory).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not offer real history to demo viewers', async () => {
+    render(
+      <DemoModeContext.Provider value={{ isDemoMode: true, isLoading: false }}>
+        <AgentTankSidebar />
+      </DemoModeContext.Provider>,
+    );
+    await expandProvider(/^Claude/);
+
+    expect(screen.getByText('Session')).toBeInTheDocument();
     expect(document.querySelector('[aria-haspopup="dialog"]')).toBeNull();
+    fireEvent.click(screen.getByText('Session'));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(mockHistory).not.toHaveBeenCalled();
   });
 });
 

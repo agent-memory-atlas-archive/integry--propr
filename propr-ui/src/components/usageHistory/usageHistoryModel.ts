@@ -7,6 +7,7 @@
 import { agentTankCyclePeriodMs } from '@propr/shared';
 import type { AgentTankHistoryAgent, AgentTankHistoryPoint, AgentTankHistorySeries } from '../../api/revertApi';
 import { getProviderDisplayName, getProviderRank } from '../agentTankMetrics';
+import { getModelDisplayName } from '../../utils/modelDisplay';
 import { stripRemainingSuffix } from '../../utils/usageMetricLabels';
 
 /**
@@ -43,14 +44,38 @@ const METRIC_LABELS: Record<string, string> = {
   fiveHour: 'Session',
 };
 
-/** Short label of a series within its agent ("Session", "Gemini 4 Argon · Weekly"). */
-export function usageMetricLabel(series: Pick<AgentTankHistorySeries, 'key' | 'label'>): string {
+type SeriesNaming = Pick<AgentTankHistorySeries, 'key' | 'label' | 'model'>;
+
+// Antigravity quota pools carry product wording ("Claude and GPT · Weekly
+// Limit", "Gemini 4 Argon Weekly Limit") that a model formatter would mangle.
+const isQuotaName = (name: string) => name.includes(' · ') || /\sLimit$/i.test(name);
+
+/**
+ * The series' full label, with any model identifier in it shown by its display
+ * name, as the sidebar shows it: an Antigravity `model:` series is labelled by
+ * its model id ("gemini-2.5-pro" → "Gemini 2.5 Pro"), a Codex per-model limit
+ * by the model followed by its window.
+ */
+export function readableSeriesLabel(series: SeriesNaming): string {
+  const label = series.label || series.key;
+  if (series.key.startsWith('model:')) {
+    const quotaName = stripRemainingSuffix(label);
+    return isQuotaName(quotaName) ? quotaName : stripRemainingSuffix(getModelDisplayName(label));
+  }
+  if (series.model && series.key.startsWith(`${series.model}:`) && label.startsWith(`${series.model} `)) {
+    return stripRemainingSuffix(`${getModelDisplayName(series.model)}${label.slice(series.model.length)}`);
+  }
+  return stripRemainingSuffix(label);
+}
+
+/** Short label of a series within its agent ("Session", "Gemini 4 Argon Weekly"). */
+export function usageMetricLabel(series: SeriesNaming): string {
   if (METRIC_LABELS[series.key]) return METRIC_LABELS[series.key];
-  return stripRemainingSuffix(series.label || series.key).replace(/\s+Limit$/i, '');
+  return readableSeriesLabel(series).replace(/\s+Limit$/i, '');
 }
 
 /** Full label naming the agent too ("Claude · Session"). */
-export function usageSeriesLabel(agent: string, series: Pick<AgentTankHistorySeries, 'key' | 'label'>): string {
+export function usageSeriesLabel(agent: string, series: SeriesNaming): string {
   return `${getProviderDisplayName(agent)} · ${usageMetricLabel(series)}`;
 }
 

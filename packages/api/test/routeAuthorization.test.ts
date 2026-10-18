@@ -86,6 +86,7 @@ const managementRequests = [
   ['GET', '/api/config/synthetic-agents'],
   ['POST', '/api/config/synthetic-agents'],
   ['GET', '/api/config/agent-tank/usage'],
+  ['GET', '/api/config/agent-tank/history'],
   ['GET', '/api/admin/members'],
   ['GET', '/api/admin/followup-handoffs'],
   ['GET', '/api/admin/followup-handoffs/integry/propr/42'],
@@ -153,7 +154,8 @@ describe('assembled instance permission routes', () => {
       const usageResponse = await fetch(`${origin}/api/config/agent-tank/usage`, { headers });
       assert.equal(usageResponse.status, 200);
 
-      for (const path of ['/api/config/agent-tank', '/api/config/agent-tank/status']) {
+      // History is real installation data, not the synthetic usage feed.
+      for (const path of ['/api/config/agent-tank', '/api/config/agent-tank/status', '/api/config/agent-tank/history']) {
         const response = await fetch(`${origin}${path}`, { headers });
         assert.equal(response.status, 403, path);
       }

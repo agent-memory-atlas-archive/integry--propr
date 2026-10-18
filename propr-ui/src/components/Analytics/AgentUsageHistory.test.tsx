@@ -121,6 +121,41 @@ describe('AgentUsageHistory', () => {
     expect(row).toHaveTextContent('30%');
   });
 
+  it('names model-derived series by display name, keeping quota pool wording', async () => {
+    mockHistory.mockResolvedValue({
+      enabled: true,
+      source: 'propr',
+      agents: [
+        {
+          agent: 'antigravity',
+          series: [
+            series('model:gemini-2.5-pro', 'gemini-2.5-pro', [10, 20]),
+            series('model:Claude and GPT · Weekly Limit Remaining', 'Claude and GPT · Weekly Limit Remaining', [5, 6]),
+            series('model:Gemini 4 Argon Weekly Limit', 'Gemini 4 Argon Weekly Limit', [20, 30]),
+          ],
+        },
+        { agent: 'codex', series: [{ ...series('gpt-5.3-codex:weekly', 'gpt-5.3-codex Weekly limit', [7, 8]), model: 'gpt-5.3-codex' }] },
+      ],
+    });
+    renderPane();
+    const filters = await screen.findByRole('group', { name: 'Filter usage history' });
+
+    const gemini = within(filters).getByRole('button', { name: /^Antigravity · Gemini 2\.5 Pro 20%/ });
+    expect(gemini).toHaveTextContent('Gemini 2.5 Pro');
+    expect(gemini).toHaveAttribute('title', 'Gemini 2.5 Pro');
+    const codex = within(filters).getByRole('button', { name: /^Codex · GPT-5\.3 Codex Weekly 8%/ });
+    expect(codex).toHaveAttribute('title', 'GPT-5.3 Codex Weekly limit');
+    expect(within(filters).getByRole('button', { name: /^Antigravity · Claude and GPT · Weekly 6%/ }))
+      .toHaveAttribute('title', 'Claude and GPT · Weekly Limit');
+    expect(within(filters).getByRole('button', { name: /^Antigravity · Gemini 4 Argon Weekly 30%/ })).toBeInTheDocument();
+    expect(filters.innerHTML).not.toMatch(/gemini-2\.5-pro|gpt-5\.3-codex/);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Table' }));
+    const table = screen.getByTestId('agent-usage-history-table');
+    expect(within(table).getByRole('row', { name: /Antigravity · Gemini 2\.5 Pro/ })).toBeInTheDocument();
+    expect(table.innerHTML).not.toMatch(/gemini-2\.5-pro|gpt-5\.3-codex/);
+  });
+
   it('renders nothing when Agent Tank is off or usage is not readable', async () => {
     mockHistory.mockResolvedValueOnce({ enabled: false, agents: [] });
     const { container, unmount } = renderPane();

@@ -22,7 +22,7 @@ import { getProviderDisplayName } from '../agentTankMetrics';
 import { SectionHeading } from '../Dashboard/sectionPrimitives';
 import { SkeletonBlock } from '../ui/Skeleton';
 import { SystemAlert } from '../ui/SystemAlert';
-import { MAX_USAGE_SERIES, assignUsageSeriesColors, flattenUsageHistory, usageMetricLabel } from '../usageHistory/usageHistoryModel';
+import { MAX_USAGE_SERIES, assignUsageSeriesColors, flattenUsageHistory, readableSeriesLabel, usageMetricLabel } from '../usageHistory/usageHistoryModel';
 import AgentUsageHistoryChart from './AgentUsageHistoryChart';
 import AgentUsageHistoryTable from './AgentUsageHistoryTable';
 import {
@@ -202,7 +202,7 @@ const AgentUsageHistory: React.FC = () => {
                         aria-label={`${series.displayLabel}${value}${unplotted ? ', not plotted' : ''}`}
                         onClick={() => toggleSeries(series.id)}
                         className={chipClass(on)}
-                        title={unplotted ? `${series.label} (not plotted: hide another metric to plot it)` : series.label}
+                        title={unplotted ? `${readableSeriesLabel(series)} (not plotted: hide another metric to plot it)` : readableSeriesLabel(series)}
                       >
                         <span
                           className={`h-2 w-2 flex-none rounded-full ${unplotted ? 'border border-slate-400' : ''}`}

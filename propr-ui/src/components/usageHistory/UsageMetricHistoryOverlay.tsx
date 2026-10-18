@@ -18,7 +18,8 @@ import { getProviderDisplayName, getTextColor, type UsageMetric } from '../agent
 import { SkeletonBlock } from '../ui/Skeleton';
 import UsageMetricHistoryChart from './UsageMetricHistoryChart';
 import { currentPeriodStart, twoPeriodWindow } from './usageHistoryModel';
-import { isUsageHistoryDisabled, useUsageMetricHistory, type UsageMetricHistoryState } from './useUsageMetricHistory';
+import { useDemoMode } from '../../contexts/DemoModeContext';
+import { useUsageHistoryDisabled, useUsageMetricHistory, type UsageMetricHistoryState } from './useUsageMetricHistory';
 
 export const HOVER_OPEN_DELAY_MS = 250;
 const HOVER_CLOSE_GRACE_MS = 150;
@@ -149,11 +150,14 @@ interface UsageMetricHistoryTriggerProps {
   className?: string;
 }
 
-/** Wraps a metric row so it opens that metric's history; inert without a history key. */
+/** Wraps a metric row so it opens that metric's history; inert without a history key or in demo mode. */
 export const UsageMetricHistoryTrigger: React.FC<UsageMetricHistoryTriggerProps> = ({
   agent, metric, children, className = '',
 }) => {
-  const historyKey = metric.historyKey;
+  const { isDemoMode } = useDemoMode();
+  // Demo viewers see the synthetic usage feed but may not read real history.
+  const historyKey = isDemoMode ? undefined : metric.historyKey;
+  const historyDisabled = useUsageHistoryDisabled();
   const [open, setOpen] = useState(false);
   const [pinned, setPinned] = useState(false);
   const [position, setPosition] = useState<Position | null>(null);
@@ -212,7 +216,7 @@ export const UsageMetricHistoryTrigger: React.FC<UsageMetricHistoryTriggerProps>
   }, [open, close]);
 
   // An overlay that is already open keeps showing why history is unavailable.
-  if (!historyKey || (isUsageHistoryDisabled() && !open)) return <div className={className}>{children}</div>;
+  if (!historyKey || (historyDisabled && !open)) return <div className={className}>{children}</div>;
 
   const hoverIn = (event: React.PointerEvent) => {
     if (event.pointerType !== 'mouse') return;
