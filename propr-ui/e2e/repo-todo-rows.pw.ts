@@ -81,6 +81,12 @@ const rowOf = (page: Page, content: string) =>
   page.getByTestId('repo-todo-row').filter({ has: page.getByText(content, { exact: true }) });
 const control = (row: Locator, action: string, content: string) =>
   row.getByRole('button', { name: `${action} todo: ${content}`, exact: true });
+/** Every action on an active row, in tab order. */
+const actions = (row: Locator, content: string) => [
+  row.getByRole('button', { name: `Reorder todo: ${content}` }),
+  control(row, 'Select', content), control(row, 'Complete', content),
+  control(row, 'Edit', content), control(row, 'Delete', content),
+];
 
 /** Opacity as painted: the product of the element's and every ancestor's opacity. */
 const paintedOpacity = (target: Locator) => target.evaluate(element => {
@@ -142,11 +148,7 @@ for (const width of [320, 390]) {
       const note = rowOf(page, NOTE);
       const long = rowOf(page, LONG);
       for (const [row, content] of [[note, NOTE], [long, LONG]] as const) {
-        await expectTouchRow(row, content, [
-          row.getByRole('button', { name: `Reorder todo: ${content}` }),
-          control(row, 'Select', content), control(row, 'Complete', content),
-          control(row, 'Edit', content), control(row, 'Delete', content),
-        ]);
+        await expectTouchRow(row, content, actions(row, content));
       }
       // A 65-character note reads in a couple of lines, not a narrow column.
       const lineHeight = await note.getByText(NOTE).evaluate(node => parseFloat(getComputedStyle(node).lineHeight));
@@ -213,6 +215,40 @@ for (const width of [320, 390]) {
   });
 }
 
+// `touch:` is a custom variant matching a coarse pointer OR a phone width, so
+// either condition alone gives the touch row.
+for (const { name, viewport, coarse } of [
+  { name: 'narrow fine pointer', viewport: { width: 390, height: 844 }, coarse: false },
+  { name: 'wide coarse pointer', viewport: { width: 1024, height: 768 }, coarse: true },
+]) {
+  test.describe(name, () => {
+    test.use({ viewport, isMobile: coarse, hasTouch: coarse });
+
+    test('rows use the touch layout', async ({ page }) => {
+      await todoStore(page);
+      await openTodos(page, target => (coarse ? target.tap() : target.click()));
+      expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(coarse);
+      expect(await page.evaluate(() => innerWidth)).toBe(viewport.width);
+      await expectTouchRow(rowOf(page, NOTE), NOTE, actions(rowOf(page, NOTE), NOTE));
+    });
+  });
+}
+
+test.describe('768px fine pointer', () => {
+  test.use({ viewport: { width: 768, height: 1024 } });
+
+  test('rows stay compact with hover-only edit/delete', async ({ page }) => {
+    await todoStore(page);
+    await openTodos(page, target => target.click());
+    await page.mouse.move(0, 0);
+    const note = rowOf(page, NOTE);
+    expect((await control(note, 'Select', NOTE).boundingBox())!).toMatchObject({ width: 16, height: 16 });
+    const edit = control(note, 'Edit', NOTE);
+    expect((await edit.boundingBox())!).toMatchObject({ width: 20, height: 20 });
+    await expect.poll(() => paintedOpacity(edit)).toBe(0);
+  });
+});
+
 test.describe('desktop', () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
@@ -257,12 +293,22 @@ test.describe('desktop', () => {
     await page.mouse.move(gripBox.x + gripBox.width / 2, target.y - 4, { steps: 4 });
     await page.mouse.up();
     await expect.poll(() => writes.length).toBe(2);
+    // The drop is finished once dnd-kit's drag overlay (a second copy of the
+    // dragged to-do) has animated into place and unmounted. The pointer sensor
+    // swallows every click for 50ms after the button lifts, so clicking the
+    // accordion as soon as the reorder is sent can be lost.
+    await expect(page.getByText(LONG, { exact: true })).toHaveCount(1);
+    await expect(page.getByTestId('repo-todo-row')).toHaveText([/Check invoice dates/, /Resume crawls from the last checkpoint/]);
     // Reordering active rows leaves the category's completed to-do in place.
-    await expect(page.getByRole('button', { name: /Completed Items/ })).toContainText('1');
+    const completed = page.getByRole('button', { name: /Completed Items/ });
+    await expect(completed).toContainText('1');
 
-    await page.getByRole('button', { name: /Completed Items/ }).click();
+    await completed.click();
+    await expect(completed).toHaveAttribute('aria-expanded', 'true');
     const done = rowOf(page, DONE);
+    await expect(done).toHaveCount(1);
     const remove = control(done, 'Delete', DONE);
+    await expect(remove).toBeAttached();
     await page.mouse.move(0, 0);
     await expect.poll(() => paintedOpacity(remove)).toBe(0);
     await done.hover();
