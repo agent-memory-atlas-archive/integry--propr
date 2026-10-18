@@ -10,13 +10,16 @@
  * repeat with a dash pattern, so the chart can draw every selected series.
  *
  * History only reaches back about two weeks, so the pane has its own range
- * instead of following the page timeframe. It renders nothing when Agent Tank
- * is off or the viewer may not read usage, like the sidebar's Usage section.
+ * instead of following the page timeframe. It re-reads when new usage is
+ * recorded, so an open page fills in and moves forward on its own. It renders
+ * nothing when Agent Tank is off or the viewer may not read usage, like the
+ * sidebar's Usage section.
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { getAgentTankHistory, type AgentTankHistoryResponse } from '../../api/revertApi';
+import { useLiveResource } from '../../hooks/useLiveResource';
 import { getProviderDisplayName } from '../agentTankMetrics';
 import { SectionHeading } from '../Dashboard/sectionPrimitives';
 import { SkeletonBlock } from '../ui/Skeleton';
@@ -47,27 +50,34 @@ function isPermissionError(error: unknown): boolean {
   return error instanceof Error && /instance\.manage_|permission|forbidden/i.test(error.message);
 }
 
+type SettledRead = Extract<ReadState, { status: 'hidden' | 'ready' }>;
+
+/**
+ * The pane's history, kept current while it is open. A usage push means the
+ * backend has just recorded a new sample, and the live resource's reconcile
+ * re-reads now and then regardless; each read asks for the range ending now,
+ * so the chart and its latest values move forward instead of freezing at mount.
+ */
 function useUsageHistoryRead(range: UsageRange): ReadState {
-  const [state, setState] = useState<ReadState>({ status: 'loading' });
-  useEffect(() => {
-    const controller = new AbortController();
-    const until = Date.now();
-    const since = until - USAGE_RANGE_MS[range];
-    setState(current => (current.status === 'hidden' ? current : { status: 'loading' }));
-    getAgentTankHistory({ since, until, signal: controller.signal })
-      .then(data => {
-        if (controller.signal.aborted) return;
-        setState(data.enabled ? { status: 'ready', data, since, until } : { status: 'hidden' });
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) return;
-        setState(isPermissionError(error)
-          ? { status: 'hidden' }
-          : { status: 'error', message: error instanceof Error ? error.message : 'Failed to load usage history' });
-      });
-    return () => controller.abort();
-  }, [range]);
-  return state;
+  const { data, error, loading } = useLiveResource<SettledRead>({
+    read: async signal => {
+      const until = Date.now();
+      const since = until - USAGE_RANGE_MS[range];
+      try {
+        const response = await getAgentTankHistory({ since, until, signal });
+        return response.enabled ? { status: 'ready', data: response, since, until } : { status: 'hidden' };
+      } catch (failure) {
+        if (isPermissionError(failure)) return { status: 'hidden' };
+        throw failure;
+      }
+    },
+    scopeKey: range,
+    interest: { usage: true },
+  });
+  // A failed refresh keeps the last good answer on screen.
+  if (data) return data;
+  if (loading) return { status: 'loading' };
+  return { status: 'error', message: error || 'Failed to load usage history' };
 }
 
 const chipClass = (on: boolean) => `inline-flex min-h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors ${

@@ -17,7 +17,12 @@ vi.mock('../api/revertApi', () => ({
 }));
 
 vi.mock('../contexts/useSocket', () => ({
-  useSocket: () => ({ isConnected: false, onTaskUpdate: () => () => {} }),
+  useSocket: () => ({
+    isConnected: false,
+    onTaskUpdate: () => () => {},
+    onActivityUpdate: () => () => {},
+    onUsageUpdate: () => () => {},
+  }),
 }));
 
 type TaskStats = Awaited<ReturnType<typeof getTaskStats>>;

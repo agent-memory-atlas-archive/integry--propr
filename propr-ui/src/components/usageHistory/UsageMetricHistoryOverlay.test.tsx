@@ -14,14 +14,19 @@ vi.mock('../../api/revertApi', () => ({
   getAgentTankHistory: vi.fn(),
 }));
 
-vi.mock('../../contexts/useSocket', () => ({
-  useSocket: () => ({
+const usageListeners = vi.hoisted(() => new Set<() => void>());
+vi.mock('../../contexts/useSocket', () => {
+  const socket = () => ({
     isConnected: true,
     onActivityUpdate: () => () => undefined,
     onNotificationUpdate: () => () => undefined,
-    onUsageUpdate: () => () => undefined,
-  }),
-}));
+    onUsageUpdate: (listener: () => void) => {
+      usageListeners.add(listener);
+      return () => { usageListeners.delete(listener); };
+    },
+  });
+  return { useSocket: socket, useOptionalSocket: socket };
+});
 
 const HOUR = 3_600_000;
 const mockUsage = vi.mocked(getAgentTankUsage);
@@ -196,6 +201,30 @@ describe('sidebar usage history overlay', () => {
     fireEvent.click(metricRow('Session'));
 
     expect(await screen.findByText(/Not enough history yet/)).toBeInTheDocument();
+  });
+
+  it('reads again when new usage is recorded while the overlay stays open', async () => {
+    mockHistory.mockResolvedValueOnce(history('claude', 'session', [17]));
+    render(<AgentTankSidebar />);
+    await expandProvider(/^Claude/);
+
+    fireEvent.click(metricRow('Session'));
+    expect(await screen.findByText(/Not enough history yet/)).toBeInTheDocument();
+    const before = mockHistory.mock.calls[0][0].until ?? 0;
+
+    // The pinned overlay fills in from the new samples, past the re-hover cache.
+    act(() => { usageListeners.forEach(listener => listener()); });
+    expect(await screen.findByTestId('usage-metric-history-chart')).toBeInTheDocument();
+    expect(screen.queryByText(/Not enough history yet/)).not.toBeInTheDocument();
+    const calls = mockHistory.mock.calls.filter(([query]) => query.metric === 'session');
+    expect(calls).toHaveLength(2);
+    expect(calls[1][0].until ?? 0).toBeGreaterThanOrEqual(before);
+
+    // Closed, it stops listening.
+    fireEvent.click(screen.getByRole('button', { name: 'Close usage history' }));
+    act(() => { usageListeners.forEach(listener => listener()); });
+    await new Promise(resolve => setTimeout(resolve, 150));
+    expect(mockHistory.mock.calls.filter(([query]) => query.metric === 'session')).toHaveLength(2);
   });
 
   it('stops offering history while the backend reports it disabled', async () => {

@@ -1,5 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { getAgentTankHistory, type AgentTankHistorySeries } from '../../api/revertApi';
+import { useOptionalSocket } from '../../contexts/useSocket';
 import { twoPeriodWindow } from './usageHistoryModel';
 
 /** Re-hovering a row within this long reuses the answer instead of refetching. */
@@ -67,8 +68,9 @@ export type UsageMetricHistoryState =
   | { status: 'ready'; since: number; until: number; periodMs: number; series: AgentTankHistorySeries | null; enabled: boolean };
 
 /**
- * One metric's history over its last two periods, read when `active` turns on.
- * The request is aborted if the overlay closes first.
+ * One metric's history over its last two periods, read when `active` turns on
+ * and read again, past the cache, whenever new usage is recorded while it
+ * stays open. The request is aborted if the overlay closes first.
  */
 export function useUsageMetricHistory(
   agent: string,
@@ -77,6 +79,25 @@ export function useUsageMetricHistory(
   active: boolean,
 ): UsageMetricHistoryState | null {
   const [state, setState] = useState<UsageMetricHistoryState | null>(null);
+  // Bumped by a usage push while open; zero again once the overlay closes.
+  const [revision, setRevision] = useState(0);
+  // Rows also render outside the socket provider (Settings' agent cards);
+  // there the overlay keeps its one read.
+  const onUsageUpdate = useOptionalSocket()?.onUsageUpdate;
+
+  useEffect(() => {
+    if (!active) {
+      setRevision(0);
+      return undefined;
+    }
+    if (!onUsageUpdate) return undefined;
+    // A push means the backend has just recorded a sample, so the cached
+    // answer for this metric is behind.
+    return onUsageUpdate(() => {
+      cache.delete(`${agent}\u0000${historyKey}`);
+      setRevision(current => current + 1);
+    });
+  }, [agent, historyKey, active, onUsageUpdate]);
 
   useEffect(() => {
     if (!active) return undefined;
@@ -88,7 +109,8 @@ export function useUsageMetricHistory(
       return undefined;
     }
     const controller = new AbortController();
-    setState({ status: 'loading', since, until, periodMs });
+    // A refresh keeps the chart on screen until the newer answer lands.
+    setState(current => (revision > 0 && current?.status === 'ready' ? current : { status: 'loading', since, until, periodMs }));
     getAgentTankHistory({ since, until, agents: [agent], metric: historyKey, signal: controller.signal })
       .then(response => {
         if (controller.signal.aborted) return;
@@ -107,7 +129,7 @@ export function useUsageMetricHistory(
         });
       });
     return () => controller.abort();
-  }, [agent, historyKey, cycle, active]);
+  }, [agent, historyKey, cycle, active, revision]);
 
   return active ? state : null;
 }

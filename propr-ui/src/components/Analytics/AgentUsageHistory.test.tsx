@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getAgentTankHistory, type AgentTankHistoryResponse } from '../../api/revertApi';
@@ -12,6 +12,18 @@ import {
 } from './usageHistoryView';
 
 vi.mock('../../api/revertApi', () => ({ getAgentTankHistory: vi.fn() }));
+const usageListeners = vi.hoisted(() => new Set<() => void>());
+vi.mock('../../contexts/useSocket', () => ({
+  useSocket: () => ({
+    isConnected: true,
+    onActivityUpdate: () => () => undefined,
+    onUsageUpdate: (listener: () => void) => {
+      usageListeners.add(listener);
+      return () => { usageListeners.delete(listener); };
+    },
+  }),
+}));
+const publishUsage = () => act(() => { usageListeners.forEach(listener => listener()); });
 // jsdom has no layout, so give the chart a fixed size and it draws its lines.
 vi.mock('recharts', async importOriginal => {
   const actual = await importOriginal<typeof import('recharts')>();
@@ -214,6 +226,59 @@ describe('AgentUsageHistory', () => {
     mockHistory.mockResolvedValue({ enabled: true, agents: [] });
     renderPane();
     expect(await screen.findByText(/No usage history yet/)).toBeInTheDocument();
+  });
+
+  it('fills in an empty history once new usage is recorded, without leaving the page', async () => {
+    mockHistory.mockResolvedValueOnce({ enabled: true, source: 'propr', agents: [] });
+    renderPane();
+    expect(await screen.findByText(/No usage history yet/)).toBeInTheDocument();
+    const first = mockHistory.mock.calls[0][0];
+
+    publishUsage();
+    expect(await screen.findByTestId('agent-usage-history-chart')).toBeInTheDocument();
+    expect(screen.queryByText(/No usage history yet/)).not.toBeInTheDocument();
+    // The re-read covers the same range, ending now rather than at mount.
+    const second = mockHistory.mock.calls[1][0];
+    expect((second.until ?? 0) - second.since).toBe(7 * DAY);
+    expect(second.until ?? 0).toBeGreaterThanOrEqual(first.until ?? 0);
+  });
+
+  it('moves the latest values forward and keeps the chart up while re-reading', async () => {
+    renderPane();
+    const filters = await screen.findByRole('group', { name: 'Filter usage history' });
+    expect(within(filters).getByRole('button', { name: /Claude · Session 17%/ })).toBeInTheDocument();
+
+    let answer: (value: AgentTankHistoryResponse) => void = () => undefined;
+    mockHistory.mockReturnValueOnce(new Promise(resolve => { answer = resolve; }));
+    publishUsage();
+    await waitFor(() => expect(mockHistory).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId('agent-usage-history-chart')).toBeInTheDocument();
+
+    const next = response();
+    next.agents[1].series[0] = series('session', 'Current session', [10, 30, 17, 44]);
+    answer(next);
+    expect(await within(filters).findByRole('button', { name: /Claude · Session 44%/ })).toBeInTheDocument();
+  });
+
+  it('keeps the last good history when a refresh fails', async () => {
+    renderPane();
+    await screen.findByTestId('agent-usage-history-chart');
+    mockHistory.mockRejectedValueOnce(new Error('Agent Tank unreachable'));
+
+    publishUsage();
+    await waitFor(() => expect(mockHistory).toHaveBeenCalledTimes(2));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(screen.getByTestId('agent-usage-history-chart')).toBeInTheDocument();
+    expect(screen.queryByText('Agent Tank unreachable')).not.toBeInTheDocument();
+  });
+
+  it('shows a read failure with nothing to keep, and stops listening once unmounted', async () => {
+    mockHistory.mockRejectedValueOnce(new Error('Agent Tank unreachable'));
+    const { unmount } = renderPane();
+    expect(await screen.findByText('Agent Tank unreachable')).toBeInTheDocument();
+
+    unmount();
+    expect(usageListeners.size).toBe(0);
   });
 });
 
