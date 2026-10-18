@@ -4,7 +4,7 @@ import { Knex } from 'knex';
 import type { AttributedUser, TaskAssignmentFilter } from '@propr/shared';
 import { timeApiStage } from '../apiPerformanceTiming.js';
 import { QUEUED_TASK_STATES, RUNNING_TASK_STATES } from './dashboardQueries.js';
-import { recordedRunScore } from './runScore.js';
+import { recordedReviewOutcome, recordedRunScore, type RunReviewOutcome } from './runScore.js';
 import { markMergedListPullRequests } from '../services/pullRequestMergeState.js';
 import { loadAttentionTaskIds } from './dashboardWorkQueries.js';
 import { narrowToTaskPage, type TaskSelection } from './taskGrouping.js';
@@ -249,7 +249,7 @@ export async function getTasksFromDb(query: TaskQuery): Promise<TaskPage> {
   await refreshAssignees(query.syncAssignees, containsTask);
 
   const taskIds = pageTasks.map((row: Record<string, unknown>) => String(row.task_id));
-  const { historyByTask, planStatusByTask, commentMetadataByTask, scoreByTask, commandModeByTask, assigneesByTask } = await timeApiStage(
+  const { historyByTask, planStatusByTask, commentMetadataByTask, scoreByTask, reviewOutcomeByTask, commandModeByTask, assigneesByTask } = await timeApiStage(
     'sql.tasks.enrichment',
     async () => enrichTaskPage(db, taskIds, Boolean(excludeMerged))
   );
@@ -269,6 +269,7 @@ export async function getTasksFromDb(query: TaskQuery): Promise<TaskPage> {
     model: identities.get(String(row.task_id))?.modelName ?? null,
     llmProvider: identities.get(String(row.task_id))?.agentAlias ?? null,
     score: scoreByTask.get(String(row.task_id)) ?? null,
+    reviewOutcome: reviewOutcomeByTask.get(String(row.task_id)) ?? null,
     assignees: assigneesByTask.get(String(row.task_id)) ?? [],
     ...(media[index].previews.length ? { previewMedia: media[index].previews } : {}),
   }));
@@ -308,6 +309,8 @@ interface TaskPageEnrichment {
   commentMetadataByTask: Map<string, unknown>;
   /** The score the task's latest run recorded when it completed (a review's `Score 6/10`). */
   scoreByTask: Map<string, number>;
+  /** What the review that recorded that score came to, when its completion says. */
+  reviewOutcomeByTask: Map<string, RunReviewOutcome>;
   commandModeByTask: Map<string, string>;
   /** Stored assignees from the local projection; tasks without any have no entry. */
   assigneesByTask: Map<string, AttributedUser[]>;
@@ -317,8 +320,9 @@ interface TaskPageEnrichment {
 const RUN_START_STATES: readonly string[] = [...QUEUED_TASK_STATES, ...RUNNING_TASK_STATES];
 
 /**
- * The latest recorded command mode and the score of each task's latest run.
- * Modes can change as ultrafix alternates reviews and fixes. Only completions at the end of the
+ * The latest recorded command mode and the score of each task's latest run,
+ * with the review outcome the same completion recorded. Modes can change as
+ * ultrafix alternates reviews and fixes. Only completions at the end of the
  * task's history count: once a task is started again, an earlier run's score
  * no longer describes it, and a run still in flight has none.
  */
@@ -329,6 +333,7 @@ async function loadRunMetadata(db: Knex, taskIds: string[]) {
     .select('task_id', 'state', 'metadata')
     .orderBy([{ column: 'timestamp', order: 'desc' }, { column: 'history_id', order: 'desc' }]) as Array<Record<string, unknown>>;
   const scores = new Map<string, number>();
+  const reviewOutcomes = new Map<string, RunReviewOutcome>();
   const settled = new Set<string>();
   const commandModeByTask = new Map<string, string>();
   for (const row of rows) {
@@ -348,10 +353,12 @@ async function loadRunMetadata(db: Knex, taskIds: string[]) {
     const score = recordedRunScore(row.metadata);
     if (score !== null) {
       scores.set(taskId, score);
+      const outcome = recordedReviewOutcome(row.metadata);
+      if (outcome !== null) reviewOutcomes.set(taskId, outcome);
       settled.add(taskId);
     }
   }
-  return { scoreByTask: scores, commandModeByTask };
+  return { scoreByTask: scores, reviewOutcomeByTask: reviewOutcomes, commandModeByTask };
 }
 
 async function enrichTaskPage(db: Knex, taskIds: string[], excludeMerged: boolean): Promise<TaskPageEnrichment> {
@@ -401,10 +408,10 @@ async function enrichTaskPage(db: Knex, taskIds: string[], excludeMerged: boolea
     if (!planStatusByTask.has(taskId)) planStatusByTask.set(taskId, row.status);
   }
 
-  const { scoreByTask, commandModeByTask } = await loadRunMetadata(db, taskIds);
+  const { scoreByTask, reviewOutcomeByTask, commandModeByTask } = await loadRunMetadata(db, taskIds);
   const assigneesByTask = await loadPageAssignees(db, taskIds);
 
-  return { historyByTask, planStatusByTask, commentMetadataByTask, scoreByTask, commandModeByTask, assigneesByTask };
+  return { historyByTask, planStatusByTask, commentMetadataByTask, scoreByTask, reviewOutcomeByTask, commandModeByTask, assigneesByTask };
 }
 
 function parseRepositoryParts(repository: unknown): { owner: string | null; name: string | null } {
