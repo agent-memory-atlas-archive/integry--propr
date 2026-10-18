@@ -79,6 +79,9 @@ function clipToViewport(base: DOMRect, viewport: VisualViewport) {
   return top - base.top < 1 && base.bottom - bottom < 1 ? null : { top, bottom };
 }
 
+/** A scroll area that currently has something to scroll; one laid out at its content height does not. */
+const scrolls = (element: HTMLElement) => /(auto|scroll)/.test(getComputedStyle(element).overflowY) && element.scrollHeight > element.clientHeight + 1;
+
 /**
  * Scrolls `element`'s scroll container inside `layer` so it is shown between `top` and `bottom`. Only that
  * container moves: `scrollIntoView` would also scroll the pane's `overflow: hidden` box and
@@ -87,10 +90,15 @@ function clipToViewport(base: DOMRect, viewport: VisualViewport) {
  */
 function revealWithin(element: HTMLElement, layer: HTMLElement, top: number, bottom: number) {
   let container: HTMLElement | null = element.parentElement;
-  while (container && container !== layer && !/(auto|scroll)/.test(getComputedStyle(container).overflowY)) container = container.parentElement;
+  while (container && container !== layer && !scrolls(container)) container = container.parentElement;
   if (!container || container === layer) return;
   const area = container.getBoundingClientRect();
-  const low = Math.max(top, area.top);
+  const edge = Math.max(top, area.top);
+  let low = edge;
+  // A header that sticks to the top of the scrolling pane covers what scrolls under it.
+  for (const child of Array.from(container.children)) {
+    if (child instanceof HTMLElement && getComputedStyle(child).position === 'sticky') low = Math.max(low, child.getBoundingClientRect().bottom);
+  }
   const high = Math.min(bottom, area.bottom);
   const rect = element.getBoundingClientRect();
   if (rect.top >= low - 1 && rect.bottom <= high + 1) return;
@@ -100,6 +108,6 @@ function revealWithin(element: HTMLElement, layer: HTMLElement, top: number, bot
   const labelledBy = element.closest('[role="dialog"]')?.getAttribute('aria-labelledby');
   const heading = labelledBy ? document.getElementById(labelledBy) : null;
   if (!heading || !container.contains(heading)) return;
-  const hidden = low - heading.getBoundingClientRect().top;
+  const hidden = edge - heading.getBoundingClientRect().top;
   if (hidden > 0) container.scrollTop = Math.max(before, container.scrollTop - hidden);
 }
