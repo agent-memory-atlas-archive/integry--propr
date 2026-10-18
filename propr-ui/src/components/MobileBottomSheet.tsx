@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { ChevronLeft, X } from 'lucide-react';
+import { useVisualViewportFrame } from '../hooks/useVisualViewportFrame';
 
 const focusableSelector = [
   'a[href]',
@@ -28,9 +29,13 @@ interface BottomSheetProps {
 // scrim dims and blurs the page so a white sheet never floats on a white
 // dashboard. The bottom padding keeps the last row 20px clear of the
 // home-gesture bar. The close button is a 44px touch target; its negative
-// margins keep the header the same height.
+// margins keep the header the same height. While an on-screen keyboard pans
+// the visible area (the expanded New To-do form), the layer follows it and the
+// sheet is capped to it, so its header stays in view above the keyboard.
 const BottomSheet: React.FC<BottomSheetProps> = ({ id, title, titleIcon, closeLabel, onClose, onBack, backLabel = 'Back', children }) => {
+  const layerRef = useRef<HTMLDivElement>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
+  useVisualViewportFrame(layerRef);
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
@@ -71,7 +76,7 @@ const BottomSheet: React.FC<BottomSheetProps> = ({ id, title, titleIcon, closeLa
   }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 md:hidden">
+    <div ref={layerRef} className="fixed inset-0 z-50 md:hidden">
       <div
         data-testid={`${id}-backdrop`}
         className="fixed inset-0 z-40 cursor-default bg-slate-900/40 backdrop-blur-sm animate-fade-in motion-reduce:animate-none"
@@ -85,7 +90,7 @@ const BottomSheet: React.FC<BottomSheetProps> = ({ id, title, titleIcon, closeLa
         aria-modal="true"
         aria-labelledby={`${id}-title`}
         tabIndex={-1}
-        className="absolute inset-x-0 bottom-0 z-50 max-h-[min(90vh,44rem)] overflow-y-auto rounded-t-2xl bg-white pb-[calc(1.25rem+env(safe-area-inset-bottom))] shadow-2xl animate-sheet-up motion-reduce:animate-none"
+        className="absolute inset-x-0 bottom-0 z-50 max-h-[min(90vh,44rem,100%)] overflow-y-auto rounded-t-2xl bg-white pb-[calc(1.25rem+env(safe-area-inset-bottom))] shadow-2xl animate-sheet-up motion-reduce:animate-none"
       >
         <div className="sticky top-0 z-10 flex items-center gap-1 border-b border-slate-200 bg-white px-4 py-3">
           {onBack && (

@@ -14,12 +14,14 @@ const FRAME_PROPERTIES = ['top', 'bottom', 'height'] as const;
  *
  * A clipped layer carries `data-visual-viewport="clipped"` so its content can
  * compact (e.g. `group-data-[visual-viewport=clipped]:`) to leave room to edit.
+ * A dialog that stays mounted while closed passes `active` so the layer is
+ * framed each time it renders.
  */
-export function useVisualViewportFrame(ref: RefObject<HTMLElement | null>) {
+export function useVisualViewportFrame(ref: RefObject<HTMLElement | null>, active = true) {
   useLayoutEffect(() => {
     const viewport = window.visualViewport;
     const layer = ref.current;
-    if (!viewport || !layer) return;
+    if (!active || !viewport || !layer) return;
     const reset = () => {
       for (const property of FRAME_PROPERTIES) layer.style.removeProperty(property);
       delete layer.dataset.visualViewport;
@@ -53,7 +55,7 @@ export function useVisualViewportFrame(ref: RefObject<HTMLElement | null>) {
       window.removeEventListener('resize', update);
       reset();
     };
-  }, [ref]);
+  }, [ref, active]);
 }
 
 /** Scrolls `element` into its scroll container when it is not fully shown between `top` and `bottom`. */
@@ -70,5 +72,5 @@ function revealWithin(element: HTMLElement, top: number, bottom: number) {
   const rect = element.getBoundingClientRect();
   if (rect.top >= low - 1 && rect.bottom <= high + 1) return;
   // A field taller than the space left shows its start; otherwise all of it.
-  element.scrollIntoView({ block: rect.height > high - low ? 'start' : 'nearest', inline: 'nearest' });
+  element.scrollIntoView?.({ block: rect.height > high - low ? 'start' : 'nearest', inline: 'nearest' });
 }

@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react';
 import { Zap } from 'lucide-react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CreationDialog } from '../components/CreationDialog';
+import FollowupModal from '../components/TaskDetails/FollowupModal';
 
 /** A visual viewport the test can shrink and pan like an on-screen keyboard does. */
 class FakeVisualViewport extends EventTarget {
@@ -79,5 +80,18 @@ describe('creation dialog on a keyboard-sized visual viewport', () => {
     expect(viewport.listeners).toBe(0);
     viewport.set({ height: 100, offsetTop: 10 });
     expect(document.querySelector('.app-modal-layer')).toBeNull();
+  });
+
+  it('frames a dialog that stays mounted while closed each time it opens, and releases it on close', () => {
+    const followup = (isOpen: boolean) => <FollowupModal isOpen={isOpen} onClose={vi.fn()} onSubmit={vi.fn()} initialContent=""
+      target={{ taskId: 'task-1', repository: 'integry/propr', kind: 'issue', number: 3243 }} />;
+    const { rerender } = render(followup(false));
+    expect(viewport.listeners).toBe(0);
+    viewport.set({ height: 382.133, offsetTop: 146.4 });
+    rerender(followup(true));
+    expect(layer().style.top).toBe('146.4px');
+    expect(viewport.listeners).toBe(2);
+    rerender(followup(false));
+    expect(viewport.listeners).toBe(0);
   });
 });

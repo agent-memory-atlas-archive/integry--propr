@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { inertOutside } from '../../utils/modalBackground';
 import { useLockTaskScroll } from './useLockTaskScroll';
+import { useVisualViewportFrame } from '../../hooks/useVisualViewportFrame';
 
 const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])';
 
@@ -25,12 +26,15 @@ interface TaskDialogProps {
  */
 const TaskDialog: React.FC<TaskDialogProps> = ({ title, closeLabel, onClose, sizeClass, testId, children }) => {
   const titleId = useId();
+  const layerRef = useRef<HTMLDivElement>(null);
   const paneRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
   useLockTaskScroll(true);
+  // Typing in the log search opens a keyboard that pans the visible area; the layer follows it.
+  useVisualViewportFrame(layerRef);
 
   useEffect(() => {
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -62,7 +66,7 @@ const TaskDialog: React.FC<TaskDialogProps> = ({ title, closeLabel, onClose, siz
   }, []);
 
   return createPortal(
-    <div className="app-modal-layer fixed inset-0 z-50 flex items-stretch justify-center bg-black/50 p-0 sm:items-center sm:p-4">
+    <div ref={layerRef} className="app-modal-layer fixed inset-0 z-50 flex items-stretch justify-center bg-black/50 p-0 sm:items-center sm:p-4">
       <div
         ref={paneRef}
         role="dialog"
@@ -70,7 +74,7 @@ const TaskDialog: React.FC<TaskDialogProps> = ({ title, closeLabel, onClose, siz
         aria-labelledby={titleId}
         tabIndex={-1}
         data-testid={testId}
-        className={`flex h-full w-full min-w-0 flex-col overflow-hidden border-gray-300 bg-white shadow-lg outline-none sm:max-h-[85vh] sm:rounded-lg sm:border ${sizeClass}`}
+        className={`flex h-full w-full min-w-0 flex-col overflow-hidden border-gray-300 bg-white shadow-lg outline-none sm:max-h-[min(85vh,100%)] sm:rounded-lg sm:border ${sizeClass}`}
       >
         <div className="flex flex-none items-center justify-between gap-2 border-b border-gray-200 py-1 pl-4 pr-1 sm:py-2 sm:pr-2">
           <h2 id={titleId} className="min-w-0 break-words text-lg font-semibold text-gray-900">{title}</h2>
