@@ -20,18 +20,20 @@ export async function installKeyboardViewport(page: Page, layout: { width: numbe
     for (const key of Object.keys(state) as Array<keyof typeof state>) Object.defineProperty(viewport, key, { get: () => state[key] });
     Object.defineProperty(window, 'visualViewport', { configurable: true, get: () => viewport });
     Object.assign(window, {
-      __keyboard(next: { height: number; offsetTop: number }) {
+      __keyboard(next: { height: number; offsetTop: number }, events: string[]) {
         Object.assign(state, next, { pageTop: next.offsetTop });
-        target.dispatchEvent(new Event('resize'));
-        target.dispatchEvent(new Event('scroll'));
+        for (const type of events) target.dispatchEvent(new Event(type));
       },
       __viewportListeners: () => listeners,
     });
   }, layout);
 }
 
-export const setKeyboard = (page: Page, next: Band) =>
-  page.evaluate(value => (window as unknown as { __keyboard(v: typeof value): void }).__keyboard(value), next);
+/** Which `visualViewport` events a change delivers: a pan following the caret only scrolls, a keyboard opening or closing does both. */
+export type ViewportEvent = 'resize' | 'scroll';
+
+export const setKeyboard = (page: Page, next: Band, events: ViewportEvent[] = ['resize', 'scroll']) =>
+  page.evaluate(([value, types]) => (window as unknown as { __keyboard(v: Band, e: ViewportEvent[]): void }).__keyboard(value, types), [next, events] as const);
 export const listenerCount = (page: Page) => page.evaluate(() => (window as unknown as { __viewportListeners(): number }).__viewportListeners());
 
 /** Every target lies fully within the visible band `[offsetTop, offsetTop + height]`. */
@@ -77,6 +79,26 @@ export async function expectFieldVisible(field: Locator, band: Band, min = 72) {
     return high - low;
   }, { top: band.offsetTop, bottom: band.offsetTop + band.height });
   expect(shown, 'visible field height').toBeGreaterThanOrEqual(min);
+}
+
+/**
+ * A scrolling text area shows at least `lines` complete lines: its content box (inside
+ * padding), cut to its clipping ancestors and the visible band, is that many line-heights tall.
+ */
+export async function expectReadableLines(area: Locator, band: Band, lines = 3) {
+  const { shown, lineHeight } = await area.evaluate((element, { top, bottom }) => {
+    const style = getComputedStyle(element);
+    const box = element.getBoundingClientRect();
+    let low = Math.max(top, box.top + element.clientTop + parseFloat(style.paddingTop));
+    let high = Math.min(bottom, box.top + element.clientTop + element.clientHeight - parseFloat(style.paddingBottom));
+    for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+      if (!/(auto|scroll|hidden|clip)/.test(getComputedStyle(parent).overflowY)) continue;
+      const clip = parent.getBoundingClientRect();
+      low = Math.max(low, clip.top); high = Math.min(high, clip.bottom);
+    }
+    return { shown: high - low, lineHeight: parseFloat(style.lineHeight) };
+  }, { top: band.offsetTop, bottom: band.offsetTop + band.height });
+  expect(shown, `${area} shows ${lines} complete ${lineHeight}px lines`).toBeGreaterThanOrEqual(lines * lineHeight - 0.5);
 }
 
 /** The layer's inline frame is gone, so the stylesheet geometry applies again. */

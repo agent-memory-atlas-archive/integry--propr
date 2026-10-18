@@ -10,10 +10,10 @@ class FakeVisualViewport extends EventTarget {
   listeners = 0;
   addEventListener(...args: Parameters<EventTarget['addEventListener']>) { this.listeners++; super.addEventListener(...args); }
   removeEventListener(...args: Parameters<EventTarget['removeEventListener']>) { this.listeners--; super.removeEventListener(...args); }
-  set(next: Partial<Pick<FakeVisualViewport, 'height' | 'offsetTop' | 'scale'>>) {
+  /** A pan following the caret only scrolls; the keyboard opening or closing also resizes. */
+  set(next: Partial<Pick<FakeVisualViewport, 'height' | 'offsetTop' | 'scale'>>, events: Array<'resize' | 'scroll'> = ['resize', 'scroll']) {
     Object.assign(this, next);
-    this.dispatchEvent(new Event('resize'));
-    this.dispatchEvent(new Event('scroll'));
+    for (const type of events) this.dispatchEvent(new Event(type));
   }
 }
 
@@ -50,10 +50,28 @@ describe('creation dialog on a keyboard-sized visual viewport', () => {
     expect(layer().style.top).toBe('186.133px');
     expect(parseFloat(layer().style.height)).toBeCloseTo(382.133, 3);
     expect(layer().style.bottom).toBe('auto');
-    viewport.set({ offsetTop: 40 });
+    viewport.set({ offsetTop: 40 }, ['scroll']);
     expect(layer().style.top).toBe('40px');
+    viewport.set({ height: 300 }, ['resize']);
+    expect(layer().style.height).toBe('300px');
     viewport.set({ height: 692, offsetTop: 0 });
     expect(layer().style.cssText).not.toMatch(/top|height|bottom/);
+  });
+
+  it('measures without unframing the live layer, so an unchanged frame leaves it untouched', () => {
+    render(dialog());
+    viewport.set({ height: 382.133, offsetTop: 186.133 });
+    const mutations: MutationRecord[] = [];
+    const observer = new MutationObserver(records => mutations.push(...records));
+    observer.observe(layer(), { attributes: true });
+    viewport.set({}, ['scroll']);
+    viewport.set({}, ['resize']);
+    window.dispatchEvent(new Event('resize'));
+    mutations.push(...observer.takeRecords());
+    observer.disconnect();
+    expect(mutations).toEqual([]);
+    expect(layer().style.top).toBe('186.133px');
+    expect(document.querySelectorAll('.app-modal-layer')).toHaveLength(1);
   });
 
   it('positions from the current viewport when opened with the keyboard already up', () => {

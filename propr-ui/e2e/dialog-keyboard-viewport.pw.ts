@@ -6,7 +6,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { ago, fixture as taskFixture } from './task-list-desktop.fixture';
 import { fixture as todoFixture } from './quick-add-todo.fixture';
-import { captureVisible, expectFieldVisible, expectShown, expectUnframed, installKeyboardViewport, listenerCount, setKeyboard, type Band } from './keyboard-viewport.fixture';
+import { captureVisible, expectFieldVisible, expectReadableLines, expectShown, expectUnframed, installKeyboardViewport, listenerCount, setKeyboard, type Band } from './keyboard-viewport.fixture';
 
 // Measured on a Samsung SM-S908B in Chrome 155: the layout viewport stays 384×692 while
 // the keyboard leaves these visible bands for each dialog's focused field.
@@ -22,9 +22,13 @@ test.use({ viewport: layout, isMobile: true, hasTouch: true });
 
 const taskId = 'issue-3243-run-0';
 const sessionId = 'session-issue-3243-run-0';
-const eventsName = 'issue-3243-execution-events.log';
-const conversationName = 'issue-3243-conversation.json';
-const eventLines = Array.from({ length: 80 }, (_, line) => line % 13 === 4 ? `[INFO] step ${line}: acceptance check passed` : `[INFO] step ${line}: working`);
+// The files a run writes, named as production names them: the selected output file's
+// name wraps to two lines on the phone.
+const outputName = 'issue-28-2026-10-17T21-15-00-788Z-output.txt';
+const conversationName = 'issue-28-2026-10-17T21-15-00-788Z-conversation.json';
+// A long output with six matches, the last a few lines from its end.
+const outputLines = Array.from({ length: 400 }, (_, line) => line % 79 === 0 && line > 0 || line === 396
+  ? `[INFO] step ${line}: acceptance check passed for the changed files` : `[INFO] step ${line}: running npm test --workspace propr-ui -- --reporter=dot`);
 
 async function stubTask(page: Page, posts: string[]) {
   await taskFixture(page);
@@ -39,9 +43,9 @@ async function stubTask(page: Page, posts: string[]) {
   } }));
   await page.route(`**/api/task/${taskId}/live-details`, route => route.fulfill({ json: { events: [], todos: [], currentTask: null } }));
   await page.route(`**/api/execution/${sessionId}/logs`, route => route.fulfill({ json: {
-    sessionId, files: { events: `/var/log/propr/${eventsName}`, conversation: `/var/log/propr/${conversationName}` },
+    sessionId, files: { conversation: `/var/log/propr/${conversationName}`, output: `/var/log/propr/${outputName}` },
   } }));
-  await page.route(`**/api/execution/${sessionId}/logs/events`, route => route.fulfill({ contentType: 'text/plain', body: eventLines.join('\n') }));
+  await page.route(`**/api/execution/${sessionId}/logs/output`, route => route.fulfill({ contentType: 'text/plain', body: outputLines.join('\n') }));
   await page.route(`**/api/execution/${sessionId}/logs/conversation`, route => route.fulfill({ contentType: 'text/plain', body: JSON.stringify({ message: 'acceptance' }) }));
   // The comment posts but its dispatch fails: the dialog shows the receipt instead of closing.
   await page.route(`**/api/tasks/${taskId}/followup`, route => {
@@ -89,7 +93,7 @@ test('Follow Up on Task keeps its heading and close above the keyboard, keeps th
   await captureVisible(page, 'followup-keyboard-open', followupBand);
 
   // The caret pans the band without a resize, then the phone rotates with the keyboard open.
-  await setKeyboard(page, { height: followupBand.height, offsetTop: 60 });
+  await setKeyboard(page, { height: followupBand.height, offsetTop: 60 }, ['scroll']);
   await expectShown([heading, close], { height: followupBand.height, offsetTop: 60 });
   await page.setViewportSize({ width: layout.height, height: layout.width });
   await setKeyboard(page, landscape);
@@ -139,32 +143,65 @@ test('Logs keeps its close, search and match controls above the keyboard and res
   const layer = layerOf(dialog);
   await expect(close).toBeFocused();
   const before = (await close.boundingBox())!;
-  await dialog.getByRole('button', { name: new RegExp(eventsName) }).click();
-  await expect(content).toContainText('step 79');
+  await dialog.getByRole('button', { name: new RegExp(outputName) }).click();
+  await expect(content).toContainText('step 399');
+  // Without the keyboard the open file's name wraps onto a second line.
+  const fileHeading = dialog.getByRole('heading', { name: outputName, exact: true });
+  expect((await fileHeading.boundingBox())!.height).toBeGreaterThan(40);
 
   await search.focus();
   await setKeyboard(page, logsBand);
   await search.pressSequentially('acceptance');
-  const matches = eventLines.filter(line => line.includes('acceptance')).length;
+  const matches = outputLines.filter(line => line.includes('acceptance')).length;
   await expect(status).toHaveText(`1 / ${matches}`);
   const prev = dialog.getByRole('button', { name: 'Previous match' });
   const next = dialog.getByRole('button', { name: 'Next match' });
   const clear = dialog.getByRole('button', { name: 'Clear log search' });
+  const current = content.locator('mark[aria-current="true"]');
+  const currentShown = (band: Band) => expect.poll(async () => { try { await expectShown([current], band); return true; } catch { return false; } }).toBe(true);
   await expectShown([title, close, search, status, prev, next, clear], logsBand);
-  await expectFieldVisible(content, logsBand, 40);
+  for (const control of [close, search, prev, next, clear]) expect((await control.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  // The log keeps three complete lines above the keyboard and shows the current match whole.
+  await expectReadableLines(content, logsBand, 3);
+  await currentShown(logsBand);
+  // The open file's whole name stays its accessible name while it takes one line.
+  await expect(fileHeading).toHaveText(outputName);
+  await expect(content).toHaveAccessibleName(`Contents of ${outputName}`);
   await expect(search).toBeFocused();
   await captureVisible(page, 'logs-search-keyboard-open', logsBand);
 
   // Match navigation scrolls the log to each match inside the shortened pane.
   await next.click();
   await expect(status).toHaveText(`2 / ${matches}`);
-  const current = content.locator('mark[aria-current="true"]');
-  await expect.poll(async () => { try { await expectShown([current], logsBand); return true; } catch { return false; } }).toBe(true);
+  await currentShown(logsBand);
   await prev.click();
   await expect(status).toHaveText(`1 / ${matches}`);
   await expectShown([title, close], logsBand);
 
-  // Clearing and switching files keep working above the keyboard.
+  // The last match sits near the end of the log, so the log is scrolled to (nearly) its
+  // bottom. Further viewport events, a pan alone and then a resize alone, keep the reader's
+  // position and the match in view.
+  await search.focus();
+  await page.keyboard.press('Shift+Enter');
+  await expect(status).toHaveText(`${matches} / ${matches}`);
+  await currentShown(logsBand);
+  const scrollTop = () => content.evaluate(element => element.scrollTop);
+  const settled = await scrollTop();
+  expect(settled).toBeGreaterThan(0);
+  const panned: Band = { height: logsBand.height, offsetTop: 150 };
+  await setKeyboard(page, panned, ['scroll']);
+  expect(await scrollTop()).toBe(settled);
+  await expectShown([title, close, current], panned);
+  await setKeyboard(page, panned, ['resize']);
+  expect(await scrollTop()).toBe(settled);
+  await expectShown([current], panned);
+  await setKeyboard(page, logsBand, ['scroll']);
+  expect(await scrollTop()).toBe(settled);
+  await expectShown([title, close, current], logsBand);
+  await expectReadableLines(content, logsBand, 3);
+  await expect(search).toBeFocused();
+
+  // Every file stays reachable from the shortened list, and switching files works above the keyboard.
   await clear.click();
   await expect(search).toHaveValue('');
   const other = dialog.getByRole('button', { name: new RegExp(conversationName) });
@@ -174,6 +211,10 @@ test('Logs keeps its close, search and match controls above the keyboard and res
   await expect(other).toHaveAttribute('aria-current', 'true');
   await search.fill('acceptance');
   await expect(status).toHaveText('1 / 1');
+  await expectReadableLines(content, logsBand, 3);
+  const output = dialog.getByRole('button', { name: new RegExp(outputName) });
+  await output.scrollIntoViewIfNeeded();
+  await expectShown([output], logsBand);
 
   await page.setViewportSize({ width: layout.height, height: layout.width });
   await setKeyboard(page, landscape);

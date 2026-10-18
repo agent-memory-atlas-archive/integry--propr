@@ -66,7 +66,7 @@ const TaskDialog: React.FC<TaskDialogProps> = ({ title, closeLabel, onClose, siz
   }, []);
 
   return createPortal(
-    <div ref={layerRef} className="app-modal-layer fixed inset-0 z-50 flex items-stretch justify-center bg-black/50 p-0 sm:items-center sm:p-4">
+    <div ref={layerRef} className="app-modal-layer group fixed inset-0 z-50 flex items-stretch justify-center bg-black/50 p-0 sm:items-center sm:p-4">
       <div
         ref={paneRef}
         role="dialog"

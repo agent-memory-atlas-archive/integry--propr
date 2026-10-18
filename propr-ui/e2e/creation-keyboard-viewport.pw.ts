@@ -1,7 +1,7 @@
 /** The shared creation shell (New Task, New Goal) stays inside the visible area while an on-screen keyboard shrinks and pans the visual viewport. */
 import { expect, test } from '@playwright/test';
 import { fixture } from './new-task.fixture';
-import { captureVisible, expectFieldVisible, expectVisible, installKeyboardViewport, listenerCount, setKeyboard } from './keyboard-viewport.fixture';
+import { captureVisible, expectFieldVisible, expectShown, expectVisible, installKeyboardViewport, listenerCount, setKeyboard } from './keyboard-viewport.fixture';
 
 // Measured on a Samsung phone in Chrome: the layout viewport stays 384×692 while the
 // keyboard leaves a 382px visual viewport panned 186px down to the focused prompt.
@@ -36,11 +36,13 @@ for (const shell of shells) {
     await expect(prompt).toBeFocused();
     const before = (await close.boundingBox())!;
     const full = { height: layout.height, offsetTop: 0 };
-    await expectVisible([heading, close, prompt], full);
+    await expectShown([heading, close], full);
+    await expectVisible([prompt], full);
 
     await setKeyboard(page, keyboard);
     await prompt.pressSequentially(draft);
-    await expectVisible([heading, close, layer], keyboard);
+    await expectShown([heading, close], keyboard);
+    await expectVisible([layer], keyboard);
     await expectFieldVisible(prompt, keyboard);
     await expect(prompt).toBeFocused();
     await captureVisible(page, `${shell.preview}-keyboard-open`, keyboard);
@@ -49,14 +51,20 @@ for (const shell of shells) {
     for (const name of shell.actions) {
       const action = dialog.getByRole('button', { name, exact: true });
       await action.scrollIntoViewIfNeeded();
-      await expectVisible([action], keyboard);
+      await expectShown([action], keyboard);
     }
-    await expectVisible([heading, close], keyboard);
+    await expectShown([heading, close], keyboard);
 
-    // A pan without a resize (the browser following the caret) is followed too.
+    // A pan without a resize (the browser following the caret) is followed too, and so is
+    // a resize alone (the keyboard's suggestion strip closing) at the same offset.
     const panned = { height: keyboard.height, offsetTop: 96 };
-    await setKeyboard(page, panned);
-    await expectVisible([heading, close, layer], panned);
+    await setKeyboard(page, panned, ['scroll']);
+    await expectShown([heading, close], panned);
+    await expectVisible([layer], panned);
+    const taller = { height: 430, offsetTop: 96 };
+    await setKeyboard(page, taller, ['resize']);
+    await expectShown([heading, close], taller);
+    await expectVisible([layer], taller);
 
     // Dismissing the keyboard restores the stylesheet geometry and keeps the draft.
     await setKeyboard(page, full);
@@ -83,7 +91,7 @@ test('New task opened with the keyboard up is placed from the current viewport, 
   await page.setViewportSize({ width: layout.height, height: layout.width });
   const landscape = { height: 180, offsetTop: 204 };
   await setKeyboard(page, landscape);
-  await expectVisible([dialog.getByRole('heading', { name: 'New task' }), dialog.getByRole('button', { name: 'Close task creation' })], landscape);
+  await expectShown([dialog.getByRole('heading', { name: 'New task' }), dialog.getByRole('button', { name: 'Close task creation' })], landscape);
 
   await dialog.getByRole('button', { name: 'Close task creation' }).click();
   await expect(page).toHaveURL(/\/tasks$/);
@@ -96,5 +104,5 @@ test('New task opened with the keyboard up is placed from the current viewport, 
   await page.getByRole('button', { name: 'Create', exact: true }).click();
   await page.getByRole('navigation', { name: 'Create' }).getByRole('link', { name: 'New Task' }).click();
   await expect(dialog).toBeVisible();
-  await expectVisible([dialog.getByRole('heading', { name: 'New task' }), dialog.getByRole('button', { name: 'Close task creation' })], keyboard);
+  await expectShown([dialog.getByRole('heading', { name: 'New task' }), dialog.getByRole('button', { name: 'Close task creation' })], keyboard);
 });
