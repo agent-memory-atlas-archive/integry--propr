@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { X, type LucideIcon } from 'lucide-react';
 import { inertOutside } from '../utils/modalBackground';
+import { useVisualViewportFrame } from '../hooks/useVisualViewportFrame';
 
 interface CreationDialogProps {
   title: string;
@@ -17,6 +18,7 @@ interface CreationDialogProps {
 export function CreationDialog({ title, icon: Icon, description, closeLabel, onClose, busy, children }: CreationDialogProps) {
   const titleId = useId();
   const descriptionId = useId();
+  const layerRef = useRef<HTMLDivElement>(null);
   const paneRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -59,15 +61,17 @@ export function CreationDialog({ title, icon: Icon, description, closeLabel, onC
       if (previousFocus?.isConnected) previousFocus.focus();
     };
   }, []);
+  useVisualViewportFrame(layerRef);
 
-  // The pane fits the layer, which starts below the desktop titlebar.
-  return createPortal(<div className="app-modal-layer fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-3 sm:p-6"
+  // The pane fits the layer, which starts below the desktop titlebar and
+  // follows the visible area while an on-screen keyboard is open.
+  return createPortal(<div ref={layerRef} className="app-modal-layer group fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-3 sm:p-6 data-[visual-viewport=clipped]:p-1"
     onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
     <div ref={paneRef} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={descriptionId} tabIndex={-1}
       className="flex max-h-full w-full max-w-2xl min-w-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl outline-none">
-      <header className="flex flex-none items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 sm:px-7">
+      <header className="flex flex-none items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 group-data-[visual-viewport=clipped]:py-1 sm:px-7">
         <div><h2 id={titleId} className="flex items-center gap-2 text-lg font-semibold text-slate-900"><Icon aria-hidden="true" className="h-5 w-5 flex-none" />{title}</h2>
-          <p id={descriptionId} className="mt-1 text-sm text-slate-500">{description}</p></div>
+          <p id={descriptionId} className="mt-1 text-sm text-slate-500 group-data-[visual-viewport=clipped]:line-clamp-1">{description}</p></div>
         <button type="button" onClick={onClose} disabled={busy} aria-label={closeLabel} className="inline-flex h-10 w-10 flex-none items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-50"><X className="h-5 w-5" /></button>
       </header>
       <div className="flex min-h-0 flex-col" onInvalidCapture={event => {
