@@ -124,7 +124,7 @@ const isHitTarget = (control: Locator) => control.evaluate(element => {
   return element.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
 });
 
-test('390px completed PR: inspect the review, then open and close an added file\'s diff from each run', async ({ page }) => {
+test('390px completed PR: inspect the review, then open and close an added file\'s diff from each run', async ({ page, browserName }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await completedPullRequest(page);
   await page.goto(`/tasks/${reviewRun}`);
@@ -232,15 +232,21 @@ test('390px completed PR: inspect the review, then open and close an added file\
   // Scrolled across, the diff's dark background still runs under the end of its longest line.
   expect(await diff.evaluate(element =>
     element.querySelector('pre')!.getBoundingClientRect().right >= element.getBoundingClientRect().right - 1)).toBe(true);
-  // A finger swiping right brings the start of the lines back, and swiping on past it moves nothing behind.
-  const touch = await page.context().newCDPSession(page);
-  const swipe = async (distance: number) => {
-    const point = (dx: number) => ({ touchPoints: [{ x: Math.round(diffBox.x + 20 + dx), y: Math.round(centre.y) }] });
-    await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', ...point(0) });
-    for (let step = 1; step <= 10; step++) await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', ...point(distance * step / 10) });
-    await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-  };
-  for (let swipes = 0; swipes < 8; swipes++) await swipe(300);
+  if (browserName === 'chromium') {
+    // A finger swiping right brings the start of the lines back, and swiping on past it moves nothing behind.
+    // Trusted touch input comes from the Chromium DevTools protocol, so only Chromium covers touch scrolling.
+    const touch = await page.context().newCDPSession(page);
+    const swipe = async (distance: number) => {
+      const point = (dx: number) => ({ touchPoints: [{ x: Math.round(diffBox.x + 20 + dx), y: Math.round(centre.y) }] });
+      await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', ...point(0) });
+      for (let step = 1; step <= 10; step++) await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', ...point(distance * step / 10) });
+      await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    };
+    for (let swipes = 0; swipes < 8; swipes++) await swipe(300);
+  } else {
+    // Other engines bring the start of the lines back with the same real wheel input, carried on past it.
+    for (let step = 0; step < 12; step++) await page.mouse.wheel(-400, 0);
+  }
   await expect.poll(async () => (await position()).left).toBe(0);
   expect((await position()).top).toBe(start.bottom);
   await expect(dialog.getByText('// END OF ADDED FILE', { exact: false })).toBeInViewport();

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useId, useRef } from 'react';
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import type { PostFollowupResponse } from '../../api/proprApi';
 import { inertOutside } from '../../utils/modalBackground';
+import { useVisualViewportFrame } from '../../hooks/useVisualViewportFrame';
 import type { FollowupTarget } from './types';
 import { describeFollowupTarget } from './taskKind';
 
@@ -126,6 +127,7 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
   const submittingRef = useRef(false);
   const feedbackRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const layerRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const descriptionId = useId();
   const feedbackTitleId = useId();
@@ -164,6 +166,9 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
     feedbackRef.current?.scrollIntoView?.({ block: 'nearest' });
   }, [feedback]);
 
+  // An on-screen keyboard pans the visible area below the layer's top; the layer follows it.
+  useVisualViewportFrame(layerRef, isOpen);
+
   if (!isOpen) return null;
 
   const duplicateBlocked = feedback?.postedBody !== undefined && sameBody(content, feedback.postedBody);
@@ -196,7 +201,7 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
   // very short viewport (a zoomed window or a landscape phone) the whole
   // dialog scrolls instead, keeping each part reachable.
   return (
-    <div className="app-modal-layer fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4">
+    <div ref={layerRef} className="app-modal-layer fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4">
       <div
         ref={dialogRef}
         role="dialog"

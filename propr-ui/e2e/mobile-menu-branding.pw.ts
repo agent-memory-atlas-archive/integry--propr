@@ -33,10 +33,14 @@ async function openMenu(page: Page, viewport: { width: number; height: number },
 // Measure only once the sheet has finished rising (and the scrim fading):
 // mid-animation rectangles carry a fractional translate. Endless animations
 // elsewhere on the page (spinners) never finish, so only finite ones count.
+// A finite animation cancelled before its end (WebKit cancels one the sheet's
+// opening replaces) rejects `finished` and moves nothing more, so the wait
+// continues with whatever is still running instead of failing.
 async function settle(page: Page) {
   await page.evaluate(async () => {
-    const finite = document.getAnimations().filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity);
-    await Promise.all(finite.map(animation => animation.finished));
+    const running = () => document.getAnimations().filter(animation =>
+      animation.playState !== 'finished' && animation.playState !== 'idle' && animation.effect?.getComputedTiming().endTime !== Infinity);
+    for (let pending = running(); pending.length; pending = running()) await Promise.allSettled(pending.map(animation => animation.finished));
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   });
 }
