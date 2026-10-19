@@ -1,5 +1,5 @@
 /** A stand-in `window.visualViewport` for headless browsers, driven with geometry measured under a real on-screen keyboard. */
-import { expect, type Locator, type Page } from '@playwright/test';
+import { expect, type CDPSession, type Locator, type Page } from '@playwright/test';
 
 export interface Band { height: number; offsetTop: number }
 
@@ -111,4 +111,55 @@ export async function captureVisible(page: Page, name: string, band: Band) {
   await mkdir('../.propr/previews', { recursive: true });
   await page.screenshot({ path: `../.propr/previews/${name}.png`, animations: 'disabled',
     clip: { x: 0, y: band.offsetTop, width: page.viewportSize()!.width, height: band.height } });
+}
+
+/**
+ * Scrolls until `target` is drawn wholly inside the band and below `cover` (a header that
+ * may stick over the scroll area), then checks it takes a tap at its centre. In Chromium a
+ * finger drags at `x` with trusted touch input, as a reader would; Playwright has no trusted
+ * touch input for mobile WebKit, so there the browser's own scroll-into-view moves it.
+ */
+export async function swipeToShow(page: Page, touch: CDPSession | null, target: Locator, band: Band, { x, cover }: { x: number; cover?: Locator }) {
+  const head = cover ? await cover.elementHandle() : null;
+  const uncovered = () => target.evaluate((element, [head, { offsetTop, height }]) => {
+    let low = head && !head.contains(element) ? Math.max(offsetTop, head.getBoundingClientRect().bottom) : offsetTop;
+    let high = offsetTop + height;
+    for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+      if (!/(auto|scroll|hidden|clip)/.test(getComputedStyle(parent).overflowY)) continue;
+      const clip = parent.getBoundingClientRect();
+      low = Math.max(low, clip.top); high = Math.min(high, clip.bottom);
+    }
+    const box = element.getBoundingClientRect();
+    return { top: box.top - low, bottom: high - box.bottom };
+  }, [head, band] as const);
+  if (touch) {
+    for (let step = 0; step < 60; step++) {
+      const { top, bottom } = await uncovered();
+      if (top >= -0.5 && bottom >= -0.5) break;
+      // A finger moving up reveals what is below. Chromium starts scrolling past its 15px touch
+      // slop (a shorter drag is a tap), and a slow drag does not fling; it stays inside the band.
+      const distance = (top < 0 ? 1 : -1) * Math.min(15 + Math.ceil(top < 0 ? -top : -bottom) + 1, band.height - 6);
+      const y = band.offsetTop + band.height / 2;
+      await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y: Math.round(y - distance / 2) }] });
+      for (let move = 1; move <= 8; move++) await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: Math.round(y - distance / 2 + distance * move / 8) }] });
+      await page.waitForTimeout(50);
+      await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      // A drag may leave a short glide; measure once the target has stopped moving.
+      await target.evaluate(element => new Promise<void>(resolve => {
+        let last = NaN; let still = 0;
+        const check = () => {
+          const top = element.getBoundingClientRect().top;
+          still = top === last ? still + 1 : 0; last = top;
+          if (still >= 3) resolve(); else requestAnimationFrame(check);
+        };
+        requestAnimationFrame(check);
+      }));
+    }
+  } else {
+    await target.scrollIntoViewIfNeeded();
+  }
+  const { top, bottom } = await uncovered();
+  expect(top, `${target} starts inside the band${cover ? ', below the header' : ''}`).toBeGreaterThanOrEqual(-0.5);
+  expect(bottom, `${target} ends above the keyboard`).toBeGreaterThanOrEqual(-0.5);
+  await expectShown([target], band);
 }

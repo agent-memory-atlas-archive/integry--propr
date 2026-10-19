@@ -23,6 +23,12 @@ interface TaskDialogProps {
  * fills a phone screen and caps its size on wider ones. Escape and the 44px
  * Close button dismiss it; Tab stays inside, the workspace behind it is inert,
  * and on close focus returns to whatever opened it.
+ *
+ * While an on-screen keyboard clips the layer it drops its padding and becomes
+ * a size container. A band too short for the header and a usable body (under
+ * 10rem, a landscape phone with its keyboard up) scrolls the whole pane
+ * instead: the header scrolls away and each part takes its natural height, so
+ * every control and the content can be scrolled into view.
  */
 const TaskDialog: React.FC<TaskDialogProps> = ({ title, closeLabel, onClose, sizeClass, testId, children }) => {
   const titleId = useId();
@@ -66,7 +72,7 @@ const TaskDialog: React.FC<TaskDialogProps> = ({ title, closeLabel, onClose, siz
   }, []);
 
   return createPortal(
-    <div ref={layerRef} className="app-modal-layer group fixed inset-0 z-50 flex items-stretch justify-center bg-black/50 p-0 sm:items-center sm:p-4">
+    <div ref={layerRef} className="app-modal-layer group fixed inset-0 z-50 flex items-stretch justify-center bg-black/50 p-0 sm:items-center sm:p-4 data-[visual-viewport=clipped]:p-0 data-[visual-viewport=clipped]:[container-type:size]">
       <div
         ref={paneRef}
         role="dialog"
@@ -74,7 +80,7 @@ const TaskDialog: React.FC<TaskDialogProps> = ({ title, closeLabel, onClose, siz
         aria-labelledby={titleId}
         tabIndex={-1}
         data-testid={testId}
-        className={`flex h-full w-full min-w-0 flex-col overflow-hidden border-gray-300 bg-white shadow-lg outline-none sm:max-h-[min(85vh,100%)] sm:rounded-lg sm:border ${sizeClass}`}
+        className={`flex h-full w-full min-w-0 flex-col overflow-hidden border-gray-300 bg-white shadow-lg outline-none sm:max-h-[min(85vh,100%)] sm:rounded-lg sm:border ${sizeClass} [@container(max-height:10rem)]:overflow-y-auto [@container(max-height:10rem)]:overscroll-contain [@container(max-height:10rem)]:[&>*]:flex-none`}
       >
         <div className="flex flex-none items-center justify-between gap-2 border-b border-gray-200 py-1 pl-4 pr-1 sm:py-2 sm:pr-2">
           <h2 id={titleId} className="min-w-0 break-words text-lg font-semibold text-gray-900">{title}</h2>

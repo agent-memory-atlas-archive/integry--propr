@@ -25,6 +25,9 @@ interface LogFilesModalProps {
  * on-screen keyboard clips the dialog (`data-visual-viewport="clipped"` on its
  * layer), the phone layout compacts: the list yields height first and the open
  * file's name takes one line, so at least three lines of the log stay readable.
+ * A band too short for that (under 10rem, where the whole dialog scrolls; see
+ * TaskDialog) gives the log a scroll area of three lines up to the band less a
+ * strip, so a swipe beside or above it still scrolls the dialog back to search.
  */
 const LogFilesModal: React.FC<LogFilesModalProps> = ({
   logFiles,
@@ -158,7 +161,7 @@ const FileContent: React.FC<FileContentProps> = ({
   };
 
   return (
-    <section aria-labelledby={`${searchId}-title`} className="flex min-h-0 min-w-0 flex-1 flex-col p-3 group-data-[visual-viewport=clipped]:flex-[1_0_9.75rem] group-data-[visual-viewport=clipped]:py-1.5 md:p-4">
+    <section aria-labelledby={`${searchId}-title`} className="flex min-h-0 min-w-0 flex-1 flex-col p-3 group-data-[visual-viewport=clipped]:flex-[1_0_9.75rem] group-data-[visual-viewport=clipped]:py-1.5 md:p-4 [@container(max-height:10rem)]:!flex-auto">
       <div className="mb-3 flex flex-none flex-col gap-2 group-data-[visual-viewport=clipped]:mb-1.5 group-data-[visual-viewport=clipped]:gap-1">
         <h3 id={`${searchId}-title`} className="text-base font-semibold text-gray-900 [overflow-wrap:anywhere] group-data-[visual-viewport=clipped]:truncate md:text-lg">{selectedLogFile.name}</h3>
         <div className="flex flex-wrap items-center gap-2">
@@ -207,7 +210,7 @@ const FileContent: React.FC<FileContentProps> = ({
           tabIndex={0}
           aria-label={`Contents of ${selectedLogFile.name}`}
           data-testid="log-file-content"
-          className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md border border-gray-200 bg-gray-50 p-3 font-mono text-xs text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 group-data-[visual-viewport=clipped]:min-h-[4.125rem] group-data-[visual-viewport=clipped]:p-2 md:p-4"
+          className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md border border-gray-200 bg-gray-50 p-3 font-mono text-xs text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 group-data-[visual-viewport=clipped]:min-h-[4.125rem] group-data-[visual-viewport=clipped]:p-2 md:p-4 [@container(max-height:10rem)]:h-[max(3.625rem,calc(100cqh-1.5rem))] [@container(max-height:10rem)]:flex-none [@container(max-height:10rem)]:!min-h-0 [@container(max-height:10rem)]:!p-1"
         >
           {splitLogMatches(content, searchQuery).map((segment, index) => segment.matchIndex === undefined ? segment.text : (
             <mark

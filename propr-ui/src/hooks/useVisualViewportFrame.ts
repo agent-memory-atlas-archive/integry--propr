@@ -92,10 +92,11 @@ function revealWithin(element: HTMLElement, layer: HTMLElement, top: number, bot
   let container: HTMLElement | null = element.parentElement;
   while (container && container !== layer && !scrolls(container)) container = container.parentElement;
   if (!container || container === layer) return;
-  const area = container.getBoundingClientRect();
-  const edge = Math.max(top, area.top);
+  // What the container shows lies inside its borders.
+  const areaTop = container.getBoundingClientRect().top + container.clientTop;
+  const edge = Math.max(top, areaTop);
   const low = belowStickyHeader(container, edge);
-  const high = Math.min(bottom, area.bottom);
+  const high = Math.min(bottom, areaTop + container.clientHeight);
   const rect = element.getBoundingClientRect();
   if (rect.top >= low - 1 && rect.bottom <= high + 1) return;
   const before = container.scrollTop;
@@ -107,9 +108,11 @@ function revealWithin(element: HTMLElement, layer: HTMLElement, top: number, bot
   const heading = labelledBy ? document.getElementById(labelledBy) : null;
   if (!heading || !container.contains(heading)) return;
   let hidden = edge - heading.getBoundingClientRect().top;
-  // Bringing the heading back must not push the line being edited under the keyboard
-  // (rounded down, as a scroll position may be whole pixels).
+  // Bringing the heading back must not push the line being edited, or a focused single-line
+  // control such as a search field, under the keyboard (rounded down, as a scroll position
+  // may be whole pixels).
   if (editing) hidden = Math.min(hidden, Math.floor(high - caretLine(editing, editing.getBoundingClientRect()).bottom));
+  else if (!(element instanceof HTMLTextAreaElement)) hidden = Math.min(hidden, Math.floor(high - element.getBoundingClientRect().bottom));
   if (hidden > 0) container.scrollTop = Math.max(before, container.scrollTop - hidden);
 }
 
