@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
+import { claimOwnerGone, currentClaimOwner, isClaimOwner, type ClaimOwnerProbe } from './claimOwner.js';
 
 /** Durable instance policy, registry and audit records, outside repository working copies. */
 export function storageControlRoot(): string {
@@ -31,10 +32,14 @@ export class StorageBusyError extends Error {
   constructor() { super('Storage lifecycle is busy or requires recovery'); }
 }
 
-/** No TTL stealing: a crashed process is uncertainty, not permission to delete. */
+/**
+ * No TTL stealing: a crashed process is uncertainty, not permission to delete.
+ * A claim records its owning process, and only proof that the owner is gone
+ * (see claimOwnerGone) releases it; elapsed time never does.
+ */
 export class StorageLifecycle {
   private context = new AsyncLocalStorage<{ active: boolean; users: number; claim: string }>();
-  constructor(readonly root: string = repositoryLifecycleRoot()) {}
+  constructor(readonly root: string = repositoryLifecycleRoot(), private readonly ownerProbe?: ClaimOwnerProbe) {}
 
   async initialize(): Promise<void> {
     await fs.mkdir(this.root, { recursive: true });
@@ -119,7 +124,7 @@ export class StorageLifecycle {
     // Admission (and release) waits without a deadline; an abandoned gate still
     // requires explicit recovery, rather than failing an accepted worker job.
     await this.initialize();
-    await fs.writeFile(claim, admission ? JSON.stringify({ reservedBytes: admission.taskBytes }) : '', { flag: 'wx' });
+    await fs.writeFile(claim, JSON.stringify({ ...(admission ? { reservedBytes: admission.taskBytes } : {}), owner: currentClaimOwner() }), { flag: 'wx' });
     try {
       await this.exclusive(async () => {
         if (admission) await this.admit(admission);
@@ -144,6 +149,13 @@ export class StorageLifecycle {
         const value = await file.readFile('utf8');
         if (value) {
           const record = JSON.parse(value);
+          // A process killed mid-operation (a worker restart) never releases its claim.
+          if (isClaimOwner(record.owner) && await claimOwnerGone(record.owner, this.ownerProbe)) {
+            await fs.unlink(path.join(this.root, 'readers', name)).catch(() => undefined);
+            console.warn(`[storage] Released a storage claim whose owner (${record.owner.host} pid ${record.owner.pid}) is gone`);
+            continue;
+          }
+          if (record.reservedBytes === undefined) continue;
           if (!Number.isSafeInteger(record.reservedBytes) || record.reservedBytes <= 0) throw new StorageBusyError();
           reserved += record.reservedBytes;
         }
