@@ -385,7 +385,8 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
 
   return (
     <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7">
+      {/* The body keeps a few lines of the objective in view; a pane too short for that and the actions scrolls as a whole. */}
+      <div className="min-h-24 flex-1 overflow-y-auto px-5 py-5 sm:px-7">
       {isDemoMode && <p className="mb-4 border-l-2 border-amber-400 bg-amber-50 p-3 text-sm text-amber-800">Demo mode is read-only. You can inspect existing goals, but cannot start a new one.</p>}
       {error && <p role="alert" className="mb-3 text-sm text-red-600">{error}</p>}
       {showRuntimeDiagnostics && <div className="mb-3 border-l-2 border-amber-400 bg-amber-50 p-3 text-sm text-amber-800">
@@ -470,7 +471,7 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
         </details>
       </fieldset>
       </div>
-      <div className="flex flex-none justify-end gap-3 border-t border-slate-200 bg-slate-50 px-5 py-4 sm:px-7">
+      <div data-creation-actions className="flex flex-none flex-wrap justify-end gap-3 border-t border-slate-200 bg-slate-50 px-5 py-4 sm:px-7">
         <button type="button" onClick={onCancel} disabled={submitting} className={`${buttonClass} mr-auto min-h-11 px-4 text-slate-700 hover:bg-slate-100`}>Cancel</button>
         <button type="submit" disabled={isDemoMode || submitting || objectiveTooLong || !repository || !agentId || !model || !objective.trim() || !selectedAgent?.goalCapable} title={isDemoMode ? 'Demo mode is read-only' : undefined} className={`${buttonClass} min-h-11 px-4 bg-teal-600 text-white hover:bg-teal-700`}>{submitting ? 'Starting…' : 'Start goal'}</button>
       </div>

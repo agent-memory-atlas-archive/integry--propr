@@ -295,7 +295,7 @@ function TaskLauncherActions({ onCancel, snapshot, result, startOver, ready, bus
   const launchDisabled = !ready || busy || processingFiles || isDemoMode || !repository || !instruction.trim();
   const partialFailure = isPartialFailure(result);
 
-  return <div className="flex flex-none flex-wrap justify-end gap-3 border-t border-slate-200 bg-slate-50 px-5 py-4 sm:px-7">
+  return <div data-creation-actions className="flex flex-none flex-wrap justify-end gap-3 border-t border-slate-200 bg-slate-50 px-5 py-4 sm:px-7">
     <button type="button" onClick={onCancel} disabled={busy || processingFiles} className={`${button} mr-auto border-transparent text-slate-700 hover:bg-slate-100`}>{partialFailure ? 'Close' : 'Cancel'}</button>
     {canStartOver(busy, result, snapshot) && <button type="button" onClick={() => void startOver()} disabled={busy || isDemoMode} className={`${button} border-slate-300 bg-white text-slate-700`}>{result?.state === 'prepared' ? 'Edit request' : 'Start over'}</button>}
     {!snapshot && <button type="button" onClick={() => void planFirst()} disabled={launchDisabled} className={`${button} border-slate-300 bg-white text-slate-700 hover:bg-slate-100`}><ScrollText aria-hidden="true" size={16} />Plan first</button>}
@@ -321,7 +321,8 @@ function NewTaskLauncher({ scope }: { scope: string }) {
   return <CreationDialog title="New task" icon={Zap} description="Describe the change you want. Run task creates an issue and starts implementation."
     closeLabel="Close task creation" onClose={() => void requestClose()} busy={launcher.busy || processingFiles}>
     <form className="flex min-h-0 min-w-0 flex-col" onChange={() => setDirty(true)} onSubmit={event => { event.preventDefault(); void run(); }}>
-      <div className="min-h-0 min-w-0 [overflow-wrap:anywhere] overflow-y-auto px-5 py-5 sm:px-7 space-y-5">
+      {/* The body keeps a few lines of the prompt in view; a pane too short for that and the wrapped actions scrolls as a whole. */}
+      <div className="min-h-24 min-w-0 [overflow-wrap:anywhere] overflow-y-auto px-5 py-5 sm:px-7 space-y-5">
     {!snapshot && !launcher.planDraft && launcher.recoverable.length > 0 && <section aria-label="Unresolved submissions" className="mt-6 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-slate-700">
       <h2 className="font-semibold">Unresolved submissions</h2>
       <p className="mt-1">Reopen a previous request to check its status and finish starting the task.</p>
