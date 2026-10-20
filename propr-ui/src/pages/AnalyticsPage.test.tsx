@@ -11,8 +11,18 @@ vi.mock('../api/taskStatsApi', () => ({
   getStatsOverview: vi.fn(),
   getReviewScoreSummary: vi.fn(),
 }));
+// Agent Tank is off unless a test turns it on, so the usage pane stays hidden.
+vi.mock('../api/revertApi', () => ({
+  getAgentTankHistory: vi.fn(async () => ({ enabled: false, agents: [] })),
+}));
+
 vi.mock('../contexts/useSocket', () => ({
-  useSocket: () => ({ isConnected: false, onTaskUpdate: () => () => {} }),
+  useSocket: () => ({
+    isConnected: false,
+    onTaskUpdate: () => () => {},
+    onActivityUpdate: () => () => {},
+    onUsageUpdate: () => () => {},
+  }),
 }));
 
 type TaskStats = Awaited<ReturnType<typeof getTaskStats>>;

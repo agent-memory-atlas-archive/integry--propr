@@ -470,9 +470,18 @@ export {
     agentTankUsageFingerprint,
     observeAgentTankUsage,
     observeAgentTankUsageSnapshot,
-    resetAgentTankUsageTracking
+    resetAgentTankUsageTracking,
+    parseAgentTankStatus,
+    parseAgentTankStatusMap
 } from './services/agentTankService.js';
-export type { AgentStatusResponse } from './services/agentTankService.js';
+export type { AgentStatusResponse, AgentTankUsageWindow } from './services/agentTankService.js';
+export { readAgentTankUsageHistory, downsampleHistoryPoints } from './services/agentTankHistoryService.js';
+export {
+    recordAgentTankUsageHistory,
+    readLocalAgentTankUsageHistory,
+    resetAgentTankUsageHistoryTracking
+} from './services/agentTankUsageHistory.js';
+export { extractAgentTankUsageMetrics } from './services/agentTankUsageMetrics.js';
 export {
     buildBundledAgentTankConfig,
     canRunBundledAgentTank,

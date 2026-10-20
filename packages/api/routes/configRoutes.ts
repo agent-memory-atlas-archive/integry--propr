@@ -408,6 +408,7 @@ export function createConfigRoutes(deps: ConfigRoutesDeps) {
     triggerIndexing: indexingRoutes.triggerIndexing, triggerReindexAll: indexingRoutes.triggerReindexAll, stopIndexing: indexingRoutes.stopIndexing,
     getAgentTankSettings: agentTankRoutes.getAgentTankSettings, postAgentTankSettings: agentTankRoutes.postAgentTankSettings,
     getAgentTankStatus: agentTankRoutes.getAgentTankStatus, getAgentTankUsage: agentTankRoutes.getAgentTankUsage,
+    getAgentTankHistory: agentTankRoutes.getAgentTankHistory,
     postAgentTankRefresh: agentTankRoutes.postAgentTankRefresh, getAgentTankDetect: agentTankRoutes.getAgentTankDetect
   };
 }

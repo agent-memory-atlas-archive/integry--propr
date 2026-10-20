@@ -19,6 +19,8 @@ vi.mock('../contexts/useSocket', () => ({
     onNotificationUpdate: () => () => undefined,
     onUsageUpdate: () => () => undefined,
   }),
+  // The history overlay's optional live refresh is covered by its own suite.
+  useOptionalSocket: () => null,
 }));
 
 const mockGetAgentTankUsage = vi.mocked(getAgentTankUsage);

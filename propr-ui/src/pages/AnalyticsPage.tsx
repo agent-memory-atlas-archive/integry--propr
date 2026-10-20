@@ -34,6 +34,7 @@ import ActivitySparkline, { ActivityLegend } from '../components/ActivitySparkli
 import RepositoryBreakdown from '../components/RepositoryBreakdown';
 import TopModels from '../components/TopModels';
 import TokenConsumption from '../components/Analytics/TokenConsumption';
+import AgentUsageHistory from '../components/Analytics/AgentUsageHistory';
 import ReviewQualityByModel from '../components/Analytics/ReviewQualityByModel';
 import AnalyticsTimeframeSelector from '../components/Analytics/AnalyticsTimeframeSelector';
 import { AnalyticsMetricStrip, UNAVAILABLE, type AnalyticsMetric } from '../components/Analytics/AnalyticsMetricStrip';
@@ -200,6 +201,8 @@ const AnalyticsPage: React.FC = () => {
       <PageLoadingStatus label="Loading analytics…">
         <AnalyticsMetricStrip metrics={buildMetrics(tasks, overview)} />
         <AnalyticsMetricStrip metrics={buildDeliveryMetrics(overview)} testId="analytics-delivery-strip" label="Delivery" />
+        {/* Provider quota over time, full width: a time series reads best wide. */}
+        <AgentUsageHistory />
 
         <div className="grid flex-1 grid-cols-1 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]" data-testid="analytics-split">
           <div className="min-w-0 lg:border-r lg:border-slate-200" data-testid="analytics-primary-pane">

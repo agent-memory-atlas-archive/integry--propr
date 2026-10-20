@@ -55,7 +55,7 @@ export const AGENT_BUNDLE_CONTENT_FILES = [
     'Dockerfile.agent',
     'scripts/agent-entrypoint.sh',
     'scripts/agent-tank-runtime.mjs',
-    'patches/agent-tank-0.9.11.patch',
+    'patches/agent-tank-0.10.0.patch',
     'scripts/claude-entrypoint.sh',
     'scripts/codex-entrypoint.sh',
     'scripts/antigravity-entrypoint.sh',

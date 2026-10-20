@@ -106,6 +106,45 @@ export interface UsageMetric {
   group?: string;
   percent: number;
   resetsIn?: string;
+  // Agent Tank history series key (`session`, `weeklyAll`, `fiveHour`,
+  // `model:<quota>`), so the row can look up its own usage line.
+  historyKey?: string;
+  // Quota cycle (`session`, `five_hour`, `weekly`, `daily`), which sets how
+  // long one period of that line is.
+  cycle?: string;
+}
+
+// Antigravity reports its cycles under CLI names; history uses window types.
+const ANTIGRAVITY_CYCLES: Record<string, string> = {
+  weekly: 'weekly',
+  fiveHour: 'five_hour',
+  sessionAgy: 'session',
+  daily: 'daily',
+};
+
+const ANTIGRAVITY_CYCLE_LABELS: Record<string, string> = {
+  weekly: 'Weekly',
+  fiveHour: '5h',
+};
+
+// A grouped Antigravity quota names its pool explicitly. Agent Tank qualifies a
+// shared limit as "<pool> · Weekly Limit", but a pool tracked on its own - the
+// separate Gemini 4 Argon quota - arrives as "Gemini 4 Argon Weekly Limit" with
+// `group` set, which the "·" pattern cannot split.
+function groupedAntigravityQuota(
+  model: { model: string; group?: string; cycle?: string },
+  quotaName: string,
+): { group: string; label: string } | null {
+  if (!model.group) return null;
+  const rest = quotaName.toLowerCase().startsWith(model.group.toLowerCase())
+    ? quotaName.slice(model.group.length).replace(/^\s*·?\s*/, '').replace(/\s+Limit$/i, '').trim()
+    : '';
+  if (!rest || /^(weekly|five hour|5h)$/i.test(rest)) {
+    const label = (model.cycle && ANTIGRAVITY_CYCLE_LABELS[model.cycle])
+      ?? (rest ? (ANTIGRAVITY_WINDOW_LABELS[rest.toLowerCase()] ?? rest) : null);
+    if (label) return { group: model.group, label };
+  }
+  return null;
 }
 
 // Extract all usage metrics from agent data
@@ -118,46 +157,59 @@ export function getAllMetrics(agent: AgentUsageData): UsageMetric[] {
     metrics.push({
       label: 'Session',
       percent: agent.usage.session.percent,
-      resetsIn: agent.usage.session.resetsIn
+      resetsIn: agent.usage.session.resetsIn,
+      historyKey: 'session',
+      cycle: 'session'
     });
   }
   if (agent.usage.weeklyAll) {
     metrics.push({
       label: 'Weekly',
       percent: agent.usage.weeklyAll.percent,
-      resetsIn: agent.usage.weeklyAll.resetsIn
+      resetsIn: agent.usage.weeklyAll.resetsIn,
+      historyKey: 'weeklyAll',
+      cycle: 'weekly'
     });
   }
   if (agent.usage.weeklySonnet) {
     metrics.push({
       label: 'Sonnet',
       percent: agent.usage.weeklySonnet.percent,
-      resetsIn: agent.usage.weeklySonnet.resetsIn
+      resetsIn: agent.usage.weeklySonnet.resetsIn,
+      historyKey: 'weeklySonnet',
+      cycle: 'weekly'
     });
   }
   if (agent.usage.weeklyFable) {
     metrics.push({
       label: 'Fable',
       percent: agent.usage.weeklyFable.percent,
-      resetsIn: agent.usage.weeklyFable.resetsIn
+      resetsIn: agent.usage.weeklyFable.resetsIn,
+      historyKey: 'weeklyFable',
+      cycle: 'weekly'
     });
   }
   // Gemini / Antigravity models
   if (agent.usage.models) {
     const isAntigravity = agent.name.toLowerCase() === 'antigravity';
     for (const model of agent.usage.models) {
+      const history = {
+        historyKey: `model:${model.model}`,
+        cycle: (model.cycle && ANTIGRAVITY_CYCLES[model.cycle]) ?? 'session',
+      };
       if (isAntigravity) {
         // Quota windows already carry product labels, not model IDs. Preserve
         // their spelling (e.g. "Claude and GPT") before formatting model IDs.
         const quotaName = stripRemainingSuffix(model.model);
-        const quotaWindow = parseAntigravityQuotaWindow(quotaName);
+        const quotaWindow = parseAntigravityQuotaWindow(quotaName) ?? groupedAntigravityQuota(model, quotaName);
         if (quotaWindow) {
           metrics.push({
             label: quotaWindow.label,
             group: quotaWindow.group,
             title: quotaName,
             percent: model.percentUsed,
-            resetsIn: model.resetsIn
+            resetsIn: model.resetsIn,
+            ...history
           });
           continue;
         }
@@ -170,13 +222,15 @@ export function getAllMetrics(agent: AgentUsageData): UsageMetric[] {
           displayLabel: display,
           title: fullName,
           percent: model.percentUsed,
-          resetsIn: model.resetsIn
+          resetsIn: model.resetsIn,
+          ...history
         });
       } else {
         metrics.push({
           label: stripRemainingSuffix(getModelDisplayName(model.model, { compactGemini: true })),
           percent: model.percentUsed,
-          resetsIn: model.resetsIn
+          resetsIn: model.resetsIn,
+          ...history
         });
       }
     }
@@ -187,7 +241,9 @@ export function getAllMetrics(agent: AgentUsageData): UsageMetric[] {
     metrics.push({
       label: 'Session',
       percent: agent.usage.fiveHour.percentUsed,
-      resetsIn: agent.usage.fiveHour.resetsIn
+      resetsIn: agent.usage.fiveHour.resetsIn,
+      historyKey: 'fiveHour',
+      cycle: 'five_hour'
     });
   }
   // Codex weekly uses percentUsed, not percent
@@ -196,7 +252,9 @@ export function getAllMetrics(agent: AgentUsageData): UsageMetric[] {
     metrics.push({
       label: 'Weekly',
       percent: weeklyData.percentUsed ?? weeklyData.percent ?? 0,
-      resetsIn: weeklyData.resetsIn
+      resetsIn: weeklyData.resetsIn,
+      historyKey: 'weekly',
+      cycle: 'weekly'
     });
   }
 

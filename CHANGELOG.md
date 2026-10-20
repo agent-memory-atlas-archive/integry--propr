@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Agent Tank usage history**: a unified usage chart on the Analytics page
+  plots every provider's session, weekly and per-model metrics over the last
+  24 hours to 14 days, with provider and metric toggles. Hovering (or tapping)
+  a metric in the sidebar Usage section opens a chart of that metric over its
+  last two periods: 10 hours for a 5-hour session, 14 days for a weekly limit.
+  History comes from an external Agent Tank 0.10+ daemon when it keeps one.
+  Otherwise ProPR records its own, in a new `agent_tank_usage_history` table
+  kept for 15 days, served by `GET /api/config/agent-tank/history`.
+- **Agent Tank 0.10.0**: the bundled CLI moves to 0.10.0, and ProPR reads its
+  canonical `{ "providers": [...] }` response format as well as the 0.9.x map,
+  so an external daemon can be upgraded independently. Antigravity's separately
+  tracked **Gemini 4 Argon** quota appears in the sidebar under its own
+  *Gemini 4 Argon* group.
+
 - **Epic merge progress**: when a child PR merges into an epic branch, ProPR
   updates a single "x of y PRs merged" tracking comment on the epic PR in
   place, and posts a one-time *Epic fully merged* confirmation comment once

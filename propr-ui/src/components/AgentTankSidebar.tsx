@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { ChevronDown, ChevronRight, Gauge, RefreshCw } from 'lucide-react';
 import { getAgentTankUsage, refreshAgentTank, AgentTankUsageResponse, AgentUsageData } from '../api/revertApi';
 import { ProviderLogo } from './ui/ProviderLogo';
@@ -14,6 +14,8 @@ import {
 } from './agentTankMetrics';
 import { SIDEBAR_ICON_STROKE_WIDTH, SIDEBAR_ICON_STROKE_CLASS } from './icons/sidebarIconStroke';
 import { useLiveResource } from '../hooks/useLiveResource';
+import { UsageMetricHistoryTrigger } from './usageHistory/UsageMetricHistoryOverlay';
+import { noteAgentTankUsageEnabled } from './usageHistory/useUsageMetricHistory';
 
 // Which provider rows are expanded is a preference, not session state: someone
 // watching Claude's weekly quotas wants the same rows open after a reload.
@@ -193,7 +195,10 @@ export const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle })
                 }`}
               />
               {child.metric ? (
-                <MetricRow metric={child.metric} compact />
+                // Hovering or tapping a metric opens its last two periods of history.
+                <UsageMetricHistoryTrigger agent={agent.name} metric={child.metric}>
+                  <MetricRow metric={child.metric} compact />
+                </UsageMetricHistoryTrigger>
               ) : (
                 <div className="flex h-5 min-w-0 items-center">
                   <span className="min-w-0 truncate text-[10px] font-medium text-gray-600" title={child.group}>
@@ -242,6 +247,10 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({
   // A failed read keeps the last good numbers; with nothing read yet the widget
   // stays out of the sidebar rather than showing an empty frame.
   const data = usage ?? (usageError ? { enabled: false } : null);
+  // Enabled usage means history is back too, after an earlier read found it off.
+  useEffect(() => {
+    if (usage?.enabled) noteAgentTankUsageEnabled();
+  }, [usage]);
 
   const handleManualRefresh = useCallback(async () => {
     setRefreshing(true);

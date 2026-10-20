@@ -24,6 +24,8 @@ vi.mock('../contexts/useSocket', () => ({
       return () => socketState.usageCallbacks.delete(callback);
     },
   }),
+  // The history overlay's optional live refresh is covered by its own suite.
+  useOptionalSocket: () => null,
 }));
 
 /** Delivers `usage:update` the way the server publishes it when a quota moves. */

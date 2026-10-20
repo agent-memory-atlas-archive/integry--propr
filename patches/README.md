@@ -1,4 +1,4 @@
-`agent-tank-0.9.11.patch` carries the Agent Tank provider fixes developed in
+`agent-tank-0.10.0.patch` carries the Agent Tank provider fixes developed in
 `integry/agent-tank` until they are included in a published package version.
 It adds native Antigravity configuration isolation, current Claude quota-schema
 support, startup/partial-render handling, and provider refresh throttling.

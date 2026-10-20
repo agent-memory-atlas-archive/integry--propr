@@ -545,6 +545,7 @@ export {
   supportsAgentTankModes,
   type AgentTankMode,
 } from './agentTank.js';
+export * from './agentTankHistory.js';
 
 export * from './usageTips.js';
 export * from './taskReplacement.js';
