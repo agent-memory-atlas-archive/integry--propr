@@ -172,6 +172,23 @@ async function resolveMergeMethod(octokit: AutoMergeGateOctokit, owner: string, 
     return 'SQUASH';
 }
 
+/**
+ * The merge method for a direct merge: the policy's method, otherwise the same
+ * repository-supported default {@link gateAutoMergeArming} arms with.
+ */
+export async function resolveDirectMergeMethod(input: {
+    owner: string; repo: string; method?: AutoMergePolicyMethod;
+}, deps: AutoMergeGateDependencies = {}): Promise<AutoMergePolicyMethod> {
+    if (input.method) return input.method;
+    let octokit: AutoMergeGateOctokit;
+    try {
+        octokit = await gateOctokit(deps);
+    } catch {
+        return 'squash';
+    }
+    return (await resolveMergeMethod(octokit, input.owner, input.repo)).toLowerCase() as AutoMergePolicyMethod;
+}
+
 /** Find the task whose timeline records this decision. */
 async function resolveDecisionTaskId(database: Knex, repository: string, numbers: number[]): Promise<string | null> {
     const row = await database('tasks').where({ repository }).whereIn('issue_number', numbers)

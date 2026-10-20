@@ -132,8 +132,11 @@ const evaluateCurrentHead = async (input: { owner: string; repo: string; prNumbe
     pullRequest: { headSha: await getCurrentPRHead(input.owner, input.repo, input.prNumber) } as { headSha: string | null } | null,
 });
 const mockEvaluatePullRequestAutoMerge = mock.fn(evaluateCurrentHead);
+// Like the real resolver: the policy's method, else the repository default (squash here).
+const resolveWithPolicyMethod = async (input: { method?: 'merge' | 'squash' | 'rebase' }) => input.method ?? 'squash';
+const mockResolveDirectMergeMethod = mock.fn(resolveWithPolicyMethod);
 await mock.module('../packages/core/src/services/autoMergeGate.js', {
-    namedExports: { evaluatePullRequestAutoMerge: mockEvaluatePullRequestAutoMerge }
+    namedExports: { evaluatePullRequestAutoMerge: mockEvaluatePullRequestAutoMerge, resolveDirectMergeMethod: mockResolveDirectMergeMethod }
 });
 
 // Import the modules under test
@@ -186,6 +189,8 @@ function resetMocks(): void {
     mockTriggerNextPendingIssue.mock.resetCalls();
     mockEvaluatePullRequestAutoMerge.mock.resetCalls();
     mockEvaluatePullRequestAutoMerge.mock.mockImplementation(evaluateCurrentHead);
+    mockResolveDirectMergeMethod.mock.resetCalls();
+    mockResolveDirectMergeMethod.mock.mockImplementation(resolveWithPolicyMethod);
     resetUltrafixStateRedisForTests();
 }
 
@@ -451,12 +456,13 @@ describe('getCiMergeReadiness', () => {
             throw new Error(`unexpected ${route}`);
         });
     }
-    function observationStore(): { get: (key: string) => Promise<string | null>; set: (key: string, value: string) => Promise<'OK'>; entries: Map<string, string> } {
+    function observationStore(): { get: (key: string) => Promise<string | null>; set: (key: string, value: string) => Promise<'OK'>; del: (key: string) => Promise<number>; entries: Map<string, string> } {
         const entries = new Map<string, string>();
         return {
             entries,
             get: async (key: string) => entries.get(key) ?? null,
             set: async (key: string, value: string) => { entries.set(key, value); return 'OK'; },
+            del: async (key: string) => Number(entries.delete(key)),
         };
     }
     function readiness(sha: string, now: number, observations = observationStore()): ReturnType<typeof getCiMergeReadiness> {
@@ -503,6 +509,20 @@ describe('getCiMergeReadiness', () => {
         assert.deepStrictEqual(await readiness('second', observedAt + 2 * NO_CI_GRACE_MS, observations), { ready: true, reason: 'no_ci' });
         // Returning to an earlier head does not reuse its old observation.
         assert.deepStrictEqual(await readiness('first', observedAt + 3 * NO_CI_GRACE_MS, observations), { ready: false, reason: 'waiting_for_ci' });
+    });
+
+    test('a head with CI in between restarts the grace period for an earlier head', async () => {
+        resetMocks();
+        const observations = observationStore();
+        respond([]);
+        assert.deepStrictEqual(await readiness('first', observedAt, observations), { ready: false, reason: 'waiting_for_ci' });
+        respond([{ name: 'build', status: 'in_progress', conclusion: null }]);
+        assert.deepStrictEqual(await readiness('second', observedAt + NO_CI_GRACE_MS, observations), { ready: false, reason: 'checks_not_passing' });
+        // The branch is reset to the first head after its original grace period passed.
+        respond([]);
+        assert.deepStrictEqual(await readiness('first', observedAt + 2 * NO_CI_GRACE_MS, observations), { ready: false, reason: 'waiting_for_ci' });
+        assert.deepStrictEqual(await readiness('first', observedAt + 3 * NO_CI_GRACE_MS - 1, observations), { ready: false, reason: 'waiting_for_ci' });
+        assert.deepStrictEqual(await readiness('first', observedAt + 3 * NO_CI_GRACE_MS, observations), { ready: true, reason: 'no_ci' });
     });
 
     test('an unreadable observation store never allows the merge', async () => {
@@ -1657,6 +1677,15 @@ describe('handleCheckRunEvent', () => {
         await handleCheckRunEvent(createMockCheckRunPayload({ headSha: 'abc123sha' }), 'test-correlation-id');
         assert.equal(mergeCalls().length, 1);
         assert.equal((mergeCalls()[0].arguments as unknown as [string, { merge_method: string }])[1].merge_method, 'rebase');
+
+        // A policy without a method merges with the repository-supported method the arming gate would use.
+        resetMocks();
+        mockOctokit.request.mock.mockImplementation(mockMergeablePR);
+        mockResolveDirectMergeMethod.mock.mockImplementation(async () => 'merge');
+        await handleCheckRunEvent(createMockCheckRunPayload({ headSha: 'abc123sha' }), 'test-correlation-id');
+        assert.deepEqual(mockResolveDirectMergeMethod.mock.calls[0].arguments[0], { owner: 'test-owner', repo: 'test-repo', method: undefined });
+        assert.equal(mergeCalls().length, 1);
+        assert.equal((mergeCalls()[0].arguments as unknown as [string, { merge_method: string }])[1].merge_method, 'merge');
     });
 
     test('merges only the head the auto-merge policy evaluated', async () => {

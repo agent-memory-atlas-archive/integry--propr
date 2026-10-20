@@ -25,7 +25,7 @@ import {
 import type { CheckRunEvent, CheckSuiteEvent } from '@octokit/webhooks-types';
 import { getNonBlockingChecksForRepository } from '../daemon/configLoader.js';
 import { isNonBlockingCheck } from './nonBlockingChecks.js';
-import { evaluatePullRequestAutoMerge } from '../services/autoMergeGate.js';
+import { evaluatePullRequestAutoMerge, resolveDirectMergeMethod } from '../services/autoMergeGate.js';
 import type { AutoMergePolicyMethod } from '../workflow/autoMergePolicy.js';
 
 export interface StatusEventPayload {
@@ -253,9 +253,12 @@ async function processPRAutoMerge(ctx: PRContext, headSha: string, options: { ig
         return;
     }
 
-    log.info({ owner, repoName, prNumber, headSha, ci: ci.reason }, 'CI allows merging the auto-merge PR, attempting to merge');
+    // A policy without a method merges like the arming gate would arm: squash,
+    // unless the repository disallows it.
+    const mergeMethod = await resolveDirectMergeMethod({ owner, repo: repoName, method: decision.method });
+    log.info({ owner, repoName, prNumber, headSha, ci: ci.reason, mergeMethod }, 'CI allows merging the auto-merge PR, attempting to merge');
     // GitHub refuses the merge if the head moved after the evaluation.
-    await performMergeAndPostActions(mergeCtx, decision.method, pullRequest.headSha);
+    await performMergeAndPostActions(mergeCtx, mergeMethod, pullRequest.headSha);
 }
 
 export interface AutoMergeReevaluationOptions {

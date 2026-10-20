@@ -468,7 +468,11 @@ export const NO_CI_GRACE_MS = 2 * 60_000;
 const HEAD_OBSERVATION_KEY_PREFIX = 'auto-merge:head-observed';
 const HEAD_OBSERVATION_TTL_SECONDS = 30 * 24 * 60 * 60;
 
-export type HeadObservationStore = Pick<Redis, 'get' | 'set'>;
+export type HeadObservationStore = Pick<Redis, 'get' | 'set' | 'del'>;
+
+function headObservationKey(owner: string, repoName: string, prNumber: number): string {
+    return `${HEAD_OBSERVATION_KEY_PREFIX}:${owner}:${repoName}:${prNumber}`;
+}
 
 /**
  * When ProPR first saw `headSha` as the head of the PR without CI signal. The
@@ -481,7 +485,7 @@ export async function observePRHead(
     now: number,
 ): Promise<number> {
     const { owner, repoName, prNumber, headSha } = head;
-    const key = `${HEAD_OBSERVATION_KEY_PREFIX}:${owner}:${repoName}:${prNumber}`;
+    const key = headObservationKey(owner, repoName, prNumber);
     const raw = await store.get(key);
     if (raw) {
         const observation = JSON.parse(raw) as { sha?: unknown; observedAt?: unknown };
@@ -522,6 +526,9 @@ export async function getCiMergeReadiness(
     try {
         const { checkRuns, commitStatus, complete } = await fetchCheckSignals(owner, repoName, ref);
         if (checkRuns.length > 0 || commitStatus.totalCount > 0) {
+            // The PR's head now has CI, so any earlier no-CI observation is over:
+            // a later return to that earlier head must wait out a fresh grace period.
+            await (options.observations ?? getUltrafixStateRedis()).del(headObservationKey(owner, repoName, prNumber));
             const summary = summarizeCheckSignals(checkRuns, commitStatus, await loadNonBlockingChecks(owner, repoName));
             return summary.allPassing ? { ready: true, reason: 'checks_passing' } : { ready: false, reason: 'checks_not_passing' };
         }

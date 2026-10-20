@@ -16,7 +16,7 @@ await mock.module('../src/auth/githubAuth.js', { namedExports: { getAuthenticate
 await mock.module('../src/config/planIssueManager.js', { namedExports: { findPlanIssueByRepoAndPR: async () => planIssue } });
 
 const {
-    gateAutoMergeArming, reevaluateArmedAutoMergeOnNewHead, handleAutoMergePolicyPullRequestEvent, loadBaseAutoMergePolicy, recordAutoMergeDecisionEvent,
+    gateAutoMergeArming, resolveDirectMergeMethod, reevaluateArmedAutoMergeOnNewHead, handleAutoMergePolicyPullRequestEvent, loadBaseAutoMergePolicy, recordAutoMergeDecisionEvent,
 } = await import('../src/services/autoMergeGate.js');
 type GateOctokit = import('../src/services/autoMergeGate.js').AutoMergeGateOctokit;
 
@@ -141,6 +141,16 @@ test('without a configured method the repository default is used', async () => {
     const github = fakeGitHub({ workflowByRef: {}, files: [{ filename: 'a.ts' }], headSha: 'h', baseRef: 'main', headRef: 'f', repo: { allow_squash_merge: false, allow_merge_commit: true } });
     const result = await gateAutoMergeArming({ owner: 'acme', repo: 'repo', prNumber: 70, opportunity: 'ultrafix_goal', log }, { octokit: github.octokit, database });
     assert.equal(result.mergeMethod, 'MERGE');
+});
+
+test('a direct merge without a configured method uses the same repository default as arming', async () => {
+    const mergeOnly = fakeGitHub({ workflowByRef: {}, files: [], headSha: 'h', baseRef: 'main', headRef: 'f', repo: { allow_squash_merge: false, allow_merge_commit: true } });
+    assert.equal(await resolveDirectMergeMethod({ owner: 'acme', repo: 'repo' }, { octokit: mergeOnly.octokit }), 'merge');
+    const rebaseOnly = fakeGitHub({ workflowByRef: {}, files: [], headSha: 'h', baseRef: 'main', headRef: 'f', repo: { allow_squash_merge: false, allow_merge_commit: false } });
+    assert.equal(await resolveDirectMergeMethod({ owner: 'acme', repo: 'repo' }, { octokit: rebaseOnly.octokit }), 'rebase');
+    const defaults = fakeGitHub({ workflowByRef: {}, files: [], headSha: 'h', baseRef: 'main', headRef: 'f' });
+    assert.equal(await resolveDirectMergeMethod({ owner: 'acme', repo: 'repo' }, { octokit: defaults.octokit }), 'squash');
+    assert.equal(await resolveDirectMergeMethod({ owner: 'acme', repo: 'repo', method: 'rebase' }, { octokit: mergeOnly.octokit }), 'rebase', 'a configured method wins');
 });
 
 test('the skipped event names matching paths and finds the task by issue number', async () => {
