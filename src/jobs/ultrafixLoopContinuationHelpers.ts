@@ -92,7 +92,10 @@ export async function finishUltrafixLoop(input: {
         if (!stateCleared) return false;
         await clearDeferredContinuationIfCurrent(redisClient, identity, workEpoch);
         await removeUltrafixLabel(owner, repo, pullRequestNumber, correlatedLogger);
-        await maybeEnableAutoMerge(owner, repo, pullRequestNumber, correlatedLogger);
+        await maybeEnableAutoMerge(
+            { owner, repo, pullRequestNumber, correlationId: params.correlationId, currentJobId: params.currentJobId },
+            correlatedLogger,
+        );
         return true;
     });
     if (!finishResult) return { continued: false, reason: 'ultrafix_superseded' };

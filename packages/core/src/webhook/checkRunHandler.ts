@@ -6,7 +6,7 @@ import {
     deleteBranch,
     getFirstCommitMessage,
     getCurrentPRHead,
-    areAllChecksPassing,
+    getCiMergeReadiness,
     getPRAutoMergeInfo,
     linkedIssueHasAutoMergeLabel,
     hasActiveTasksForPR,
@@ -25,7 +25,7 @@ import {
 import type { CheckRunEvent, CheckSuiteEvent } from '@octokit/webhooks-types';
 import { getNonBlockingChecksForRepository } from '../daemon/configLoader.js';
 import { isNonBlockingCheck } from './nonBlockingChecks.js';
-import { evaluatePullRequestAutoMerge } from '../services/autoMergeGate.js';
+import { evaluatePullRequestAutoMerge, resolveDirectMergeMethod } from '../services/autoMergeGate.js';
 import type { AutoMergePolicyMethod } from '../workflow/autoMergePolicy.js';
 
 export interface StatusEventPayload {
@@ -177,9 +177,14 @@ async function performMergeAndPostActions(ctx: PRMergeContext, mergeMethod: Auto
 /**
  * Processes a single PR for potential auto-merge.
  */
-async function processPRAutoMerge(ctx: PRContext, headSha: string): Promise<void> {
+async function processPRAutoMerge(ctx: PRContext, headSha: string, options: { ignoreWorkIds?: readonly string[] } = {}): Promise<void> {
     const { owner, repoName, prNumber, log } = ctx;
     const prInfo = await getPRAutoMergeInfo(owner, repoName, prNumber);
+
+    if (prInfo.state !== undefined && prInfo.state !== 'open') {
+        log.debug({ owner, repoName, prNumber, state: prInfo.state }, 'PR is not open, skipping auto-merge');
+        return;
+    }
 
     if (prInfo.isDraft) {
         log.debug({ owner, repoName, prNumber }, 'PR is a draft, skipping auto-merge');
@@ -197,9 +202,10 @@ async function processPRAutoMerge(ctx: PRContext, headSha: string): Promise<void
         return;
     }
 
-    const allChecksPassing = await areAllChecksPassing(owner, repoName, headSha);
-    if (!allChecksPassing) {
-        log.debug({ owner, repoName, prNumber }, 'Not all checks are passing yet, skipping merge');
+    // Passing CI, or no CI at all for this head, lets the merge proceed.
+    const ci = await getCiMergeReadiness(owner, repoName, headSha, { prNumber });
+    if (!ci.ready) {
+        log.debug({ owner, repoName, prNumber, reason: ci.reason }, 'CI does not allow merging yet, skipping merge');
         return;
     }
 
@@ -220,7 +226,7 @@ async function processPRAutoMerge(ctx: PRContext, headSha: string): Promise<void
 
     // Check for active tasks (e.g., followup processing) before merging
     const repository = `${owner}/${repoName}`;
-    const { hasActive, activeTasks, queuedJobs } = await hasActiveTasksForPR(repository, prNumber);
+    const { hasActive, activeTasks, queuedJobs } = await hasActiveTasksForPR(repository, prNumber, options.ignoreWorkIds);
     if (hasActive) {
         log.info({
             owner,
@@ -247,18 +253,27 @@ async function processPRAutoMerge(ctx: PRContext, headSha: string): Promise<void
         return;
     }
 
-    log.info({ owner, repoName, prNumber, headSha }, 'All checks passing for auto-merge PR, attempting to merge');
+    // A policy without a method merges like the arming gate would arm: squash,
+    // unless the repository disallows it.
+    const mergeMethod = await resolveDirectMergeMethod({ owner, repo: repoName, method: decision.method });
+    log.info({ owner, repoName, prNumber, headSha, ci: ci.reason, mergeMethod }, 'CI allows merging the auto-merge PR, attempting to merge');
     // GitHub refuses the merge if the head moved after the evaluation.
-    await performMergeAndPostActions(mergeCtx, decision.method, pullRequest.headSha);
+    await performMergeAndPostActions(mergeCtx, mergeMethod, pullRequest.headSha);
+}
+
+export interface AutoMergeReevaluationOptions {
+    correlationId: string;
+    /** Task/job IDs of the caller's own still-running work, which must not block its merge. */
+    ignoreWorkIds?: readonly string[];
 }
 
 export async function reevaluatePRAutoMerge(
     owner: string,
     repoName: string,
     prNumber: number,
-    correlationId: string,
+    options: AutoMergeReevaluationOptions,
 ): Promise<void> {
-    const log = logger.withCorrelation(correlationId);
+    const log = logger.withCorrelation(options.correlationId);
     const headSha = await getCurrentPRHead(owner, repoName, prNumber);
     if (!headSha) {
         log.debug({ owner, repoName, prNumber }, 'Auto-merge re-evaluation skipped: PR head SHA unavailable');
@@ -266,7 +281,7 @@ export async function reevaluatePRAutoMerge(
     }
 
     const ctx: PRContext = { owner, repoName, prNumber, log };
-    await processPRAutoMerge(ctx, headSha);
+    await processPRAutoMerge(ctx, headSha, options);
 }
 
 /**

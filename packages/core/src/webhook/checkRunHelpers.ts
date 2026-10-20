@@ -246,12 +246,13 @@ async function getCommitStatusInfo(octokit: any, owner: string, repoName: string
 /**
  * Fetch both CI signal types for a commit: check runs and legacy commit
  * statuses. Either may be unavailable; only when both fail is this an error.
+ * `complete` is false when one of the two requests failed.
  */
 async function fetchCheckSignals(
     owner: string,
     repoName: string,
     ref: string,
-): Promise<{ checkRuns: CheckRunRecord[]; commitStatus: CommitStatusInfo }> {
+): Promise<{ checkRuns: CheckRunRecord[]; commitStatus: CommitStatusInfo; complete: boolean }> {
     const octokit = await getAuthenticatedOctokit();
     const [checkRunsResult, commitStatusResult] = await Promise.allSettled([
         octokit.request('GET /repos/{owner}/{repo}/commits/{ref}/check-runs', {
@@ -286,7 +287,11 @@ async function fetchCheckSignals(
         );
     }
 
-    return { checkRuns, commitStatus };
+    return {
+        checkRuns,
+        commitStatus,
+        complete: checkRunsResult.status === 'fulfilled' && commitStatusResult.status === 'fulfilled',
+    };
 }
 
 export interface CheckRunsStatus {
@@ -457,6 +462,87 @@ export async function areAllChecksPassing(
     }
 }
 
+/** How long a PR head may go without any CI signal before ProPR treats the repository as having no CI for it. */
+export const NO_CI_GRACE_MS = 2 * 60_000;
+
+const HEAD_OBSERVATION_KEY_PREFIX = 'auto-merge:head-observed';
+const HEAD_OBSERVATION_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+export type HeadObservationStore = Pick<Redis, 'get' | 'set' | 'del'>;
+
+function headObservationKey(owner: string, repoName: string, prNumber: number): string {
+    return `${HEAD_OBSERVATION_KEY_PREFIX}:${owner}:${repoName}:${prNumber}`;
+}
+
+/**
+ * When ProPR first saw `headSha` as the head of the PR without CI signal. The
+ * first call for a head records `now`; a different head starts a new
+ * observation. Concurrent writers can only move the observation later.
+ */
+export async function observePRHead(
+    store: HeadObservationStore,
+    head: { owner: string; repoName: string; prNumber: number; headSha: string },
+    now: number,
+): Promise<number> {
+    const { owner, repoName, prNumber, headSha } = head;
+    const key = headObservationKey(owner, repoName, prNumber);
+    const raw = await store.get(key);
+    if (raw) {
+        const observation = JSON.parse(raw) as { sha?: unknown; observedAt?: unknown };
+        if (observation.sha === headSha && typeof observation.observedAt === 'number' && Number.isFinite(observation.observedAt)) {
+            return observation.observedAt;
+        }
+    }
+    await store.set(key, JSON.stringify({ sha: headSha, observedAt: now }), 'EX', HEAD_OBSERVATION_TTL_SECONDS);
+    return now;
+}
+
+export interface CiMergeReadiness {
+    ready: boolean;
+    reason: 'checks_passing' | 'checks_not_passing' | 'no_ci' | 'waiting_for_ci' | 'unavailable';
+}
+
+/**
+ * Whether CI allows merging `ref`, the current head of the PR: every blocking
+ * check passed, or no CI ran for it at all. No CI counts only when both CI
+ * endpoints answered, and only once ProPR has seen the head without signal for
+ * {@link NO_CI_GRACE_MS}, so checks that have not registered yet after a push
+ * are not mistaken for missing CI. The commit date says nothing about when it
+ * was pushed, so the grace runs from ProPR's own first observation.
+ */
+export async function getCiMergeReadiness(
+    owner: string,
+    repoName: string,
+    ref: string,
+    options: {
+        /** The PR whose current head is `ref`. */
+        prNumber: number;
+        now?: number;
+        loadNonBlockingChecks?: (owner: string, repo: string) => Promise<string[]>;
+        observations?: HeadObservationStore;
+    },
+): Promise<CiMergeReadiness> {
+    const { prNumber, now = Date.now(), loadNonBlockingChecks = getNonBlockingChecksForRepository } = options;
+    try {
+        const { checkRuns, commitStatus, complete } = await fetchCheckSignals(owner, repoName, ref);
+        // An unreadable endpoint may hide pending or failing CI, so neither the
+        // passing signals of the other endpoint nor their absence prove anything.
+        if (!complete) return { ready: false, reason: 'unavailable' };
+        if (checkRuns.length > 0 || commitStatus.totalCount > 0) {
+            // The PR's head now has CI, so any earlier no-CI observation is over:
+            // a later return to that earlier head must wait out a fresh grace period.
+            await (options.observations ?? getUltrafixStateRedis()).del(headObservationKey(owner, repoName, prNumber));
+            const summary = summarizeCheckSignals(checkRuns, commitStatus, await loadNonBlockingChecks(owner, repoName));
+            return summary.allPassing ? { ready: true, reason: 'checks_passing' } : { ready: false, reason: 'checks_not_passing' };
+        }
+        const observedAt = await observePRHead(options.observations ?? getUltrafixStateRedis(), { owner, repoName, prNumber, headSha: ref }, now);
+        return now - observedAt >= NO_CI_GRACE_MS ? { ready: true, reason: 'no_ci' } : { ready: false, reason: 'waiting_for_ci' };
+    } catch (error) {
+        logger.warn({ owner, repoName, ref, error: (error as Error).message }, 'Failed to check CI merge readiness');
+        return { ready: false, reason: 'unavailable' };
+    }
+}
+
 export interface PRAutoMergeInfo {
     hasLabel: boolean;
     hasUltrafixLabel?: boolean;
@@ -468,6 +554,8 @@ export interface PRAutoMergeInfo {
     headBranch: string;
     mergeable: boolean | null;
     mergeableState: string;
+    /** GitHub PR state (`open` or `closed`); absent when the PR could not be read. */
+    state?: string;
 }
 
 const ULTRAFIX_STATE_KEY_PREFIX = 'ultrafix:state';
@@ -651,6 +739,7 @@ export async function getPRAutoMergeInfo(owner: string, repoName: string, prNumb
             : 'unknown';
 
         return {
+            state: prResponse.data.state,
             hasLabel,
             hasUltrafixLabel,
             hasActiveUltrafixLoop: ultrafixState?.active ?? false,
@@ -843,13 +932,17 @@ export async function getActiveTasksForPR(
  */
 export async function hasActiveTasksForPR(
     repository: string,
-    prNumber: number
+    prNumber: number,
+    ignoreWorkIds: readonly string[] = [],
 ): Promise<{
     hasActive: boolean;
     activeTasks: Array<{ taskId: string; state: string }>;
     queuedJobs: Array<{ jobId: string; state: string }>;
 }> {
-    const { activeTasks, queuedJobs } = await getActiveTasksForPR(repository, prNumber);
+    const ignored = new Set(ignoreWorkIds);
+    const work = await getActiveTasksForPR(repository, prNumber);
+    const activeTasks = work.activeTasks.filter(task => !ignored.has(task.taskId));
+    const queuedJobs = work.queuedJobs.filter(job => !ignored.has(job.jobId));
     return {
         hasActive: activeTasks.length > 0 || queuedJobs.length > 0,
         activeTasks,

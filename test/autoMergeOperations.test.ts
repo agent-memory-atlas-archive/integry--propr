@@ -46,3 +46,15 @@ test('a PR retargeted after the evaluation is not armed with the old base policy
     assert.equal(result.headChanged, true);
     assert.equal(graphql.mock.callCount(), 0);
 });
+
+test('GitHub refusing to arm at all is reported as unavailable so callers merge directly', async () => {
+    currentPullRequest = { ...currentPullRequest, head: { sha: 'evaluated-head' }, base: { ref: 'main' } };
+    for (const message of ['Auto merge is not allowed for this repository', 'Pull request is in clean status']) {
+        graphql.mock.mockImplementationOnce(async () => { throw Object.assign(new Error('GraphQL'), { errors: [{ message }] }); });
+        const result = await enableAutoMerge({ owner: 'acme', repoName: 'repo', prNumber: 7, expectedHead });
+        assert.deepEqual(result, { success: false, error: message, unavailable: true });
+    }
+    graphql.mock.mockImplementationOnce(async () => { throw Object.assign(new Error('GraphQL'), { errors: [{ message: 'Head sha did not match' }] }); });
+    const other = await enableAutoMerge({ owner: 'acme', repoName: 'repo', prNumber: 7, expectedHead });
+    assert.equal(other.unavailable, undefined);
+});
