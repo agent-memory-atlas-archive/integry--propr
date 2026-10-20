@@ -525,6 +525,9 @@ export async function getCiMergeReadiness(
     const { prNumber, now = Date.now(), loadNonBlockingChecks = getNonBlockingChecksForRepository } = options;
     try {
         const { checkRuns, commitStatus, complete } = await fetchCheckSignals(owner, repoName, ref);
+        // An unreadable endpoint may hide pending or failing CI, so neither the
+        // passing signals of the other endpoint nor their absence prove anything.
+        if (!complete) return { ready: false, reason: 'unavailable' };
         if (checkRuns.length > 0 || commitStatus.totalCount > 0) {
             // The PR's head now has CI, so any earlier no-CI observation is over:
             // a later return to that earlier head must wait out a fresh grace period.
@@ -532,8 +535,6 @@ export async function getCiMergeReadiness(
             const summary = summarizeCheckSignals(checkRuns, commitStatus, await loadNonBlockingChecks(owner, repoName));
             return summary.allPassing ? { ready: true, reason: 'checks_passing' } : { ready: false, reason: 'checks_not_passing' };
         }
-        // An unreadable endpoint may hide CI; it is not evidence that there is none.
-        if (!complete) return { ready: false, reason: 'unavailable' };
         const observedAt = await observePRHead(options.observations ?? getUltrafixStateRedis(), { owner, repoName, prNumber, headSha: ref }, now);
         return now - observedAt >= NO_CI_GRACE_MS ? { ready: true, reason: 'no_ci' } : { ready: false, reason: 'waiting_for_ci' };
     } catch (error) {

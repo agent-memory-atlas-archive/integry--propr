@@ -549,6 +549,18 @@ describe('getCiMergeReadiness', () => {
             assert.equal(observations.entries.size, 0);
         });
     }
+
+    test('passing check runs do not allow the merge while the status request fails', async () => {
+        resetMocks();
+        respond([{ name: 'build', status: 'completed', conclusion: 'success' }], 0, { status: true });
+        assert.deepStrictEqual(await readiness('sha', observedAt + NO_CI_GRACE_MS * 10), { ready: false, reason: 'unavailable' });
+    });
+
+    test('passing statuses do not allow the merge while the check-runs request fails', async () => {
+        resetMocks();
+        respond([], 1, { checkRuns: true });
+        assert.deepStrictEqual(await readiness('sha', observedAt + NO_CI_GRACE_MS * 10), { ready: false, reason: 'unavailable' });
+    });
 });
 
 // ============= areAllChecksPassing Tests =============
