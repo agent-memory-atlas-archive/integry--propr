@@ -42,32 +42,41 @@ function getSearchResultState(
 
 const PALETTE_WIDTH = 640;
 const VIEWPORT_GUTTER = 16;
+/**
+ * Below this much room under the input (a short or zoomed window), the tabs and a wrapped
+ * hint row would leave the list less than one result row, so the palette goes compact.
+ */
+const COMPACT_PALETTE_HEIGHT = 128;
 
 /**
  * Where the palette hangs: its left edge flush with the search input, 8px below it. It only
  * shifts left when the viewport is too narrow to fit it. The backdrop starts under the toolbar.
+ * `compact` marks too little room below the input for the full layout.
  */
 interface PaletteAnchor {
   top: number;
   left: number;
   backdropTop: number;
+  compact: boolean;
 }
 
 function measureAnchor(container: HTMLElement | null): PaletteAnchor {
   const input = container?.getBoundingClientRect();
-  if (!input) return { top: 0, left: VIEWPORT_GUTTER, backdropTop: 0 };
+  if (!input) return { top: 0, left: VIEWPORT_GUTTER, backdropTop: 0, compact: false };
   const bar = container?.closest('header')?.getBoundingClientRect();
   const maxLeft = window.innerWidth - Math.min(PALETTE_WIDTH, window.innerWidth - 2 * VIEWPORT_GUTTER) - VIEWPORT_GUTTER;
+  const top = input.bottom + 8;
   return {
-    top: input.bottom + 8,
+    top,
     left: Math.max(VIEWPORT_GUTTER, Math.min(input.left, maxLeft)),
     backdropTop: bar ? bar.bottom : input.bottom,
+    compact: window.innerHeight - top - VIEWPORT_GUTTER < COMPACT_PALETTE_HEIGHT,
   };
 }
 
 /** Track the input's position while the palette is open (the toolbar differs between web and desktop). */
 function usePaletteAnchor(containerRef: React.RefObject<HTMLElement | null>, open: boolean): PaletteAnchor {
-  const [anchor, setAnchor] = useState<PaletteAnchor>({ top: 0, left: 0, backdropTop: 0 });
+  const [anchor, setAnchor] = useState<PaletteAnchor>({ top: 0, left: 0, backdropTop: 0, compact: false });
   useLayoutEffect(() => {
     if (!open) return;
     const update = () => setAnchor(measureAnchor(containerRef.current));
@@ -80,6 +89,34 @@ function usePaletteAnchor(containerRef: React.RefObject<HTMLElement | null>, ope
 
 const Kbd: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <kbd className="rounded-sm border border-slate-200 bg-white px-1 py-px font-sans text-[10px] text-slate-500">{children}</kbd>
+);
+
+/** Footer keyboard hints. A compact palette gives their row to the results; the keys still work. */
+const KeyHints: React.FC<{ modifierKey: string; compact: boolean }> = ({ modifierKey, compact }) => compact ? null : (
+  <>
+    <span><Kbd>↑</Kbd> <Kbd>↓</Kbd> navigate</span>
+    <span><Kbd>Tab</Kbd> filter</span>
+    <span><Kbd>↵</Kbd> open</span>
+    <span><Kbd>{modifierKey}↵</Kbd> GitHub</span>
+    <span><Kbd>Esc</Kbd> close</span>
+  </>
+);
+
+/**
+ * No results. A compact palette drops the icon and padding, and a long query's message
+ * scrolls on its own, so "Search all tasks" always keeps its full row.
+ */
+const EmptyResults: React.FC<{ query: string; compact: boolean; onSearchAllTasks: () => void }> = ({ query, compact, onSearchAllTasks }) => (
+  <div className={`flex min-h-0 flex-col items-center px-4 text-center ${compact ? 'py-2' : 'py-8'}`}>
+    {!compact && <Search className="w-6 h-6 flex-none text-slate-300 mx-auto mb-2" />}
+    <p className="min-h-0 max-w-full overflow-y-auto break-words text-sm text-slate-500 scrollbar-subtle">No results found for "{query}"</p>
+    <button
+      onClick={onSearchAllTasks}
+      className={`${compact ? 'mt-1' : 'mt-3'} flex-none text-xs text-primary-600 hover:text-primary-700 transition-colors`}
+    >
+      Search all tasks
+    </button>
+  </div>
 );
 
 /**
@@ -124,11 +161,32 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({ inputRef: externalInputRef,
     setActiveIndex(0);
   }
 
-  // Keep the highlighted row visible as the keyboard walks the list.
+  // Keep the highlighted row visible as the keyboard walks the list. When the list is
+  // shorter than the row (a short window), its title still comes fully into view.
+  // Resizing or zooming with Search open changes the list's room (its height, and how
+  // titles wrap) but not the selection, so a window resize or a change in the list's
+  // height (the palette re-anchoring, going compact) reveals the row again too.
   useEffect(() => {
-    if (!activeItem) return;
-    const option = listRef.current?.querySelector(`#${searchOptionId(idPrefix, activeItem.key)}`);
-    option?.scrollIntoView?.({ block: 'nearest' });
+    const list = listRef.current;
+    if (!activeItem || !list) return;
+    const reveal = () => {
+      const option = list.querySelector(`#${searchOptionId(idPrefix, activeItem.key)}`);
+      option?.scrollIntoView?.({ block: 'nearest' });
+      option?.querySelector('[data-search-option-title]')?.scrollIntoView?.({ block: 'nearest' });
+    };
+    reveal();
+    window.addEventListener('resize', reveal);
+    let height = list.clientHeight;
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => {
+      if (list.clientHeight === height) return;
+      height = list.clientHeight;
+      reveal();
+    });
+    observer?.observe(list);
+    return () => {
+      window.removeEventListener('resize', reveal);
+      observer?.disconnect();
+    };
   }, [activeItem, idPrefix]);
 
   // Handle click outside to close dropdown
@@ -260,6 +318,8 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({ inputRef: externalInputRef,
 
       {/* Results palette: the Studio mega-dropdown (640px wide, up to 70vh tall),
           left-aligned with the search input just below it, over a dimmed backdrop.
+          It never runs past the window's lower edge, even when the input sits
+          lower (the narrow Search sheet below the Linux window controls).
           Clicking the backdrop closes it. */}
       {showDropdown && (
         <div
@@ -277,7 +337,7 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({ inputRef: externalInputRef,
         <div
           data-testid="global-search-palette"
           className="desktop-toolbar-popover fixed z-50 flex max-h-[70vh] w-[640px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-2xl ring-1 ring-black/5"
-          style={{ top: anchor.top, left: anchor.left }}
+          style={{ top: anchor.top, left: anchor.left, maxHeight: `min(70vh, calc(100% - ${anchor.top + VIEWPORT_GUTTER}px))` }}
         >
           {resultState === 'loading' && (
             <div className="px-4 py-8 text-center">
@@ -293,18 +353,7 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({ inputRef: externalInputRef,
             </div>
           )}
 
-          {resultState === 'empty' && (
-            <div className="px-4 py-8 text-center">
-              <Search className="w-6 h-6 text-slate-300 mx-auto mb-2" />
-              <p className="text-sm text-slate-500">No results found for "{query}"</p>
-              <button
-                onClick={handleViewAllTasks}
-                className="mt-3 text-xs text-primary-600 hover:text-primary-700 transition-colors"
-              >
-                Search all tasks
-              </button>
-            </div>
-          )}
+          {resultState === 'empty' && <EmptyResults query={query} compact={anchor.compact} onSearchAllTasks={handleViewAllTasks} />}
 
           {hasResults && (
             <>
@@ -347,11 +396,7 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({ inputRef: externalInputRef,
               </div>
 
               <div className="flex flex-none flex-wrap items-center gap-x-3 gap-y-1 border-t border-slate-200 bg-slate-50 px-3 py-1.5 text-[10px] text-slate-500">
-                <span><Kbd>↑</Kbd> <Kbd>↓</Kbd> navigate</span>
-                <span><Kbd>Tab</Kbd> filter</span>
-                <span><Kbd>↵</Kbd> open</span>
-                <span><Kbd>{modifierKey}↵</Kbd> GitHub</span>
-                <span><Kbd>Esc</Kbd> close</span>
+                <KeyHints modifierKey={modifierKey} compact={anchor.compact} />
                 <span className="ml-auto flex min-w-0 items-center gap-3">
                   {plansAction && (
                     <button
