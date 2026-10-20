@@ -59,11 +59,15 @@ describe('TaskVisualPreviews', () => {
     render(<TaskVisualPreviews previews={[
       { type: 'image', title: 'Chart at desktop 1440px', url: asset('a') },
       { type: 'image', title: 'Assertion failed at 390px', url: asset('b') },
+      { type: 'image', title: 'Checkout assertion passed', url: asset('c') },
     ]} />);
     const switcher = screen.getByRole('group', { name: 'Captures' });
-    expect(within(switcher).getAllByRole('button').map(button => button.textContent)).toEqual(['01Desktop 1440px', '02390px']);
+    expect(within(switcher).getAllByRole('button').map(button => button.textContent)).toEqual(['01Desktop 1440px', '02390px', '03Checkout assertion passed']);
     expect(within(switcher).getByRole('button', { name: '390px' })).toHaveClass('border-red-300', 'text-red-700', 'bg-red-50');
     expect(within(switcher).getByRole('button', { name: 'Desktop 1440px' })).not.toHaveClass('border-red-300');
+    const passed = within(switcher).getByRole('button', { name: 'Checkout assertion passed' });
+    expect(passed).not.toHaveClass('border-red-300', 'text-red-700', 'bg-red-50');
+    expect(passed).toHaveClass('border-transparent', 'text-slate-600');
   });
 
   it('switches captures in place and plays videos with their controls', () => {

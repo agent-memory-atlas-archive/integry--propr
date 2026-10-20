@@ -40,8 +40,8 @@ function captureLabel(preview: PublishedVisualPreview): string {
   return captureViewport(preview) ?? preview.title;
 }
 
-/** Captures whose title reports a failed run or assertion are flagged in the switcher. */
-const isFailureCapture = (preview: PublishedVisualPreview) => /\b(fail(?:s|ed|ing|ure)?|assertion)\b/i.test(preview.title);
+/** Captures whose title reports a failure are flagged in the switcher; naming an assertion alone is not a failure. */
+const isFailureCapture = (preview: PublishedVisualPreview) => /\bfail(?:s|ed|ing|ure)?\b/i.test(preview.title);
 
 function CaptureIcon({ preview }: { preview: PublishedVisualPreview }) {
   const device = captureDevice(preview);
