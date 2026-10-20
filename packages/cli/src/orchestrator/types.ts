@@ -50,6 +50,8 @@ export interface OrchestratorConfig {
   readonly uiTunnelEnabled: boolean;
   readonly uiTunnelToken?: string;
   readonly proprInstanceId?: string;
+  /** Whether envFileLocal may be read as Docker reads it (false for pre-parsed env values). */
+  readonly envFileDockerLiteral: boolean;
   readonly uiPublicApiUrl?: string;
   readonly cloudflaredImage: string;
   /** Immediate socket peers whose forwarded client/protocol headers the API trusts. */
