@@ -457,6 +457,44 @@ export async function areAllChecksPassing(
     }
 }
 
+/** How long a head may go without any CI signal before ProPR treats the repository as having no CI for it. */
+export const NO_CI_GRACE_MS = 2 * 60_000;
+
+export interface CiMergeReadiness {
+    ready: boolean;
+    reason: 'checks_passing' | 'checks_not_passing' | 'no_ci' | 'waiting_for_ci' | 'unavailable';
+}
+
+/**
+ * Whether CI allows merging `ref`: every blocking check passed, or no CI ran for
+ * it at all. A head with no signal counts as having no CI only once it is older
+ * than {@link NO_CI_GRACE_MS}, so checks that have not registered yet are not
+ * mistaken for missing CI.
+ */
+export async function getCiMergeReadiness(
+    owner: string,
+    repoName: string,
+    ref: string,
+    options: { now?: number; loadNonBlockingChecks?: (owner: string, repo: string) => Promise<string[]> } = {},
+): Promise<CiMergeReadiness> {
+    const { now = Date.now(), loadNonBlockingChecks = getNonBlockingChecksForRepository } = options;
+    try {
+        const { checkRuns, commitStatus } = await fetchCheckSignals(owner, repoName, ref);
+        if (checkRuns.length > 0 || commitStatus.totalCount > 0) {
+            const summary = summarizeCheckSignals(checkRuns, commitStatus, await loadNonBlockingChecks(owner, repoName));
+            return summary.allPassing ? { ready: true, reason: 'checks_passing' } : { ready: false, reason: 'checks_not_passing' };
+        }
+        const octokit = await getAuthenticatedOctokit();
+        const commit = await octokit.request('GET /repos/{owner}/{repo}/commits/{ref}', { owner, repo: repoName, ref });
+        const committedAt = Date.parse(commit.data.commit.committer?.date ?? '');
+        if (!Number.isFinite(committedAt)) return { ready: false, reason: 'unavailable' };
+        return now - committedAt >= NO_CI_GRACE_MS ? { ready: true, reason: 'no_ci' } : { ready: false, reason: 'waiting_for_ci' };
+    } catch (error) {
+        logger.warn({ owner, repoName, ref, error: (error as Error).message }, 'Failed to check CI merge readiness');
+        return { ready: false, reason: 'unavailable' };
+    }
+}
+
 export interface PRAutoMergeInfo {
     hasLabel: boolean;
     hasUltrafixLabel?: boolean;
@@ -468,6 +506,8 @@ export interface PRAutoMergeInfo {
     headBranch: string;
     mergeable: boolean | null;
     mergeableState: string;
+    /** GitHub PR state (`open` or `closed`); absent when the PR could not be read. */
+    state?: string;
 }
 
 const ULTRAFIX_STATE_KEY_PREFIX = 'ultrafix:state';
@@ -651,6 +691,7 @@ export async function getPRAutoMergeInfo(owner: string, repoName: string, prNumb
             : 'unknown';
 
         return {
+            state: prResponse.data.state,
             hasLabel,
             hasUltrafixLabel,
             hasActiveUltrafixLoop: ultrafixState?.active ?? false,
@@ -843,13 +884,17 @@ export async function getActiveTasksForPR(
  */
 export async function hasActiveTasksForPR(
     repository: string,
-    prNumber: number
+    prNumber: number,
+    ignoreWorkIds: readonly string[] = [],
 ): Promise<{
     hasActive: boolean;
     activeTasks: Array<{ taskId: string; state: string }>;
     queuedJobs: Array<{ jobId: string; state: string }>;
 }> {
-    const { activeTasks, queuedJobs } = await getActiveTasksForPR(repository, prNumber);
+    const ignored = new Set(ignoreWorkIds);
+    const work = await getActiveTasksForPR(repository, prNumber);
+    const activeTasks = work.activeTasks.filter(task => !ignored.has(task.taskId));
+    const queuedJobs = work.queuedJobs.filter(job => !ignored.has(job.jobId));
     return {
         hasActive: activeTasks.length > 0 || queuedJobs.length > 0,
         activeTasks,

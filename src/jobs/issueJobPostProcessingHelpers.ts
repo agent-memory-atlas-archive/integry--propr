@@ -18,6 +18,7 @@ import {
     type SubmissionPayload,
 } from '@propr/core';
 import { enableAutoMerge } from '../github/autoMergeOperations.js';
+import { isAutoMergeDisabledForRepository, suggestEnablingAutoMerge } from '../github/autoMergeAvailability.js';
 import type { PostProcessingResult } from './issueJobHelpers.js';
 import { redisClient } from './issueJob/config.js';
 import { resolveImplementationPrUltrafixTrigger } from './implementationPrUltrafix.js';
@@ -385,4 +386,10 @@ export async function handleCreatedPlanIssuePR(options: {
     }
 
     correlatedLogger.warn({ prNumber, error: autoMergeResult.error }, 'Failed to enable auto-merge on PR');
+    // ProPR still merges the PR itself (check events and the daemon's auto-merge
+    // sweep); point out the setting that lets GitHub do it.
+    if (isAutoMergeDisabledForRepository(autoMergeResult.error)) {
+        const suggestionError = await suggestEnablingAutoMerge(issueRef.repoOwner, issueRef.repoName, prNumber);
+        if (suggestionError) correlatedLogger.warn({ prNumber, error: suggestionError.message }, 'Failed to suggest enabling GitHub auto-merge');
+    }
 }

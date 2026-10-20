@@ -39,6 +39,7 @@ let escalationEnabled = false;
 
 await mock.module('@propr/core', {
     namedExports: {
+        reevaluatePRAutoMerge: async () => undefined,
         AgentRegistry: {},
         logger: { info: () => {} },
         loadUltrafixEscalationSettings: async () => ({ enabled: escalationEnabled, models: [], patience: 3, maxReasoningLevels: 2 }),

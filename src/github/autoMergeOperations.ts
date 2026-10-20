@@ -1,4 +1,5 @@
 import { getAuthenticatedOctokit, logger, handleError } from '@propr/core';
+import { isAutoMergeUnavailableError } from './autoMergeAvailability.js';
 
 /**
  * Auto-merge method options supported by GitHub.
@@ -26,6 +27,12 @@ export interface EnableAutoMergeResult {
     autoMergeEnabled?: boolean;
     /** True when the PR's head or base moved since the evaluated snapshot; nothing was armed. */
     headChanged?: boolean;
+    /**
+     * True when GitHub cannot arm auto-merge for this PR at all: the repository
+     * disallows it, or the PR is already mergeable so there is nothing to wait for.
+     * The caller has to merge directly instead.
+     */
+    unavailable?: boolean;
 }
 
 export interface DisableAutoMergeOptions {
@@ -190,7 +197,8 @@ export async function enableAutoMerge(options: EnableAutoMergeOptions): Promise<
 
             return {
                 success: false,
-                error: errorMessages
+                error: errorMessages,
+                ...(isAutoMergeUnavailableError(errorMessages) && { unavailable: true }),
             };
         }
 

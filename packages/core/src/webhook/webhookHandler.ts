@@ -206,7 +206,7 @@ async function handleUltrafixLabelRemoval(payload: unknown, eventType: WebhookEv
     const prNumber = 'pull_request' in event ? event.pull_request.number : event.issue.number;
     const log = logger.withCorrelation(correlationId);
     if (await clearStateForCurrentUltrafixLabelRemoval(owner, repo, prNumber, log)) {
-        await reevaluatePRAutoMerge(owner, repo, prNumber, correlationId);
+        await reevaluatePRAutoMerge(owner, repo, prNumber, { correlationId });
         log.info({ owner, repo, prNumber }, `Cleared ultrafix loop state after ${eventType === 'pull_request' ? 'PR' : 'issue'} ultrafix label removal`);
     }
 }

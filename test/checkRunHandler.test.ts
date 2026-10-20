@@ -142,6 +142,8 @@ const {
     deleteBranch,
     getCurrentPRHead,
     areAllChecksPassing,
+    getCiMergeReadiness,
+    NO_CI_GRACE_MS,
     getCheckRunsStatus,
     getCheckRunsStatusForRepo,
     getPRAutoMergeInfo,
@@ -430,6 +432,49 @@ describe('getCheckRunsStatus with nonBlockingChecks (Ultrafix readiness)', () =>
         );
         assert.strictEqual(await areAllChecksPassing('owner', 'repo', 'sha123', async () => unsignedPatterns), true);
         assert.strictEqual(await areAllChecksPassing('owner', 'repo', 'sha123', async () => []), false);
+    });
+});
+
+// ============= getCiMergeReadiness Tests =============
+describe('getCiMergeReadiness', () => {
+    const committedAt = Date.parse('2026-10-19T23:46:00Z');
+    function respond(checkRuns: unknown[], statusCount = 0): void {
+        mockOctokit.request.mock.mockImplementation(async (route: string) => {
+            if (route.endsWith('/check-runs')) return { data: { check_runs: checkRuns } };
+            if (route.endsWith('/status')) return { data: { state: statusCount ? 'success' : 'pending', total_count: statusCount, statuses: [] } };
+            if (route === 'GET /repos/{owner}/{repo}/commits/{ref}') return { data: { commit: { committer: { date: '2026-10-19T23:46:00Z' } } } };
+            throw new Error(`unexpected ${route}`);
+        });
+    }
+
+    test('passing checks allow the merge', async () => {
+        resetMocks();
+        respond([{ name: 'build', status: 'completed', conclusion: 'success' }]);
+        assert.deepStrictEqual(await getCiMergeReadiness('owner', 'repo', 'sha', { now: committedAt, loadNonBlockingChecks: async () => [] }), { ready: true, reason: 'checks_passing' });
+    });
+
+    test('pending checks hold the merge', async () => {
+        resetMocks();
+        respond([{ name: 'build', status: 'in_progress', conclusion: null }]);
+        assert.deepStrictEqual(await getCiMergeReadiness('owner', 'repo', 'sha', { now: committedAt + NO_CI_GRACE_MS * 10, loadNonBlockingChecks: async () => [] }), { ready: false, reason: 'checks_not_passing' });
+    });
+
+    test('a head with no CI at all is mergeable once checks had time to register', async () => {
+        resetMocks();
+        respond([]);
+        assert.deepStrictEqual(await getCiMergeReadiness('owner', 'repo', 'sha', { now: committedAt + NO_CI_GRACE_MS, loadNonBlockingChecks: async () => [] }), { ready: true, reason: 'no_ci' });
+    });
+
+    test('a fresh head with no CI signal waits for checks to register', async () => {
+        resetMocks();
+        respond([]);
+        assert.deepStrictEqual(await getCiMergeReadiness('owner', 'repo', 'sha', { now: committedAt + NO_CI_GRACE_MS - 1, loadNonBlockingChecks: async () => [] }), { ready: false, reason: 'waiting_for_ci' });
+    });
+
+    test('an API failure never allows the merge', async () => {
+        resetMocks();
+        mockOctokit.request.mock.mockImplementation(async () => { throw new Error('boom'); });
+        assert.deepStrictEqual(await getCiMergeReadiness('owner', 'repo', 'sha', { now: committedAt, loadNonBlockingChecks: async () => [] }), { ready: false, reason: 'unavailable' });
     });
 });
 

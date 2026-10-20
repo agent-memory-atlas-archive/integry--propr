@@ -131,6 +131,7 @@ const mockGetCurrentPRHead = mock.fn(async () => prHead);
 
 await mock.module('@propr/core', {
     namedExports: {
+        reevaluatePRAutoMerge: async () => undefined,
         AgentRegistry: {},
         logger: coreLogger,
         handleError: () => {},
