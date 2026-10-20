@@ -203,7 +203,7 @@ async function processPRAutoMerge(ctx: PRContext, headSha: string, options: { ig
     }
 
     // Passing CI, or no CI at all for this head, lets the merge proceed.
-    const ci = await getCiMergeReadiness(owner, repoName, headSha);
+    const ci = await getCiMergeReadiness(owner, repoName, headSha, { prNumber });
     if (!ci.ready) {
         log.debug({ owner, repoName, prNumber, reason: ci.reason }, 'CI does not allow merging yet, skipping merge');
         return;
