@@ -5,7 +5,7 @@
  */
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { ago, fixture } from './task-list-desktop.fixture';
-import { controlNames, inertRegions, installWindowActions, type Shell } from './native-chrome.fixture';
+import { controlNames, installWindowActions, type Shell } from './native-chrome.fixture';
 
 const taskId = 'issue-3314-run-0';
 const title = 'Keep task Follow Up focus contained';
@@ -52,7 +52,59 @@ async function openFromKeyboard(page: Page): Promise<{ dialog: Locator; invoker:
   const dialog = page.getByRole('dialog', { name: 'Follow Up on Task' });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('textbox', { name: 'Comment' })).toBeFocused();
+  await markIsolatedRegions(page);
   return { dialog, invoker };
+}
+
+const compactBar = '[data-testid="task-mobile-compact-bar"]';
+const preexisting = 'followup-preexisting-inert';
+
+/**
+ * A region the app had made inert before Follow Up opened. It sits beside the app root,
+ * so the dialog's isolation walks past it; closing must leave it inert.
+ */
+async function addPreexistingInert(page: Page) {
+  await page.evaluate(testId => {
+    const region = document.createElement('div');
+    region.dataset.testid = testId;
+    region.inert = true;
+    region.append(Object.assign(document.createElement('button'), { textContent: 'Unreachable' }));
+    document.body.append(region);
+  }, preexisting);
+}
+
+/**
+ * Inert regions outside the phone's compact bar, whose inert state follows its own
+ * scroll-driven visibility (checked separately by `expectCompactBarConsistent`).
+ */
+const stableInertRegions = (page: Page) => page.evaluate(bar => Array.from(document.querySelectorAll('[inert]'))
+  .filter(element => !element.matches(bar))
+  .map(element => element.outerHTML.slice(0, 120)), compactBar);
+
+/**
+ * Tags the regions Follow Up isolated: every outermost inert region beyond the ones that
+ * were already inert. The task workspace must be inside one of them.
+ */
+async function markIsolatedRegions(page: Page) {
+  const isolated = await page.evaluate(testId => {
+    const owned = Array.from(document.querySelectorAll<HTMLElement>('[inert]'))
+      .filter(element => !element.parentElement?.closest('[inert]') && element.dataset.testid !== testId);
+    owned.forEach(element => { element.dataset.followupIsolated = ''; });
+    const workspace = document.querySelector('[data-testid="task-workspace-scroll"]');
+    return Boolean(workspace && owned.some(element => element.contains(workspace)));
+  }, preexisting);
+  expect(isolated).toBe(true);
+}
+
+async function expectCompactBarConsistent(page: Page) {
+  const bar = page.locator(compactBar);
+  if (!await bar.count()) return;
+  const state = await bar.evaluate(element => ({
+    inert: (element as HTMLElement).inert,
+    hidden: element.getAttribute('aria-hidden') === 'true',
+    invisible: element.classList.contains('invisible'),
+  }));
+  expect(state).toEqual({ inert: state.hidden, hidden: state.invisible, invisible: state.invisible });
 }
 
 async function expectTabCycle(page: Page, cycle: Locator[]) {
@@ -69,7 +121,21 @@ async function expectTabCycle(page: Page, cycle: Locator[]) {
 async function expectRestored(page: Page, dialog: Locator, invoker: Locator, baseline: string[]) {
   await expect(dialog).toHaveCount(0);
   await expect(invoker).toBeFocused();
-  expect(await inertRegions(page)).toEqual(baseline);
+  // Everything the dialog isolated is live again, the pre-existing region is still inert,
+  // and nothing else was left inert.
+  expect(await page.locator('[data-followup-isolated]').evaluateAll(regions => regions.filter(region => (region as HTMLElement).inert).length)).toBe(0);
+  await expect(page.getByTestId(preexisting)).toHaveJSProperty('inert', true);
+  expect(await stableInertRegions(page)).toEqual(baseline);
+  await expectCompactBarConsistent(page);
+}
+
+async function openTask(page: Page) {
+  await page.goto(`/tasks/${taskId}`);
+  await expect(page.getByRole('heading', { name: title }).first()).toBeVisible();
+  await addPreexistingInert(page);
+  const baseline = await stableInertRegions(page);
+  expect(baseline).toEqual([expect.stringContaining(preexisting)]);
+  return baseline;
 }
 
 const layouts = [
@@ -84,9 +150,7 @@ for (const layout of layouts) test.describe(layout.name, () => {
   test('Tab stays inside Follow Up and every dismissal returns focus to its opener', async ({ page }) => {
     const posts: string[] = [];
     await stubTask(page, {}, posts, 'receipt');
-    await page.goto(`/tasks/${taskId}`);
-    await expect(page.getByRole('heading', { name: title }).first()).toBeVisible();
-    const baseline = await inertRegions(page);
+    const baseline = await openTask(page);
 
     let { dialog, invoker } = await openFromKeyboard(page);
     const comment = dialog.getByRole('textbox', { name: 'Comment' });
@@ -134,9 +198,7 @@ for (const layout of layouts) test.describe(layout.name, () => {
   test('a successful post closes Follow Up and returns focus to its opener', async ({ page }) => {
     const posts: string[] = [];
     await stubTask(page, {}, posts, 'success');
-    await page.goto(`/tasks/${taskId}`);
-    await expect(page.getByRole('heading', { name: title }).first()).toBeVisible();
-    const baseline = await inertRegions(page);
+    const baseline = await openTask(page);
 
     const { dialog, invoker } = await openFromKeyboard(page);
     await page.keyboard.press('ControlOrMeta+End');
@@ -156,9 +218,7 @@ test.describe('Linux desktop window', () => {
   test('window controls keep native Tab order while Follow Up is open', async ({ page }) => {
     const posts: string[] = [];
     await stubTask(page, { platform: 'linux' }, posts, 'receipt');
-    await page.goto(`/tasks/${taskId}`);
-    await expect(page.getByRole('heading', { name: title }).first()).toBeVisible();
-    const baseline = await inertRegions(page);
+    const baseline = await openTask(page);
 
     const { dialog, invoker } = await openFromKeyboard(page);
     const [menu, minimize] = controlNames.map(name => page.getByRole('button', { name }));
