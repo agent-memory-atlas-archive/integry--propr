@@ -48,12 +48,14 @@ const CompletedItemsAccordion: React.FC<CompletedItemsAccordionProps> = ({
 
       {isExpanded && (
         <div className="mt-2 space-y-1.5 ml-4">
+          {/* Completed rows are still readable content with live controls, so they are
+              never faded: the strikethrough and slate-50 fill mark them as done. */}
           {todos.map((todo) => (
             <div
               key={todo.todoId}
               data-testid="repo-todo-row"
-              className="group flex items-start gap-2 p-2.5 rounded-lg border bg-slate-50 border-slate-200 opacity-60
-                touch:opacity-100 touch:grid touch:grid-cols-[auto_minmax(0,1fr)_auto] touch:gap-x-1 touch:gap-y-1 touch:p-2 touch:pb-1
+              className="group flex items-start gap-2 p-2.5 rounded-lg border bg-slate-50 border-slate-200
+                touch:grid touch:grid-cols-[auto_minmax(0,1fr)_auto] touch:gap-x-1 touch:gap-y-1 touch:p-2 touch:pb-1
                 touch:[grid-template-areas:'content_content_content'_'restore_._delete']"
             >
               <button
@@ -71,7 +73,7 @@ const CompletedItemsAccordion: React.FC<CompletedItemsAccordionProps> = ({
                 </span>
               </button>
               <div className="flex-1 min-w-0 touch:[grid-area:content] touch:px-1 touch:pt-0.5">
-                <p className="text-sm text-slate-400 line-through break-words whitespace-pre-wrap">
+                <p className="text-sm text-slate-600 line-through break-words whitespace-pre-wrap">
                   {todo.content}
                 </p>
                 <TodoIssueLink todo={todo} className="mt-1" />
@@ -80,7 +82,7 @@ const CompletedItemsAccordion: React.FC<CompletedItemsAccordionProps> = ({
                 onClick={() => onDeleteTodo(todo.todoId)}
                 disabled={disabled}
                 aria-label={`Delete todo: ${todo.content}`}
-                className={`${rowIconButton} touch:[grid-area:delete] text-slate-300 hover:text-red-500 ${revealOnHover}`}
+                className={`${rowIconButton} touch:[grid-area:delete] text-slate-500 hover:text-red-500 ${revealOnHover}`}
                 title="Delete"
               >
                 <Trash2 size={12} className={rowIcon} />
