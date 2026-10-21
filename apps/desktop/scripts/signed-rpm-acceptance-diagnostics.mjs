@@ -1,9 +1,13 @@
 // Bounded, privacy-preserving failure classification for signed RPM acceptance.
-// Only fixed phase/stage names, numeric exit statuses, Node signal names and
-// spawn error codes are reported. Child output, arguments, environment values,
-// paths and key material never enter a message or diagnostic.
+// Only fixed phase/stage names, numeric exit statuses, Node signal names,
+// spawn error codes and allowlisted browser checkpoint/failure identifiers are
+// reported. Child output, arguments, environment values, paths and key material
+// never enter a message or diagnostic.
 import { spawn } from 'node:child_process';
 import { constants } from 'node:os';
+import {
+  BROWSER_ACCEPTANCE_FAILURE_CATEGORIES, createBrowserCheckpointTracker, isBrowserCheckpoint,
+} from './packaged-acceptance-checkpoints.mjs';
 
 export const SIGNED_RPM_ACCEPTANCE_PHASES = Object.freeze([
   'docker-info', 'workspace-setup', 'context-preparation', 'image-build', 'network-create', 'installed-acceptance',
@@ -23,12 +27,19 @@ const phaseName = phase => SIGNED_RPM_ACCEPTANCE_PHASES.includes(phase) ? phase 
 const spawnCode = code => typeof code === 'string' && /^E[A-Z0-9]{1,24}$/.test(code) ? code : 'unknown';
 
 // Rebuild every diagnostic from allowlisted fields so no caller-provided value leaks through.
-export const boundedDiagnostic = ({ phase, outcome, exitCode, signal, spawnError, stage }) => {
+export const boundedDiagnostic = ({
+  phase, outcome, exitCode, signal, spawnError, stage, browserJourney, browserCheckpoint, browserFailure,
+}) => {
   const diagnostic = { phase: phaseName(phase), outcome: OUTCOMES.has(outcome) ? outcome : 'error' };
   if (Number.isInteger(exitCode) && exitCode >= 0 && exitCode <= 255) diagnostic.exitCode = exitCode;
   if (signals.has(signal)) diagnostic.signal = signal;
   if (spawnError !== undefined) diagnostic.spawnError = spawnCode(spawnError);
   if (SIGNED_RPM_CONTAINER_STAGES.includes(stage)) diagnostic.stage = stage;
+  // Browser progress is meaningful only while the container is in its browser stage.
+  if (diagnostic.stage === 'browser-acceptance') {
+    if (isBrowserCheckpoint(browserJourney, browserCheckpoint)) Object.assign(diagnostic, { browserJourney, browserCheckpoint });
+    if (BROWSER_ACCEPTANCE_FAILURE_CATEGORIES.includes(browserFailure)) diagnostic.browserFailure = browserFailure;
+  }
   return diagnostic;
 };
 
@@ -63,19 +74,24 @@ export const runAcceptancePhase = (file, args, {
   phase, allowFailure = false, timeout = 30 * 60_000, trackStages = false,
 } = {}) => new Promise((done, reject) => {
   let settled = false, timedOut = false, interrupted = false, stage, partial = '', overflow = false, stdout = '';
-  const fail = details => reject(new SignedRpmAcceptanceFailure({ phase, ...details, stage }));
+  const browser = createBrowserCheckpointTracker();
+  const fail = details => reject(new SignedRpmAcceptanceFailure({ phase, ...details, stage, ...browser.snapshot() }));
   const child = spawn(file, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH, HOME: process.env.HOME } });
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', chunk => {
     stdout = (stdout + chunk).slice(-65536);
     if (!trackStages) return;
-    // Recognize only complete, short marker lines naming an allowlisted stage.
+    // Recognize only complete, short marker lines naming an allowlisted stage or,
+    // within the browser stage, an allowlisted browser checkpoint/failure category.
     const lines = (partial + chunk).split('\n');
     partial = lines.pop();
     for (const line of lines) {
-      const name = !overflow && line.startsWith(SIGNED_RPM_STAGE_MARKER) && line.slice(SIGNED_RPM_STAGE_MARKER.length).trimEnd();
-      if (SIGNED_RPM_CONTAINER_STAGES.includes(name)) stage = name;
+      const text = !overflow && line.length <= 128 && line.trimEnd();
       overflow = false;
+      if (!text) continue;
+      const name = text.startsWith(SIGNED_RPM_STAGE_MARKER) && text.slice(SIGNED_RPM_STAGE_MARKER.length);
+      if (SIGNED_RPM_CONTAINER_STAGES.includes(name)) { stage = name; browser.reset(); }
+      else if (stage === 'browser-acceptance') browser.accept(text);
     }
     if (partial.length > 128) { partial = ''; overflow = true; }
   });

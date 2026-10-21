@@ -356,7 +356,7 @@ for (const scenarioFailure of [false, true]) test(`failure diagnostics precede $
   const drain = runnerSource.slice(runnerSource.indexOf('const settlePendingRendererConsoleCaptures ='),
     runnerSource.indexOf('const boundedAcceptanceDiagnosticCount ='));
   Object.assign(context, {
-    installedRpm: false, traceWritten: true, pendingConsoleRecords: [], processRecords: [], outputDirectory: 'output',
+    installedRpm: false, browserProgress: { checkpoint: () => {} }, traceWritten: true, pendingConsoleRecords: [], processRecords: [], outputDirectory: 'output',
     FIXED_TIME: 'fixed', join: (...parts) => parts.join('/'), Buffer, digest: () => '0'.repeat(64),
     console: { info: (...values) => emitted.push(values) },
     writeFile: async (path, content) => files.set(path, JSON.parse(content)),
@@ -812,6 +812,8 @@ test('installed mode cannot be redirected away from the package-owned executable
 
 test('successful installed lifecycle retains every phase in final logs and accounting', async () => {
   const files = new Map();
+  const checkpoints = [];
+  const browserProgress = { checkpoint: (journey, step) => checkpoints.push(`${journey}/${step}`) };
   const context = diagnosticContext();
   const scenario = runnerSource.slice(runnerSource.indexOf('  if (!traceWritten)'), runnerSource.indexOf('  const serious ='));
   const drain = runnerSource.slice(runnerSource.indexOf('const settlePendingRendererConsoleCaptures ='), runnerSource.indexOf('const boundedAcceptanceDiagnosticCount ='));
@@ -822,7 +824,7 @@ test('successful installed lifecycle retains every phase in final logs and accou
     'installed-wrong-account', 'installed-wrong-account-restart',
   ];
   Object.assign(context, {
-    installedRpm: true, traceWritten: true, pendingConsoleRecords: [], processRecords: [], outputDirectory: 'output',
+    installedRpm: true, browserProgress, traceWritten: true, pendingConsoleRecords: [], processRecords: [], outputDirectory: 'output',
     FIXED_TIME: 'fixed', join: (...parts) => parts.join('/'), Buffer, digest: () => 'digest', console: { info: () => {} },
     writeFile: async (path, content) => files.set(path, JSON.parse(content)),
     rendererLifecycleInvalidStates: new Map(), boundaryJourneys: new Set(context.ACCEPTANCE_JOURNEYS), surfaces: [],
@@ -847,15 +849,19 @@ test('successful installed lifecycle retains every phase in final logs and accou
   }
   assert.equal(summary.records, installedJourneys.length);
   assert.equal(summary.unexpectedErrors, 0);
+  assert.deepEqual(checkpoints, ['csp-reload/completed', 'final-evidence/log-written', 'final-evidence/lifecycle-verified',
+    'final-evidence/boundary-verified', 'final-evidence/renderer-errors-verified']);
 });
 
 test('installed lifecycle errors reach final diagnostics and fail the integrated gate', async () => {
   const files = new Map();
+  const checkpoints = [];
+  const browserProgress = { checkpoint: (journey, step) => checkpoints.push(`${journey}/${step}`) };
   const context = diagnosticContext();
   const scenario = runnerSource.slice(runnerSource.indexOf('  if (!traceWritten)'), runnerSource.indexOf('  const serious ='));
   const drain = runnerSource.slice(runnerSource.indexOf('const settlePendingRendererConsoleCaptures ='), runnerSource.indexOf('const boundedAcceptanceDiagnosticCount ='));
   Object.assign(context, {
-    installedRpm: true, traceWritten: true, pendingConsoleRecords: [], processRecords: [], outputDirectory: 'output',
+    installedRpm: true, browserProgress, traceWritten: true, pendingConsoleRecords: [], processRecords: [], outputDirectory: 'output',
     FIXED_TIME: 'fixed', join: (...parts) => parts.join('/'), Buffer, digest: () => 'digest', console: { info: () => {} },
     writeFile: async (path, content) => files.set(path, JSON.parse(content)),
     rendererLifecycleInvalidStates: new Map(), boundaryJourneys: new Set(), surfaces: [],
@@ -875,4 +881,7 @@ test('installed lifecycle errors reach final diagnostics and fail the integrated
   const diagnostics = files.get('output/sanitized-renderer-errors.json');
   assert.equal(diagnostics.unexpectedErrors, 2);
   assert.ok(diagnostics.errorRecords.every(record => record.phase === 'installed-restart'));
+  // The last checkpoint names the gate that failed; it is not advanced past it.
+  assert.equal(checkpoints.at(-1), 'final-evidence/boundary-verified');
+  assert.equal(checkpoints.includes('final-evidence/renderer-errors-verified'), false);
 });

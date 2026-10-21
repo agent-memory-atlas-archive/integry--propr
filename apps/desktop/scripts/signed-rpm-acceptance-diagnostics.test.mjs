@@ -66,9 +66,42 @@ test('container stage markers are recognized only as complete allowlisted lines'
     { phase: 'image-build', outcome: 'exit', exitCode: 7 }, 'only the installed run reports container stages');
 });
 
+test('browser checkpoints are tracked only inside the browser stage and only as allowlisted lines', async () => {
+  const script = `
+    const out = text => new Promise(done => process.stdout.write(text, done));
+    await out('PROPR_RPM_BROWSER_CHECKPOINT=final-evidence/artifacts-verified\\n');
+    await out('PROPR_RPM_BROWSER_FAILURE=secret-scan\\n');
+    await out('PROPR_RPM_ACCEPTANCE_STAGE=browser-acceptance\\n');
+    await out('PROPR_RPM_BROWSER_CHECKPOINT=runner/started\\n');
+    await out('PROPR_RPM_BROWSER_CHECK'); await out('POINT=dashboard-profile-manager/paired\\r\\n');
+    await out('PROPR_RPM_BROWSER_CHECKPOINT=${SECRET}\\n');
+    await out('PROPR_RPM_BROWSER_CHECKPOINT=dashboard-profile-manager/${SECRET}\\n');
+    await out('${'y'.repeat(200)}'); await out('PROPR_RPM_BROWSER_CHECKPOINT=final-evidence/log-written\\n');
+    await out('PROPR_RPM_BROWSER_CHECKPOINT=runner/fixtures-ready\\n');
+    await out('PROPR_RPM_BROWSER_FAILURE=ghp_${SECRET}\\n');
+    await out('PROPR_RPM_BROWSER_FAILURE=socket-handshake\\n');
+    await out('PROPR_RPM_BROWSER_FAILURE=unclassified\\n');
+    await out('Acceptance Socket.IO handshake failed: ${SECRET} /tmp/x\\n');
+    process.exit(Number(process.argv[1]));`;
+  const run = (exit, extra = '') => runAcceptancePhase(node, ['--input-type=module', '-e', script.replace('process.exit', `${extra}process.exit`), String(exit)],
+    { phase: 'installed-acceptance', trackStages: true });
+  assert.deepEqual(await failure(run(1)), { phase: 'installed-acceptance', outcome: 'exit', exitCode: 1, stage: 'browser-acceptance',
+    browserJourney: 'dashboard-profile-manager', browserCheckpoint: 'paired', browserFailure: 'socket-handshake' });
+  // A later container stage makes browser progress stale; it is not reported for that failure.
+  assert.deepEqual(await failure(run(2, "await out('PROPR_RPM_ACCEPTANCE_STAGE=evidence-export\\n');")),
+    { phase: 'installed-acceptance', outcome: 'exit', exitCode: 2, stage: 'evidence-export' });
+  assert.equal((await run(0)).code, 0, 'markers never turn into a failure on their own');
+});
+
 test('diagnostics are rebuilt from allowlisted fields and keep the primary failure first', () => {
   assert.deepEqual(boundedDiagnostic({ phase: SECRET, outcome: SECRET, exitCode: 900, signal: SECRET, spawnError: `${SECRET}`, stage: SECRET, extra: SECRET }),
     { phase: 'unknown', outcome: 'error', spawnError: 'unknown' });
+  const browser = { phase: 'installed-acceptance', outcome: 'exit', exitCode: 1, browserJourney: 'offline', browserCheckpoint: 'captured', browserFailure: 'ui-wait-timeout' };
+  assert.deepEqual(boundedDiagnostic({ ...browser, stage: 'package-install' }),
+    { phase: 'installed-acceptance', outcome: 'exit', exitCode: 1, stage: 'package-install' });
+  assert.deepEqual(boundedDiagnostic({ ...browser, stage: 'browser-acceptance' }), { ...browser, stage: 'browser-acceptance' });
+  assert.deepEqual(boundedDiagnostic({ ...browser, stage: 'browser-acceptance', browserJourney: 'csp-reload', browserFailure: SECRET }),
+    { phase: 'installed-acceptance', outcome: 'exit', exitCode: 1, stage: 'browser-acceptance' }, 'journey and checkpoint are validated as a pair');
   const combined = withCleanupFailures(new SignedRpmAcceptanceFailure({ phase: 'installed-acceptance', outcome: 'exit', exitCode: 1 }),
     [{ phase: 'container-cleanup', outcome: 'exit', exitCode: 125 }]);
   assert.deepEqual(assertPrivate(combined), { phase: 'installed-acceptance', outcome: 'exit', exitCode: 1,
@@ -94,6 +127,7 @@ const noise = scenario.secret + ' ' + args.join(' ') + ' ' + JSON.stringify(proc
 process.stderr.write(noise);
 if (!['info', 'inspect', 'network inspect'].includes(key)) process.stdout.write(noise);
 for (const stage of spec.stages ?? []) process.stdout.write('PROPR_RPM_ACCEPTANCE_STAGE=' + stage + '\\n');
+for (const line of spec.lines ?? []) process.stdout.write(line + '\\n');
 const label = args[args.indexOf('--label') + 1];
 if (key === 'info') process.stdout.write('linux/amd64\\n');
 if (key === 'network create' && spec.exit === undefined) { saved.network = label.split('=')[1]; save(); }
@@ -204,6 +238,14 @@ for (const [label, scenario, expected, calls] of [
   ['installed browser execution signal', { run: { signal: 'SIGKILL', stages: ['browser-acceptance'] } },
     { phase: 'installed-acceptance', outcome: 'signal', signal: 'SIGKILL', stage: 'browser-acceptance' },
     ['info', 'build', 'network create', 'run', ...cleanupCalls]],
+  ['installed browser checkpoint', { run: { exit: 1, stages: ['runtime-manifest', 'browser-acceptance'], lines: [
+    'PROPR_RPM_BROWSER_CHECKPOINT=runner/started', 'PROPR_RPM_BROWSER_CHECKPOINT=csp-reload/completed',
+    'PROPR_RPM_BROWSER_CHECKPOINT=installed-approved/paired', `PROPR_RPM_BROWSER_CHECKPOINT=installed-approved/${SECRET}`,
+    'PROPR_RPM_BROWSER_FAILURE=ui-wait-timeout', `locator.waitFor: Timeout 15000ms exceeded. ${SECRET} /tmp/x`,
+  ] } },
+    { phase: 'installed-acceptance', outcome: 'exit', exitCode: 1, stage: 'browser-acceptance',
+      browserJourney: 'installed-approved', browserCheckpoint: 'paired', browserFailure: 'ui-wait-timeout' },
+    ['info', 'build', 'network create', 'run', ...cleanupCalls]],
   ['owned cleanup only', { inspect: { present: true }, rm: { exit: 125 } },
     { phase: 'container-cleanup', outcome: 'exit', exitCode: 125 },
     ['info', 'build', 'network create', 'run', 'inspect', 'rm', 'network inspect', 'network rm', 'image rm']],
@@ -233,6 +275,32 @@ test('primary acceptance failure survives failing owned cleanup and every cleanu
   assert.deepEqual(await run.calls(), ['info', 'build', 'network create', 'run', 'inspect', 'rm', 'network inspect', 'image rm']);
   assert.equal(existsSync((await run.state()).workspace), false);
   assertNoEvidence(run.output);
+}));
+
+test('browser checkpoint failure keeps precedence over cleanup failures and never authorizes evidence', fullFlow, t => withOptIn(async () => {
+  const run = await harness(t, {
+    run: { exit: 1, stages: ['browser-acceptance'], lines: ['PROPR_RPM_BROWSER_CHECKPOINT=offline/launched',
+      'PROPR_RPM_BROWSER_FAILURE=service-observation-timeout'] },
+    inspect: { present: true }, rm: { exit: 1 }, 'image rm': { signal: 'SIGTERM' },
+  });
+  assert.deepEqual(await failure(run.execute()), { phase: 'installed-acceptance', outcome: 'exit', exitCode: 1,
+    stage: 'browser-acceptance', browserJourney: 'offline', browserCheckpoint: 'launched', browserFailure: 'service-observation-timeout',
+    cleanup: [{ phase: 'container-cleanup', outcome: 'exit', exitCode: 1 }, { phase: 'image-cleanup', outcome: 'signal', signal: 'SIGTERM' }] });
+  assert.deepEqual(await run.calls(), ['info', 'build', 'network create', 'run', 'inspect', 'rm', 'network inspect', 'network rm', 'image rm']);
+  assert.equal(existsSync((await run.state()).workspace), false);
+  assertNoEvidence(run.output);
+  assert.equal(existsSync(run.output), false, 'no partial evidence directory is created');
+}));
+
+test('browser checkpoints on a successful run leave the authoritative evidence unchanged', fullFlow, t => withOptIn(async () => {
+  const plain = await (await harness(t, {})).execute();
+  const run = await harness(t, { run: { stages: ['browser-acceptance', 'evidence-export', 'post-verify'], lines: [
+    'PROPR_RPM_BROWSER_CHECKPOINT=final-evidence/artifacts-verified', 'PROPR_RPM_BROWSER_FAILURE=unclassified'] } });
+  const evidence = await run.execute();
+  assert.deepEqual(evidence, plain);
+  assert.deepEqual(Object.keys(evidence), ['schemaVersion', 'status', 'target', 'sourceRevision', 'rpmSha256', 'signingRunId', 'fingerprint', 'checks']);
+  assert.deepEqual(Object.keys(evidence.checks), SIGNED_RPM_ACCEPTANCE_CHECKS);
+  assert.doesNotMatch(await readFile(join(run.output, 'signed-rpm-acceptance.json'), 'utf8'), /browser(Journey|Checkpoint|Failure)|PROPR_RPM/);
 }));
 
 test('in-process failures are classified without echoing paths or container-produced content', fullFlow, t => withOptIn(async () => {
