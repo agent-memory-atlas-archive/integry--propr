@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ChevronDown } from 'lucide-react';
 import { DESKTOP_UI_COMMAND_EVENT } from '../desktop/useDesktopNativeCommands';
@@ -72,11 +72,11 @@ function useHeaderKeyboardShortcuts(
 }
 
 /**
- * Routes a Search request (Ctrl/Cmd+K, or the native menu's Search command) to
- * a field the operator can actually use. From `md` that is the toolbar's own
- * input; below it (a narrow window, or enlarged text) the toolbar is
- * `display: none`, so focusing its input would silently do nothing, and the
- * request opens the search sheet instead. `mobileSearch` is 0 while the sheet
+ * Routes a Search request (Ctrl/Cmd+K, the native menu's Search command, or the
+ * ProPR mobile menu's Search row) to a field the operator can actually use.
+ * From `md` that is the toolbar's own input; below it (a narrow window, or
+ * enlarged text) the toolbar is `display: none`, so focusing its input would
+ * silently do nothing, and the request opens the search sheet instead. `mobileSearch` is 0 while the sheet
  * is closed and increments per request, so a repeat refocuses the field.
  */
 function useSearchRequests(searchInputRef: React.RefObject<HTMLInputElement | null>) {
@@ -107,11 +107,18 @@ function useSearchRequests(searchInputRef: React.RefObject<HTMLInputElement | nu
   const closeMobileSearch = useCallback(() => {
     sheetOpenRef.current = false;
     setMobileSearch(0);
+  }, []);
+
+  // Restore focus once the sheet has unmounted, not when it is asked to close: a press that
+  // lands right after the sheet appears can close it before its field takes focus, and that
+  // pending focus would otherwise move focus into the field being removed, leaving none.
+  useLayoutEffect(() => {
+    if (mobileSearch) return;
     const target = returnFocusRef.current;
     returnFocusRef.current = null;
     // After a route change the previous element may be gone; leave focus to the new page then.
     if (target?.isConnected) target.focus();
-  }, []);
+  }, [mobileSearch]);
 
   // Widening past `md` reveals the toolbar field, so the sheet steps aside.
   useEffect(() => {
@@ -349,6 +356,7 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = ({ user, onLogout, onMenuToggl
       unreadCount={inboxUnreadCount}
       systemHealth={systemHealth}
       quickAddRequest={mobileQuickAddRequest}
+      onSearch={requestSearch}
     />
     {mobileSearch > 0 && <MobileSearchOverlay request={mobileSearch} onClose={closeMobileSearch} />}
     </>
