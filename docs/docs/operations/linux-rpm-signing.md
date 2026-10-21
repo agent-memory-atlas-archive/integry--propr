@@ -296,10 +296,23 @@ It names only a fixed host phase (`docker-info`, `workspace-setup`,
 an outcome (`exit` with its numeric status, `signal`, `timeout`, `spawn` with its
 error code, `interrupted`, `error`, `ownership-refused`, `artifact-changed` or
 `evidence-invalid`) and, for the installed container, the last fixed step it
-entered. Child output, arguments, environment values, paths and key material are
-never reported; reproduce locally to see them. Every owned cleanup still runs
-after a failure, and cleanup failures are listed under `cleanup` after the
-original failure rather than replacing it.
+entered. When that step is `browser-acceptance`, the diagnostic can also name the
+last reached browser checkpoint (`browserJourney`/`browserCheckpoint`, for example
+`installed-approved`/`paired`) and a `browserFailure` category such as
+`ui-wait-timeout`, `socket-handshake`, `csp-reload`, `accessibility` or
+`unclassified`, for example
+`{"signedRpmAcceptanceFailure":{"phase":"installed-acceptance","outcome":"exit","exitCode":1,"stage":"browser-acceptance","browserJourney":"dashboard-profile-manager","browserCheckpoint":"paired","browserFailure":"dashboard-connected-timeout"}}`.
+The identifiers come from the fixed lists in
+`apps/desktop/scripts/packaged-acceptance-checkpoints.mjs`. The host accepts only
+complete, allowlisted marker lines seen during the browser stage. A checkpoint
+must come strictly after the previous one, and only the first failure category
+counts. Unknown, malformed, oversized, duplicated, stale or secret-bearing records
+are ignored. These fields are failure diagnostics only. They are never written to
+`signed-rpm-acceptance.json`, and they never authorize staging or publication.
+Child output, arguments, environment values, paths and key material are never
+reported; reproduce locally to see them. Every owned cleanup still runs after a
+failure, and cleanup failures are listed under `cleanup` after the original
+failure rather than replacing it.
 
 CI retains the bounded `signed-rpm-acceptance.json` as
 `propr-desktop-installed-signed-rpm-<signing-run-id>`, and visual/accessibility
@@ -321,6 +334,8 @@ Run the focused regressions with:
 node --test apps/desktop/scripts/packaged-browser-approval.test.mjs \
   apps/desktop/scripts/signed-rpm-acceptance-evidence.test.mjs \
   apps/desktop/scripts/signed-rpm-acceptance-diagnostics.test.mjs \
+  apps/desktop/scripts/packaged-acceptance-checkpoints.test.mjs \
+  apps/desktop/scripts/packaged-acceptance-csp-reload.test.mjs \
   apps/desktop/scripts/linux-preview-workflow.test.mjs
 npx tsx --test apps/desktop/scripts/packaged-acceptance-account.test.mjs
 # With Playwright Chromium installed (also run by the acceptance image build):

@@ -42,6 +42,7 @@ import {
   writeAcceptanceManifest,
 } from './acceptance-artifacts.mjs';
 import { PACKAGED_ACCEPTANCE_EPOCH_MILLISECONDS } from './packaged-acceptance-clock.mjs';
+import { createBrowserCheckpointReporter } from './packaged-acceptance-checkpoints.mjs';
 import { analyzeExistingElectronRenderer } from './packaged-acceptance-axe.mjs';
 import {
   classifyCurrentUserRequestShape,
@@ -741,6 +742,9 @@ const createFixture = async (mode, fixedOrigin) => {
 let readyOrigin;
 let revokedOrigin;
 let incompatibleOrigin;
+// Signed-RPM CI sees only fixed checkpoint/category markers; see packaged-acceptance-checkpoints.mjs.
+const browserProgress = createBrowserCheckpointReporter({ enabled: installedRpm });
+browserProgress.checkpoint('runner', 'started');
 
 const isolatedEnvironment = (userData, scenario) => {
   const allowed = {};
@@ -1018,10 +1022,14 @@ const installedPairingLifecycle = async () => {
   try {
     activeJourney = 'installed-approved';
     application = await launchApplication('default', null, userData);
+    browserProgress.checkpoint(activeJourney, 'launched');
     await pair(application.page, readyOrigin, 'Installed RPM');
+    browserProgress.checkpoint(activeJourney, 'paired');
     await connected(application.page);
     await application.page.getByText('@acceptance-admin', { exact: true }).first().waitFor();
+    browserProgress.checkpoint(activeJourney, 'connected');
     await waitForAuthenticatedSocket(activeJourney);
+    browserProgress.checkpoint(activeJourney, 'socket-authenticated');
     const records = requestRecords.filter(record => record.journey === activeJourney);
     if (!records.some(record => record.url.endsWith('/activate'))
       || !fixtureCurrentUserRecords.some(record => record.journey === activeJourney
@@ -1029,12 +1037,16 @@ const installedPairingLifecycle = async () => {
       throw new Error('Installed RPM did not activate and authenticate the live renderer');
     }
     checks.browserApproval = checks.expectedAccount = checks.activation = checks.authenticatedUi = true;
+    browserProgress.checkpoint(activeJourney, 'verified');
     await application.close(); application = null;
     activeJourney = 'installed-restart';
     application = await launchApplication('default', null, userData);
+    browserProgress.checkpoint(activeJourney, 'launched');
     await connected(application.page);
     await application.page.getByText('@acceptance-admin', { exact: true }).first().waitFor();
+    browserProgress.checkpoint(activeJourney, 'connected');
     await waitForAuthenticatedSocket(activeJourney);
+    browserProgress.checkpoint(activeJourney, 'socket-authenticated');
     if (requestRecords.some(record => record.journey === activeJourney && record.url === '/api/desktop/pairings')) {
       throw new Error('Installed RPM restart paired again instead of using the persisted credential');
     }
@@ -1042,13 +1054,16 @@ const installedPairingLifecycle = async () => {
     await application.page.getByRole('button', { name: 'Logout', exact: true }).click();
     await waitForObserved(() => requestRecords.some(record => record.journey === activeJourney
       && record.method === 'DELETE' && record.url === '/api/desktop/tokens/current'), 'logout revocation');
+    browserProgress.checkpoint(activeJourney, 'logout-revoked');
     await application.close(); application = null;
     activeJourney = 'installed-logged-out';
     application = await launchApplication('default', null, userData);
+    browserProgress.checkpoint(activeJourney, 'launched');
     await application.page.getByRole('button', { name: /Installed RPM/ }).first().click();
     await application.page.getByRole('button', { name: 'Sign in in browser' }).waitFor({ timeout: 15_000 });
     if (await application.page.getByRole('button', { name: 'Connected: Installed RPM' }).count()) throw new Error('Logout credential survived restart');
     checks.logoutRevocation = true;
+    browserProgress.checkpoint(activeJourney, 'verified');
     await application.close(); application = null;
   } finally {
     if (application) await application.close();
@@ -1064,9 +1079,11 @@ const installedPairingLifecycle = async () => {
     let failedApp;
     try {
       failedApp = await launchApplication('default', null, profile);
+      browserProgress.checkpoint(activeJourney, 'launched');
       await fillEndpoint(failedApp.page, readyOrigin, 'Rejected RPM');
       await failedApp.page.getByRole('button', { name: 'Sign in in browser' }).waitFor();
       await approveInBrowser(failedApp.page, readyOrigin, decision);
+      browserProgress.checkpoint(activeJourney, 'approval-decided');
       await failedApp.page.getByText(message).first().waitFor({ timeout: 15_000 });
       if (await failedApp.page.getByRole('button', { name: 'Connected: Rejected RPM' }).count()) throw new Error('Failed approval authenticated the renderer');
       if (decision !== 'wrong-account' && requestRecords.some(record => record.journey === activeJourney && record.url.endsWith('/activate'))) {
@@ -1074,12 +1091,15 @@ const installedPairingLifecycle = async () => {
       }
       if (decision === 'wrong-account') await waitForObserved(() => requestRecords.some(record => record.journey === activeJourney
         && record.method === 'POST' && record.url.endsWith('/cancel')), 'wrong-account provisional cancellation');
+      browserProgress.checkpoint(activeJourney, 'verified');
       await failedApp.close(); failedApp = null;
       // Persisted storage must remain unauthenticated even after a process restart.
       activeJourney = `installed-${decision}-restart`;
       failedApp = await launchApplication('default', null, profile);
+      browserProgress.checkpoint(activeJourney, 'launched');
       await failedApp.page.getByRole('heading', { name: 'Let’s set up this computer' }).waitFor();
       checks[check] = true;
+      browserProgress.checkpoint(activeJourney, 'verified');
     } finally {
       if (failedApp) await failedApp.close();
       await safeRemoveAcceptanceLeaf(profile, { kind: 'profile' });
@@ -1093,6 +1113,7 @@ const installedPairingLifecycle = async () => {
     desktop: { variants: ['narrow', 'zoom-200'], zoomMechanism: 'electron-web-frame', phoneViewport: false },
     browser: { viewport: { width: 880, height: 620 }, layoutZoom: [1, 2], keyboardControlsVisible: true } }) + '\n');
   await writeFile(join(outputDirectory, '../browser.json'), JSON.stringify(checks) + '\n', { mode: 0o600 });
+  browserProgress.checkpoint('installed-pairing', 'evidence-written');
 };
 
 const liveRegionSnapshot = () => [...document.querySelectorAll('[aria-live], [role="status"], [role="alert"]')].map(element => ({
@@ -1326,13 +1347,17 @@ const captureVariants = async (page, journey) => {
 const runJourney = async (journey, scenario, initialDeepLink, prepare) => {
   activeJourney = journey;
   const application = await launchApplication(scenario, initialDeepLink);
+  browserProgress.checkpoint(journey, 'launched');
   try {
     const afterCapture = await prepare(application.page, application);
+    browserProgress.checkpoint(journey, 'prepared');
     await captureVariants(application.page, journey);
+    browserProgress.checkpoint(journey, 'captured');
     if (typeof afterCapture === 'function') await afterCapture();
   } finally {
     await application.close();
   }
+  browserProgress.checkpoint(journey, 'completed');
 };
 
 const waitForObserved = async (predicate, description) => {
@@ -1818,6 +1843,7 @@ try {
   readyOrigin = await createFixture('ready', FIXED_ACCEPTANCE_ORIGINS.ready);
   revokedOrigin = await createFixture('revoked', FIXED_ACCEPTANCE_ORIGINS.revoked);
   incompatibleOrigin = await createFixture('incompatible', FIXED_ACCEPTANCE_ORIGINS.incompatible);
+  browserProgress.checkpoint('runner', 'fixtures-ready');
   await runJourney('first-run-chooser', 'default', null, async page => {
     await page.getByRole('heading', { name: 'Let’s set up this computer' }).waitFor();
     const expectedKeyboardOrder = [
@@ -1866,9 +1892,11 @@ try {
   ]) await runJourney(journey, scenario, null, page => prepareProductionSetup(page, journey));
   await runJourney('dashboard-profile-manager', 'default', null, async (page, application) => {
     await pair(page, readyOrigin, 'Operations');
+    browserProgress.checkpoint('dashboard-profile-manager', 'paired');
     const opener = page.getByRole('button', { name: /Connected: Operations/ });
     try {
       await opener.waitFor({ timeout: 15_000 });
+      browserProgress.checkpoint('dashboard-profile-manager', 'connected');
     } catch (error) {
       if (!(error instanceof Error) || error.name !== 'TimeoutError') throw error;
       await settlePendingRendererConsoleCaptures();
@@ -1892,7 +1920,9 @@ try {
         && journeyRequests.some(record => record.method === 'POST' && record.url === `/api/desktop/pairings/${PAIRING_ID}/poll`)
         && journeyRequests.some(record => record.method === 'POST' && record.url === `/api/desktop/pairings/${PAIRING_ID}/activate`);
     }, `the complete pairing flow for ${PAIRING_ID}`);
+    browserProgress.checkpoint('dashboard-profile-manager', 'pairing-observed');
     await waitForAuthenticatedSocket('dashboard-profile-manager');
+    browserProgress.checkpoint('dashboard-profile-manager', 'socket-authenticated');
     await application.context.tracing.start({ screenshots: true, snapshots: true, sources: false });
     await opener.focus();
     await opener.click();
@@ -1910,10 +1940,12 @@ try {
     modalFocusTrap = wrappedForward && wrappedBackward;
     await page.keyboard.press('Escape');
     modalFocusRestore = await opener.evaluate(element => element === document.activeElement);
+    browserProgress.checkpoint('dashboard-profile-manager', 'modal-focus-verified');
     await opener.click();
     await application.context.tracing.stop({ path: join(outputDirectory, 'sanitized-trace.zip') });
     await sanitizeAcceptanceTrace(join(outputDirectory, 'sanitized-trace.zip'), SENTINELS);
     traceWritten = true;
+    browserProgress.checkpoint('dashboard-profile-manager', 'trace-written');
   });
   await runJourney('offline', 'default', null, async page => {
     await observeLiveMutation(page, 'error', 'offline', () => fillEndpoint(page, FIXED_ACCEPTANCE_ORIGINS.offline, 'Offline Lab'));
@@ -1948,12 +1980,16 @@ try {
     await exercisePackagedCspReload({
       launch: userData => launchApplication('csp-reload', null, userData),
       pair, origin: readyOrigin,
-      observe: phase => { activeJourney = `csp-reload-${phase}`; },
+      observe: phase => {
+        activeJourney = `csp-reload-${phase}`;
+        browserProgress.checkpoint(activeJourney, 'entered');
+      },
       evidence: result => {
         cspReloadEvidence = result;
         surfaces.push({ kind: 'native-csp-reload', ...result });
       },
     });
+    browserProgress.checkpoint('csp-reload', 'completed');
     // Installed pairing must finish before error accounting and the final raw-surface scan.
     if (installedRpm) await installedPairingLifecycle();
   } finally {
@@ -1982,11 +2018,14 @@ try {
     // Fixed-label evidence reaches native CI before any scenario/gate throw.
     console.info('Packaged renderer error diagnostics:', JSON.stringify(diagnostics));
   }
+  browserProgress.checkpoint('final-evidence', 'log-written');
   if (rendererLifecycleInvalidStates.size > 0) {
     throw new Error(`Acceptance renderer lifecycle evidence was invalid: ${JSON.stringify(rendererLifecycleInvalidSummary())}`);
   }
+  browserProgress.checkpoint('final-evidence', 'lifecycle-verified');
   if (boundaryJourneys.size !== ACCEPTANCE_JOURNEYS.length
     || ACCEPTANCE_JOURNEYS.some(journey => !boundaryJourneys.has(journey))) throw new Error('Packaged main/preload/renderer boundary was not observed for every journey');
+  browserProgress.checkpoint('final-evidence', 'boundary-verified');
   const rendererErrors = rendererErrorAcceptanceSummary();
   if (rendererErrors.unexpectedErrors !== 0) {
     throw new Error(`Packaged acceptance observed unexpected renderer errors: ${JSON.stringify({
@@ -1994,6 +2033,7 @@ try {
       errorCategoryCounts: rendererErrors.errorCategoryCounts,
     })}`);
   }
+  browserProgress.checkpoint('final-evidence', 'renderer-errors-verified');
   const serious = axeFindings.filter(finding => finding.impact === 'serious').length;
   const critical = axeFindings.filter(finding => finding.impact === 'critical').length;
   const accessibility = {
@@ -2011,8 +2051,10 @@ try {
     liveAnnouncements: { status: liveAnnouncements.status, error: liveAnnouncements.error },
   };
   await writeFile(join(outputDirectory, 'accessibility.json'), `${JSON.stringify(accessibility, null, 2)}\n`, { mode: 0o600 });
+  browserProgress.checkpoint('final-evidence', 'accessibility-written');
 
   const services = observedServiceSummary();
+  browserProgress.checkpoint('final-evidence', 'services-validated');
   const sanitizedSummary = {
     schemaVersion: 7,
     generatedAt: FIXED_TIME,
@@ -2025,6 +2067,7 @@ try {
     redaction: 'Full raw surfaces were scanned; published logs retain only source, level, byte count, and digest.',
   };
   await writeFile(join(outputDirectory, 'sanitized-summary.json'), `${JSON.stringify(sanitizedSummary, null, 2)}\n`, { mode: 0o600 });
+  browserProgress.checkpoint('final-evidence', 'summary-written');
 
   const scanRoot = await mkdtemp(join(tmpdir(), ACCEPTANCE_SURFACES_PREFIX));
   try {
@@ -2045,9 +2088,16 @@ try {
   } finally {
     await safeRemoveAcceptanceLeaf(scanRoot, { kind: 'surfaces' });
   }
+  browserProgress.checkpoint('final-evidence', 'surfaces-scanned');
   await writeAcceptanceManifest(outputDirectory, screenshotMetadata);
+  browserProgress.checkpoint('final-evidence', 'manifest-written');
   await verifyAcceptanceArtifacts(outputDirectory, { sentinels: SENTINELS });
+  browserProgress.checkpoint('final-evidence', 'artifacts-verified');
   console.log(`Packaged desktop acceptance produced ${screenshotMetadata.length} deterministic screenshots with zero serious/critical findings.`);
+} catch (error) {
+  // Only a fixed category is printed; the original error still propagates unchanged.
+  browserProgress.failure(error);
+  throw error;
 } finally {
   activeJourney = 'fixture-cleanup';
   for (const fixture of fixtures) {
