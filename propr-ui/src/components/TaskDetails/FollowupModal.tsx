@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useId, useRef } from 'react';
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import type { PostFollowupResponse } from '../../api/proprApi';
-import { inertOutside } from '../../utils/modalBackground';
+import { inertOutside, WINDOW_CHROME_SELECTOR } from '../../utils/modalBackground';
 import { useVisualViewportFrame } from '../../hooks/useVisualViewportFrame';
 import type { FollowupTarget } from './types';
 import { describeFollowupTarget } from './taskKind';
@@ -61,6 +61,13 @@ function feedbackFor(error: unknown, body: string): Feedback {
   const message = error instanceof Error && error.message ? error.message : 'Failed to post comment';
   return { title: 'Follow-up outcome unknown', message: `${message} The comment may still have been posted.`, postedBody: body };
 }
+
+const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])';
+
+/** The dialog's controls Tab can reach now, enabled and not hidden, in document order. */
+const tabbableIn = (dialog: HTMLElement) => Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE))
+  .filter(element => !element.closest('[hidden], [inert]') && (typeof element.checkVisibility !== 'function' || element.checkVisibility()))
+  .sort((a, b) => a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
 
 const sameBody = (a: string, b: string) => a.trim() === b.trim();
 
@@ -128,6 +135,7 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
   const feedbackRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const layerRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const titleId = useId();
   const descriptionId = useId();
   const feedbackTitleId = useId();
@@ -144,19 +152,50 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
     }
   }, [isOpen, initialContent]);
 
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  const submittingStateRef = useRef(submitting);
+  submittingStateRef.current = submitting;
+
+  // While open, the task workspace behind the dialog is inert (desktop window
+  // controls stay usable) and Tab cycles through the dialog's controls. The
+  // opener is read before the Comment field takes focus, and gets it back on
+  // close unless focus has meanwhile moved somewhere else that still exists.
   useEffect(() => {
-    if (!isOpen) return;
+    const dialog = dialogRef.current;
+    if (!isOpen || !dialog) return;
+    const active = document.activeElement;
+    const opener = active instanceof HTMLElement && active !== document.body && !dialog.contains(active) ? active : null;
+    const restoreBackground = inertOutside(dialog);
+    textareaRef.current?.focus();
+
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !submitting) onClose();
+      if (event.key === 'Escape') {
+        if (!submittingStateRef.current) closeRef.current();
+        return;
+      }
+      if (event.key !== 'Tab' || event.defaultPrevented) return;
+      const current = document.activeElement;
+      if (current instanceof Element && current.closest(WINDOW_CHROME_SELECTOR)) return;
+      // Moved by hand, so a focused result or a control just disabled by a
+      // submission still steps to its neighbour inside the dialog.
+      event.preventDefault();
+      const tabbable = tabbableIn(dialog);
+      if (!tabbable.length) { dialog.focus(); return; }
+      const from = current && dialog.contains(current) ? current : null;
+      const next = event.shiftKey
+        ? (from && tabbable.filter(element => from.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_PRECEDING).pop()) || tabbable[tabbable.length - 1]
+        : (from && tabbable.find(element => from.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING)) || tabbable[0];
+      next.focus();
     };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose, submitting]);
-
-  // The task workspace behind the dialog is inert; desktop window controls stay usable.
-  useEffect(() => {
-    if (!isOpen || !dialogRef.current) return;
-    return inertOutside(dialogRef.current);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      restoreBackground();
+      const focused = document.activeElement;
+      const focusLeftWithDialog = !focused || focused === document.body || !focused.isConnected || dialog.contains(focused);
+      if (opener?.isConnected && focusLeftWithDialog) opener.focus();
+    };
   }, [isOpen]);
 
   // A new result takes focus, so it is both seen and announced wherever the user was.
@@ -210,8 +249,9 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={descriptionId}
+        tabIndex={-1}
         data-testid="followup-dialog"
-        className="bg-white rounded-lg max-w-4xl w-full h-full max-h-[48rem] flex flex-col border border-gray-300 shadow-lg overflow-hidden [@media(max-height:26rem)]:overflow-y-auto"
+        className="bg-white rounded-lg max-w-4xl w-full h-full max-h-[48rem] flex flex-col border border-gray-300 shadow-lg outline-none overflow-hidden [@media(max-height:26rem)]:overflow-y-auto"
       >
         <div className="flex flex-none justify-between items-start gap-2 p-3 sm:p-4 border-b border-gray-200">
           <div className="min-w-0">
@@ -241,6 +281,7 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
             Comment
           </label>
           <textarea
+            ref={textareaRef}
             id={textareaId}
             value={content}
             onChange={(e) => setContent(e.target.value)}
@@ -249,7 +290,6 @@ const FollowupModal: React.FC<FollowupModalProps> = ({
             placeholder="Enter your follow-up request..."
             disabled={submitting}
             aria-describedby={feedback ? feedbackTitleId : undefined}
-            autoFocus
           />
         </div>
 
