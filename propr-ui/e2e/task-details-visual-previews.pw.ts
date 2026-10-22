@@ -58,7 +58,7 @@ async function capture(page: Page, name: string) {
 const noHorizontalOverflow = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
 
 for (const width of [320, 390, 1024, 1440, 2560]) {
-  test(`frames one capture at a time in a fixed-height canvas at ${width}px`, async ({ page }) => {
+  test(`stacks the context strip over a full-width imaging stage at ${width}px`, async ({ page }) => {
     await fixture(page);
     await page.setViewportSize({ width, height: 900 });
     await page.goto(`/tasks/${taskId}`);
@@ -66,28 +66,45 @@ for (const width of [320, 390, 1024, 1440, 2560]) {
     await expect(section.getByRole('heading', { name: 'Visual evidence (3 captures)' })).toBeVisible();
     const image = section.getByAltText('Task queue at desktop width');
     await expect(image).toBeVisible();
-    const canvas = section.getByTestId('visual-evidence-canvas');
-    const canvasBox = (await canvas.boundingBox())!;
-    if (width >= 640) {
-      // Side by side: the framed capture takes three fifths, its description the rest, 224px tall.
-      expect(Math.abs(canvasBox.height - 224)).toBeLessThanOrEqual(1);
-      const imageBox = (await image.boundingBox())!;
-      expect(imageBox.width / canvasBox.width).toBeGreaterThan(0.55);
-      expect(imageBox.width / canvasBox.width).toBeLessThan(0.62);
-    } else {
-      expect(canvasBox.height).toBeLessThanOrEqual(420);
-    }
+    await expect.poll(() => image.evaluate(node => (node as HTMLImageElement).complete && (node as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+    const stage = section.getByTestId('visual-evidence-canvas');
+    const stageBox = (await stage.boundingBox())!;
+    const sectionContentWidth = await section.evaluate(node => {
+      const style = getComputedStyle(node);
+      return node.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    });
+    // The stage spans the section and sits below the context strip, not beside it.
+    expect(Math.abs(stageBox.width - sectionContentWidth)).toBeLessThanOrEqual(2);
+    const contextBox = (await section.getByTestId('visual-evidence-context').boundingBox())!;
+    expect(contextBox.y + contextBox.height).toBeLessThanOrEqual(stageBox.y + 1);
+    expect(Math.abs(stageBox.height - (width >= 640 ? 440 : 320))).toBeLessThanOrEqual(2);
+    // Fit shows the whole capture: nothing is clipped by the stage.
+    const imageBox = (await image.boundingBox())!;
+    expect(imageBox.x).toBeGreaterThanOrEqual(stageBox.x);
+    expect(imageBox.y).toBeGreaterThanOrEqual(stageBox.y);
+    expect(imageBox.x + imageBox.width).toBeLessThanOrEqual(stageBox.x + stageBox.width + 0.5);
+    expect(imageBox.y + imageBox.height).toBeLessThanOrEqual(stageBox.y + stageBox.height + 0.5);
+    await expect(section.getByTestId('visual-evidence-dimensions')).toHaveText(`1440×900`);
     await expect(section.getByText('Private PR evidence served through the authenticated application media path.')).toBeVisible();
     await expect(section.locator('img, video')).toHaveCount(1);
+    if (width === 390 || width === 1440) await capture(page, `task-visual-previews-${width}`);
+
+    // 100% renders the capture's own pixels and scrolls inside the stage.
+    await section.getByRole('button', { name: '100%' }).click();
+    await expect(stage).toHaveAttribute('data-zoom', 'actual');
+    expect(Math.round((await image.boundingBox())!.width)).toBe(1440 + 2);
+    expect(await stage.evaluate(node => node.scrollWidth > node.clientWidth || node.scrollHeight > node.clientHeight)).toBe(true);
+    expect(Math.abs((await stage.boundingBox())!.height - stageBox.height)).toBeLessThanOrEqual(1);
+    if (width === 1440) await capture(page, `task-visual-previews-actual-size-${width}`);
+    await section.getByRole('button', { name: 'Fit' }).click();
 
     const switcher = section.getByRole('group', { name: 'Captures' });
-    await switcher.getByRole('button', { name: 'Capture 2' }).click();
+    await switcher.getByRole('button', { name: 'Checkout walkthrough' }).click();
     await expect(section.locator('video[controls]')).toHaveCount(1);
-    expect(Math.abs((await canvas.boundingBox())!.height - canvasBox.height)).toBeLessThanOrEqual(1);
+    expect(Math.abs((await stage.boundingBox())!.height - stageBox.height)).toBeLessThanOrEqual(1);
     await switcher.getByRole('button', { name: 'Desktop' }).click();
     await expect(image).toBeVisible();
     expect(await noHorizontalOverflow(page)).toBe(true);
-    if (width === 390 || width === 1440) await capture(page, `task-visual-previews-${width}`);
   });
 }
 
