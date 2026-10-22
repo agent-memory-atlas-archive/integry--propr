@@ -1,4 +1,4 @@
-import type { Job } from 'bullmq';
+import { DelayedError, type Job } from 'bullmq';
 import type { Logger } from 'pino';
 import type { Redis } from 'ioredis';
 import { createHooklessGit } from '@propr/core';
@@ -9,7 +9,7 @@ import {
     HANDOFF_ACTIVE, SETTLEMENT_RETRY_SCHEDULED, SETTLEMENT_RETRY_SCHEDULING, type FollowupHandoffRecord,
 } from './followupHandoffStore.js';
 import { adoptPredecessorFollowupHandoff, settleFollowupHandoffAfterFailure } from './followupHandoffRecovery.js';
-import { schedulePRCommentRecovery } from './prCommentCollisionRecovery.js';
+import { delayPRCommentJobInPlace, predecessorWaitDelay, schedulePRCommentRecovery } from './prCommentCollisionRecovery.js';
 import { releasePRProcessingLock, startPRProcessingLockHeartbeat } from './prProcessingLock.js';
 import type { ProcessingState } from './prPublicationRecovery.js';
 import type { PullRequestPublication } from './prPublication.js';
@@ -334,8 +334,9 @@ function predecessorBlockReason(adoption: Awaited<ReturnType<typeof adoptPredece
  * Runs under the caller's PR processing lease, before any new worktree is
  * prepared: a recoverable predecessor is adopted and finished in-line — with
  * the lease kept renewed for the duration — while a still-live, unverifiable,
- * or operator-held predecessor reschedules this writer instead of letting it
- * race the retained worktree. A released cancelled predecessor's claims are
+ * or operator-held predecessor delays this writer in place (with backoff)
+ * instead of letting it race the retained worktree; only a job no worker holds
+ * falls back to a replacement job. A released cancelled predecessor's claims are
  * dropped from the captured comments; a job left with none is skipped.
  */
 export async function gatePredecessorHandoff(params: PredecessorHandoffGateParams): Promise<JobResult | undefined> {
@@ -378,6 +379,17 @@ export async function gatePredecessorHandoff(params: PredecessorHandoffGateParam
         const skipped = dropReleasedCancelledClaims(params, cancelledClaimIds);
         if (skipped) await releasePRProcessingLock(redisClient, params.lockKey, params.lockToken);
         return skipped;
+    }
+    // Wait in place as the same job and task, backing off: an operator hold
+    // can stand for days, and a fresh replacement every minute left thousands
+    // of cancelled tasks behind a single unanswered follow-up.
+    const waited = await delayPRCommentJobInPlace({ job, taskId, redisClient, pickedUpComments: params.pickedUpComments, correlatedLogger }, {
+        attemptsField: 'predecessorWaitAttempts', delayFor: predecessorWaitDelay, reason: blocked,
+        message: 'A predecessor follow-up handoff blocks this PR; waiting in place',
+    });
+    if (waited) {
+        await releasePRProcessingLock(redisClient, params.lockKey, params.lockToken);
+        throw new DelayedError();
     }
     const replacementTaskId = await schedulePRCommentRecovery({
         job, taskId, stateManager, redisClient, pickedUpComments: params.pickedUpComments,

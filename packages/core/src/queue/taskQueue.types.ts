@@ -117,6 +117,8 @@ export interface CommentJobData extends RepositoryWorkflowDeferralData {
     prProcessingLockToken?: string;
     /** Times this job has waited in place for another job's PR processing lock; drives the backoff. */
     prLockWaitAttempts?: number;
+    /** Times this job has waited in place behind a blocked predecessor follow-up handoff; drives the backoff. */
+    predecessorWaitAttempts?: number;
     /** Legacy original task whose live container a recovery job must wait for. */
     containerCollisionTaskId?: string;
     /** Every preceding task whose live container a recovery job must wait for. */

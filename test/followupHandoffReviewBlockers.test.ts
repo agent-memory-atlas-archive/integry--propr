@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, mock, test } from 'node:test';
 import knex from 'knex';
+import { DelayedError } from 'bullmq';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises';
@@ -490,6 +491,31 @@ test('F10: an unrecordable handoff refuses the agent launch', async () => {
     );
     const survivor = await loadFollowupHandoff({ database }, KEY);
     assert.equal(survivor?.task_id, 'task-1', 'the unresolved row is preserved');
+});
+
+test('an operator-held predecessor delays the follow-up in place with backoff instead of queueing a replacement per minute', async () => {
+    const h = await createHarness();
+    const predecessor = await seedHandoff(h, { taskId: 'task-1' });
+    await advanceFollowupHandoff({ database }, predecessor, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' });
+    const job = {
+        id: 'task-2', name: 'processPullRequestComment', token: 'worker-token',
+        data: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, prProcessingLockToken: 'task-2-token' } as Record<string, unknown>,
+        updateData: mock.fn(async (next: Record<string, unknown>) => { job.data = next; }),
+        moveToDelayed: mock.fn(async (_timestamp: number, _token: string) => {}),
+    };
+    const delays: number[] = [];
+    for (let pass = 0; pass < 2; pass += 1) {
+        const before = Date.now();
+        await assert.rejects(gatePredecessorHandoff({ ...gateParams(h, 'task-2'), job: job as never }),
+            (error: unknown) => error instanceof DelayedError);
+        assert.equal(h.redis.store.has(LOCK), false, 'the waiting follow-up released its lease');
+        delays.push(job.moveToDelayed.mock.calls[pass].arguments[0] - before);
+    }
+    assert.equal(queuedRecoveryJobs.length, 0, 'no replacement job, so no new task per retry');
+    assert.equal(job.data.predecessorWaitAttempts, 2);
+    assert.ok(delays[0] >= 60_000 && delays[0] < 61_000, `first wait is about a minute (${delays[0]})`);
+    assert.ok(delays[1] >= 120_000 && delays[1] < 121_000, `second wait backs off (${delays[1]})`);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR, 'the hold is untouched');
 });
 
 // --- F11: committed recovery verifies attachment and the exact recorded HEAD.

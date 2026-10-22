@@ -55,6 +55,7 @@ export async function schedulePRCommentUsageLimitRetry(
     const retryJobData = { ...job.data };
     delete retryJobData.prProcessingLockToken;
     delete retryJobData.prLockWaitAttempts;
+    delete retryJobData.predecessorWaitAttempts;
     // The retry runs under a new task ID; it continues this attempt's spend cap budget.
     const costBudgetTaskIds = [...new Set([...(job.data.costBudgetTaskIds ?? []), ...(job.id !== undefined ? [String(job.id)] : [])])];
     const retryData: CommentJobData = { ...retryJobData, comments, ...(costBudgetTaskIds.length ? { costBudgetTaskIds } : {}) };

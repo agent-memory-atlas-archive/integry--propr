@@ -30,6 +30,7 @@ const {
     isContainerCollisionCancellation,
     evaluatePRCommentPreExecutionRecovery,
     handlePRCommentLockContention,
+    predecessorWaitDelay,
     prLockWaitDelay,
     schedulePRCommentRecovery,
 } = await import('../src/jobs/prCommentCollisionRecovery.js');
@@ -304,6 +305,10 @@ describe('PR comment lock contention', () => {
         assert.deepStrictEqual([0, 1, 2, 3, 4, 5, 20].map(prLockWaitDelay), [10_000, 20_000, 40_000, 80_000, 120_000, 120_000, 120_000]);
     });
 
+    test('a blocked predecessor backs off from 1 minute to a 15 minute ceiling', () => {
+        assert.deepStrictEqual([0, 1, 2, 3, 4, 40].map(predecessorWaitDelay), [60_000, 120_000, 240_000, 480_000, 900_000, 900_000]);
+    });
+
     test('waits in place as the same job instead of leaving a cancelled task per retry', async () => {
         queueAdd.mock.resetCalls();
         const restored: string[] = [];
@@ -346,7 +351,7 @@ describe('PR comment lock contention', () => {
     test('a replacement job starts its own backoff from the beginning', async () => {
         queueAdd.mock.resetCalls();
         await schedulePRCommentRecovery({
-            job: { name: 'processPullRequestComment', data: { pullRequestNumber: 42, repoOwner: 'acme', repoName: 'web', prLockWaitAttempts: 6, prProcessingLockToken: 'old' } } as never,
+            job: { name: 'processPullRequestComment', data: { pullRequestNumber: 42, repoOwner: 'acme', repoName: 'web', prLockWaitAttempts: 6, predecessorWaitAttempts: 4, prProcessingLockToken: 'old' } } as never,
             taskId: 'task-1',
             stateManager: { createTaskStateIfAbsent: async () => null, getTaskState: async () => null, updateHistoryMetadata: async () => {} } as never,
             redisClient: restoringRedis([]) as never,
@@ -357,6 +362,7 @@ describe('PR comment lock contention', () => {
         });
         const [, data] = queueAdd.mock.calls[0].arguments as unknown as [string, Record<string, unknown>];
         assert.equal(data.prLockWaitAttempts, undefined);
+        assert.equal(data.predecessorWaitAttempts, undefined);
         assert.equal(data.prProcessingLockToken, undefined);
     });
 });
