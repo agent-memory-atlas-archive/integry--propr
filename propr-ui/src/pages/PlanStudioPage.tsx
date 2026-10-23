@@ -1,8 +1,9 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { useParams, Link, useLocation, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { replaceUiPathInPlace } from '../config/runtimeMode';
+import { useHistoryEntryOwnership } from '../hooks/useHistoryEntryOwnership';
 import { useDraft } from '../hooks/useDraft';
 import { useGenerationPolling } from '../hooks/useGenerationPolling';
 import SetupWizard from '../components/TaskPlanner/SetupWizard';
@@ -197,7 +198,7 @@ const ReviewView: React.FC<{
   </StudioShell>
 );
 
-const DraftView: React.FC<{ currentStage: StudioStage; draft: PlannerDraft; onRefetch: () => void; onGenerationStarted: (runId: string) => void; onDraftMetadataPersisted?: (update: PromptPersistedUpdate) => void }> = ({ currentStage, draft, onRefetch, onGenerationStarted, onDraftMetadataPersisted }) => (
+const DraftView: React.FC<{ currentStage: StudioStage; draft: PlannerDraft; onRefetch: () => void; onGenerationStarted: (runId: string, draftId: string, snapshot?: PlannerDraft) => void; onDraftMetadataPersisted?: (update: PromptPersistedUpdate) => void }> = ({ currentStage, draft, onRefetch, onGenerationStarted, onDraftMetadataPersisted }) => (
   <StudioShell currentStage={currentStage}>
     <SetupWizard
       draft={draft}
@@ -240,7 +241,7 @@ const NewDraftView: React.FC<{
   draft?: PlannerDraft;
   onDraftCreated?: (draft: PlannerDraft) => void;
   onRefetch?: () => void;
-  onGenerationStarted?: (runId: string) => void;
+  onGenerationStarted?: (runId: string, draftId: string, snapshot?: PlannerDraft) => void;
   onDraftMetadataPersisted?: (update: PromptPersistedUpdate) => void;
 }> = ({ draft, onDraftCreated, onRefetch, onGenerationStarted, onDraftMetadataPersisted, singleTask }) => (
   <StudioShell
@@ -261,7 +262,7 @@ interface DraftViewOptions extends IntentAwareViewProps {
   draft: PlannerDraft;
   currentStage: StudioStage;
   refetch: () => void;
-  onGenerationStarted: (runId: string) => void;
+  onGenerationStarted: (runId: string, draftId: string, snapshot?: PlannerDraft) => void;
   onDraftMetadataPersisted: (update: PromptPersistedUpdate) => void;
 }
 
@@ -394,11 +395,17 @@ const PlanStudioPage: React.FC<PlanStudioPageProps> = ({ isNew = false }) => {
 
   // Handle draft created in-place (auto-save in new mode)
   // This updates the URL without navigation, preserving focus and avoiding flicker
+  // A creation that resolves after the user left must not rewrite the entry they are on now.
+  const claimHistoryEntry = useHistoryEntryOwnership();
+  // Re-claimed per router entry: NewDraftView remounts on location.key, starting a new creation.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const isStillOnEntry = useMemo(() => claimHistoryEntry(), [claimHistoryEntry, location.key]);
   const handleDraftCreatedInPlace = useCallback((draft: PlannerDraft) => {
+    if (!isStillOnEntry()) return;
     setInPlaceDraft(draft);
     // Update URL without triggering navigation - this keeps the component mounted
     replaceUiPathInPlace(`/studio/${draft.draft_id}`);
-  }, []);
+  }, [isStillOnEntry]);
 
   // Determine the effective draft ID for useDraft
   // When in new mode with an in-place draft, use that draft's ID
