@@ -49,10 +49,11 @@ async function continuedGoal(id: string, overrides: Record<string, unknown> = {}
   return { job, goal: await db('goals').where({ goal_id: id }).first() as GoalRow };
 }
 
-function operations(pull: GoalPullRequestState | null, rebuild?: () => Promise<string>) {
+function operations(pull: GoalPullRequestState | null, rebuild?: () => Promise<string | null>) {
   const calls: string[] = [];
   const ops: GoalContinuationOperations = {
     readPullRequest: async (_repository, number) => { calls.push(`read:${number}`); return pull; },
+    cleanupWorktree: async goal => { calls.push(`cleanup:${goal.branch_name}`); },
     convertToDraft: async nodeId => { calls.push(`draft:${nodeId}`); },
     rebuildWorktree: async goal => {
       calls.push(`rebuild:${goal.branch_name}`);
@@ -122,7 +123,7 @@ test('an expired worktree is rebuilt from the remote branch', async () => {
 test('a deleted remote branch continues on a fresh branch', async () => {
   const missing = path.join(os.tmpdir(), `goal-continuation-gone-${Date.now()}`);
   const { job, goal } = await continuedGoal('goal-branch-gone', { worktree_path: missing });
-  const { ops } = operations(openDraft, async () => { throw new Error("couldn't find remote ref goal/ship-it"); });
+  const { ops } = operations(openDraft, async () => null);
   const prepared = await prepareContinuedGoal(job, goal, ops);
   assert.equal(prepared.branch_name, null);
   assert.equal(prepared.worktree_path, null);
@@ -148,3 +149,41 @@ test('the continued attempt tells the provider to re-arm, then clears the flag o
   const stored = await db('goals').where({ goal_id: goal.goal_id }).first();
   assert.equal(Boolean(stored.continue_requested), false);
 });
+
+for (const message of ['fetch failed: connection reset', 'EACCES: worktree setup failed']) {
+  test(`restoration failure preserves branch and PR: ${message}`, async () => {
+    const { job, goal } = await continuedGoal(`goal-error-${message.slice(0, 6)}`, { worktree_path: '/missing/goal-worktree' });
+    const { ops } = operations(openDraft, async () => { throw new Error(message); });
+    await assert.rejects(prepareContinuedGoal(job, goal, ops), { message });
+    const stored = await db('goals').where({ goal_id: goal.goal_id }).first();
+    for (const key of ['branch_name', 'worktree_path', 'final_pr_number', 'final_pr_url']) {
+      assert.equal(stored[key], goal[key as keyof GoalRow]);
+    }
+  });
+}
+
+test('fresh repair cleans the old checkout before clearing its identity', async () => {
+  const { job, goal } = await continuedGoal('goal-cleanup');
+  const { ops } = operations({ ...openDraft, merged: true });
+  ops.cleanupWorktree = async original => {
+    assert.equal(original.worktree_path, goal.worktree_path);
+    assert.equal((await db('goals').where({ goal_id: goal.goal_id }).first()).worktree_path, goal.worktree_path);
+    throw new Error('cleanup failed');
+  };
+  await assert.rejects(prepareContinuedGoal(job, goal, ops), /cleanup failed/);
+  assert.equal((await db('goals').where({ goal_id: goal.goal_id }).first()).branch_name, goal.branch_name);
+});
+
+for (const merged of [false, true]) {
+  test(`superseded preparation cannot ${merged ? 'clean a merged checkout' : 'restore an expired checkout'}`, async () => {
+    const { job, goal } = await continuedGoal(`goal-superseded-${merged}`, merged ? {} : { worktree_path: '/missing/checkout' });
+    const { ops, calls } = operations({ ...openDraft, merged });
+    ops.readPullRequest = async () => {
+      await db('goals').where({ goal_id: goal.goal_id }).update({ run_claim: 'replacement-claim' });
+      return { ...openDraft, merged };
+    };
+    await assert.rejects(prepareContinuedGoal(job, goal, ops), /lost its attempt claim/);
+    assert.deepEqual(calls, []);
+    assert.equal((await db('goals').where({ goal_id: goal.goal_id }).first()).branch_name, goal.branch_name);
+  });
+}

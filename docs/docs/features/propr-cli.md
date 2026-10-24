@@ -311,7 +311,7 @@ If the outcome still cannot be confirmed, the command exits 1 with `outcome_unce
 
 ### JSON output
 
-Every goal command accepts `--json` and prints a versioned document: `{ "version": 1, "kind": ... }` with kinds `goal-capabilities`, `goal-create`, `goal-list`, `goal-detail`, `goal-input`, `goal-inputs`, `goal-control` and `goal-wait`. Goal, task, session and input identifiers are preserved. Lists return `offset`, `limit` and `nextOffset` (`null` on the last page).
+Every goal command accepts `--json` and prints a versioned document: `{ "version": 1, "kind": ... }` with kinds `goal-capabilities`, `goal-create`, `goal-list`, `goal-detail`, `goal-input`, `goal-inputs`, `goal-continue`, `goal-control` and `goal-wait`. Goal, task, session and input identifiers are preserved. Lists return `offset`, `limit` and `nextOffset` (`null` on the last page).
 
 ### Waiting for a goal
 

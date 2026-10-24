@@ -178,7 +178,8 @@ async function steerInitialGoalInput(
     const deliveredTurnId = await steerRunningTurn(connection, {
         threadId,
         turnId,
-        text: options.initialGoalFeedback ?? options.initialControlInputMessage ?? options.prompt,
+        text: [options.initialGoalFeedback, options.initialControlInputId
+            ? options.initialControlInputMessage ?? options.prompt : undefined].filter(Boolean).join('\n\n'),
         ...(options.initialControlInputId ? { clientUserMessageId: options.initialControlInputId } : {}),
     });
     if (!deliveredTurnId) return false;
@@ -226,19 +227,19 @@ async function observeNativeGoal(
     const control = options.goalControl!;
     const objective = nativeGoalObjective(options);
     let turnId = initialTurnId;
-    let initialInputPending = true;
+    const initialInput = { pending: true };
     // Checkpoint feedback that found no running turn yet; it goes to the next one.
     let pendingFeedback: string | undefined;
     while (true) {
         connection.discardStartedTurn(turnId);
         await control.setActiveTurn(turnId);
-        if (initialInputPending) {
-            initialInputPending = !await steerInitialGoalInput(connection, threadId, turnId, options);
+        if (initialInput.pending) {
+            initialInput.pending = !await steerInitialGoalInput(connection, threadId, turnId, options);
         }
         if (pendingFeedback && await steerRunningTurn(connection, { threadId, turnId, text: pendingFeedback })) {
             pendingFeedback = undefined;
         }
-        const completion = await observeActiveTurnWithThread(connection, threadId, turnId, options);
+        const completion = await observeActiveTurnWithThread(connection, threadId, turnId, options, initialInput);
         await control.setActiveTurn(null);
         if (completion.status !== 'completed') return completion;
         const { boundary, completedDuringCheckpoint, checkpointFeedback } = await processCheckpointBoundary(
@@ -359,6 +360,7 @@ async function observeActiveTurnWithThread(
     threadId: string,
     turnId: string,
     options: AgentTaskOptions,
+    initialInput: { pending: boolean } = { pending: false },
 ): Promise<TurnCompletion> {
     const control = options.goalControl!;
     const objective = nativeGoalObjective(options);
@@ -386,6 +388,11 @@ async function observeActiveTurnWithThread(
             // The turn can end while earlier inputs were delivered; its
             // questions are gone, so leave the rest for the next turn.
             if (completed) break;
+            if (initialInput.pending && input.id === options.initialControlInputId) {
+                initialInput.pending = !await steerInitialGoalInput(connection, threadId, turnId, options);
+                if (initialInput.pending) break;
+                continue;
+            }
             if (await providerRequests.answer(input, turnId)) continue;
             const deliveredTurnId = await steerRunningTurn(connection, {
                 threadId, turnId, text: input.message, clientUserMessageId: input.id,

@@ -612,3 +612,45 @@ describe('steering a native goal whose App Server already moved to a newer turn'
     child.stdout.end();
   });
 });
+
+for (const pollingRetry of [false, true]) {
+  test(`initial continuation and checkpoint feedback are delivered together once (${pollingRetry ? 'polling retry' : 'first steer'})`, async () => {
+    const state = controls();
+    const connection = new FakeConnection(false, 'before', false, 'active', pollingRetry);
+    let pending = [{ id: 'input-1', message: 'Continue with the tests', sequence: 1 }];
+    state.control.load = async () => ({ desiredState: 'running', requestedModel: 'gpt-5.6', pendingInputs: pending, controlGeneration: 0 });
+    state.control.markInputDelivered = async id => { state.delivered.push(id); pending = []; };
+    let turns = 0;
+    const originalWait = connection.waitForTurn.bind(connection);
+    connection.waitForTurn = () => {
+      turns += 1;
+      if (turns === 1) return originalWait();
+      return Promise.resolve({ params: { turn: { status: 'completed' } } });
+    };
+    const originalRequest = connection.request.bind(connection);
+    connection.request = async (method, params, timeout) => {
+      if (pollingRetry && method === 'thread/goal/get') {
+        return { goal: { status: turns >= 2 ? 'complete' : 'active', objective: '/goal Ship it' } };
+      }
+      return originalRequest(method, params, timeout);
+    };
+    if (pollingRetry) connection.steerRejections.push('Codex no active turn to steer (-32600)');
+    const run = runGoalProtocol(connection as never, {
+      ...options(state.control, false, true),
+      initialControlInputMessage: 'Continue with the tests',
+      initialGoalFeedback: 'Checkpoint abc123 was published.',
+    }, 'gpt-5.6');
+    if (pollingRetry) {
+      await waitFor(() => state.delivered.length === 1, 'polling delivery of initial input');
+      connection.started.push('turn-second');
+      connection.finishTurn();
+    }
+    await run;
+    assert.deepEqual(state.delivered, ['input-1']);
+    const steers = connection.requests.filter(request => request.method === 'turn/steer');
+    assert.equal(steers.length, pollingRetry ? 2 : 1);
+    const sent = JSON.stringify(steers.at(-1)?.params.input);
+    assert.match(sent, /Checkpoint abc123 was published/);
+    assert.match(sent, /Continue with the tests/);
+  });
+}

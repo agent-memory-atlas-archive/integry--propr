@@ -737,3 +737,36 @@ test("goal wait exits as timed out at its deadline when the server never answers
   assert.equal(output.cursor, null, "no request completed and no cursor was supplied");
   assert.equal(output.exitCode, 2);
 });
+
+for (const message of [[], ['Fix', 'the', 'tests']]) {
+  test(`goal continue accepts ${message.length ? 'instructions' : 'a bare goal ID'} and emits versioned JSON`, async () => {
+    const result = await run(['continue', 'goal-1', ...message, '--idempotency-key', 'continue-key-001', '--json'], () => ({ body: { goal: goalFixture() } }));
+    assert.equal(result.exitCode, undefined);
+    assert.equal(result.requests.length, 1);
+    assert.equal(result.requests[0].method, 'POST');
+    assert.equal(result.requests[0].url.pathname, '/api/goals/goal-1/continue');
+    assert.equal(result.requests[0].headers['Idempotency-Key'], 'continue-key-001');
+    assert.deepEqual(result.requests[0].body, message.length ? { message: 'Fix the tests' } : {});
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.version, 1);
+    assert.equal(output.kind, 'goal-continue');
+    assert.equal(output.accepted, true);
+  });
+}
+
+test('goal continue reads instructions from a file or stdin', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'goal-continue-'));
+  try {
+    const file = path.join(dir, 'instructions.txt');
+    await writeFile(file, '  Continue the implementation.  ');
+    for (const source of [['--file', file], ['--stdin']]) {
+      useStdin('Continue the implementation.');
+      const result = await run(['continue', 'goal-1', ...source], () => ({ body: { goal: goalFixture() } }));
+      assert.equal(result.exitCode, undefined);
+      assert.deepEqual(result.requests[0].body, { message: 'Continue the implementation.' });
+      assert.match(result.stdout, /Continue accepted/);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

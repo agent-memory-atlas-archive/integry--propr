@@ -1309,12 +1309,14 @@ describe('GoalsPage', () => {
     await waitFor(() => expect(goalsApi.continueGoal).toHaveBeenCalledWith('goal-1', {}));
   });
 
-  it('offers no continuation in read-only demo mode', async () => {
+  it.each(['failed', 'completed', 'cancelled'] as const)('offers read-only wording for a %s goal in demo mode', async resultState => {
     demoState.isDemoMode = true;
     try {
-      vi.mocked(goalsApi.getGoal).mockResolvedValue({ goal: { ...goal, resultState: 'failed' as const } });
+      vi.mocked(goalsApi.getGoal).mockResolvedValue({ goal: { ...goal, resultState } });
       render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
       await screen.findByRole('heading', { name: goal.title });
+      expect(screen.getByText('Demo mode is read-only. Corrections disabled.')).toBeInTheDocument();
+      expect(screen.queryByText(/Continue it to/)).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Continue goal' })).not.toBeInTheDocument();
       expect(screen.queryByLabelText('Instructions for the continued goal')).not.toBeInTheDocument();
     } finally {

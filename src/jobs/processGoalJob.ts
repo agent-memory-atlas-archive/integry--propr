@@ -68,7 +68,7 @@ function goalNotificationSummary(result: AgentExecutionResult): string | undefin
     return result.summary;
 }
 
-async function ensureGoalWorktree(
+export async function ensureGoalWorktree(
     goal: GoalRow,
     job: GoalJobData,
     token: string,

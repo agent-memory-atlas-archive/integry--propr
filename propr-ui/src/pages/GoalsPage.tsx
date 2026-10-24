@@ -930,7 +930,7 @@ function GoalDetails({ goalId }: { goalId: string }) {
   // The locked-console state is a header note, not a sticky footer bar: it needs no screen real estate of its own.
   const correctionsNote = canMutate
     ? null
-    : isDemoMode && mutable
+    : isDemoMode
       ? 'Demo mode is read-only. Corrections disabled.'
       : goal.resultState === 'completed'
         ? 'Goal completed. Continue it to add more work.'

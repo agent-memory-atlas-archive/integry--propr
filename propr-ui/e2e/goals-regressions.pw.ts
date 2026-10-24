@@ -391,3 +391,20 @@ for (const timezoneId of ['UTC', 'Europe/London']) {
     }
   });
 }
+
+test('terminal goals in demo mode show a read-only note without promising continuation', async ({ page }) => {
+  await page.route('**/api/auth/demo-mode', route => route.fulfill({ json: { demoMode: true } }));
+  await page.route('**/api/goals/goal-1', route => route.fulfill({ json: { goal: {
+    ...goal, resultState: 'failed', failureReason: 'Provider connection interrupted.',
+    taskState: 'failed', completedAt: timestamp,
+  } } }));
+  await page.setViewportSize({ width: 1280, height: 850 });
+  await page.goto('/goals/goal-1');
+  await expect(page.getByText('Demo mode is read-only. Corrections disabled.')).toBeVisible();
+  await expect(page.getByText(/Continue it to/)).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Continue goal' })).toHaveCount(0);
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    await mkdir('../.propr/previews', { recursive: true });
+    await page.screenshot({ path: '../.propr/previews/goal-demo-read-only.png', animations: 'disabled' });
+  }
+});
