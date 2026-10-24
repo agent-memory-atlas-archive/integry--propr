@@ -54,6 +54,8 @@ import { findPRContinuation, type Contribution } from './prContinuation.js';
 import { suspendObsoleteValidationForImplementation } from './followupCiSuspension.js';
 import { stoppedReviewRecap } from './notificationRecap.js';
 import { resumeAutomaticPRCommentRetry } from './prCommentAutomaticRetry.js';
+import { readPullRequestClosure } from './closedPullRequestHandoffs.js';
+import type { HandoffOctokit } from './followupHandoffResumeTypes.js';
 
 const redisClient = new Redis({
     host: process.env.REDIS_HOST || '127.0.0.1',
@@ -414,8 +416,15 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
     const predecessorGate = await gatePredecessorHandoff({
         job, ref: { repoOwner, repoName, pullRequestNumber }, taskId, stateManager, redisClient,
         pickedUpComments: context.pickedUpComments, commentsToProcess, lockKey, lockToken, correlatedLogger,
+        pullRequestClosure: () => readPullRequestClosure(octokit as unknown as HandoffOctokit, repoOwner, repoName, pullRequestNumber),
     });
-    if (predecessorGate) return predecessorGate;
+    if (predecessorGate) {
+        if (predecessorGate.reason === 'cancelled_pr_closed') {
+            await createPRCommentTaskStateIfMissing({ job, taskId, stateManager, preexistingState, modelName, correlatedLogger });
+            await stateManager.markTaskCancelled(taskId, 'system', { reason: formatTaskTerminalReason('cancelled_pr_closed'), terminalReason: 'cancelled_pr_closed' });
+        }
+        return predecessorGate;
+    }
 
     const executionController = new AbortController();
     const stopLockHeartbeat = startPRProcessingLockHeartbeat({

@@ -1423,3 +1423,106 @@ test('F27: without delivered completion evidence recovery still publishes once o
     assert.deepEqual(mutations, ['PATCH']);
     assert.match(h.octokit.comments[0].body, /Recovered and published follow-up changes/);
 });
+
+// --- A follow-up held for an operator on a merged or closed pull request must
+// not block every later follow-up forever (integry/mcptest#447: a /fix queued
+// a replacement every minute for two hours, and kept going after the merge).
+
+const { releaseClosedPullRequestHandoffs, readPullRequestClosure } = await import('../src/jobs/closedPullRequestHandoffs.js');
+
+function waitingJob(taskId: string) {
+    const job = {
+        id: taskId, name: 'processPullRequestComment', token: 'worker-token',
+        data: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, prProcessingLockToken: `${taskId}-token` } as Record<string, unknown>,
+        updateData: mock.fn(async (next: Record<string, unknown>) => { job.data = next; }),
+        moveToDelayed: mock.fn(async (_timestamp: number, _token: string) => {}),
+    };
+    return job;
+}
+
+test('a follow-up blocked by an operator hold on a merged pull request ends instead of waiting', async () => {
+    const h = await createHarness();
+    const predecessor = await seedHandoff(h, { taskId: 'task-1' });
+    await advanceFollowupHandoff({ database }, predecessor, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_not_on_branch' });
+    const job = waitingJob('task-2');
+    const releases: Array<{ ref: unknown; closure: string }> = [];
+    const queuedBefore = queuedRecoveryJobs.length;
+
+    const result = await gatePredecessorHandoff({
+        ...gateParams(h, 'task-2'), job: job as never,
+        pullRequestClosure: async () => 'merged',
+        releaseClosedHold: async (ref, closure) => { releases.push({ ref, closure }); return { released: true }; },
+    });
+
+    assert.deepEqual(result, { status: 'cancelled', reason: 'cancelled_pr_closed', pullRequestNumber: 7 });
+    assert.equal(job.moveToDelayed.mock.calls.length, 0, 'the job does not wait');
+    assert.equal(queuedRecoveryJobs.length, queuedBefore, 'no replacement job is queued');
+    assert.equal(h.redis.store.has(LOCK), false, 'the PR lease is released before the hold is');
+    assert.deepEqual(releases, [{ ref: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7 }, closure: 'merged' }]);
+});
+
+for (const [label, closure] of [
+    ['an open pull request', async () => null],
+    ['an unreadable pull request state', async () => { throw new Error('GitHub unavailable'); }],
+] as const) {
+    test(`a follow-up blocked by an operator hold keeps waiting for ${label}`, async () => {
+        const h = await createHarness();
+        const predecessor = await seedHandoff(h, { taskId: 'task-1' });
+        await advanceFollowupHandoff({ database }, predecessor, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' });
+        const job = waitingJob('task-2');
+
+        await assert.rejects(gatePredecessorHandoff({
+            ...gateParams(h, 'task-2'), job: job as never, pullRequestClosure: closure,
+            releaseClosedHold: async () => assert.fail('an open pull request keeps its hold'),
+        }), (error: unknown) => error instanceof DelayedError);
+        assert.equal(job.moveToDelayed.mock.calls.length, 1);
+        assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
+    });
+}
+
+test('readPullRequestClosure tells merged, closed and open pull requests apart', async () => {
+    const reply = (data: Record<string, unknown>) => ({ request: async () => ({ data }) });
+    assert.equal(await readPullRequestClosure(reply({ state: 'closed', merged: true }), 'acme', 'widgets', 7), 'merged');
+    assert.equal(await readPullRequestClosure(reply({ state: 'closed', merged: false, merged_at: null }), 'acme', 'widgets', 7), 'closed');
+    assert.equal(await readPullRequestClosure(reply({ state: 'open' }), 'acme', 'widgets', 7), null);
+});
+
+test('the periodic pass releases a hold on a merged pull request, keeps retained work, and drops its queued comments', async () => {
+    const h = await createHarness();
+    const predecessor = await seedHandoff(h, { taskId: 'task-1' });
+    await agentEdit(h.fx);
+    await advanceFollowupHandoff({ database }, predecessor, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_not_on_branch' });
+    const deleted: string[] = [];
+    const redis = Object.assign(h.redis, { del: async (key: string) => { deleted.push(key); return 1; } });
+    let now = 1_000_000;
+
+    // Open: nothing changes, and the pull request is not read again within the interval.
+    const open = await releaseClosedPullRequestHandoffs({ ...h.deps, redis, now: () => now });
+    assert.deepEqual(open, { inspected: 1, released: 0, refused: 0, errors: 0 });
+    h.octokit.pull = { ...h.octokit.pull, state: 'closed', merged: true } as never;
+    const throttled = await releaseClosedPullRequestHandoffs({ ...h.deps, redis, now: () => now });
+    assert.equal(throttled.inspected, 0);
+
+    now += 10 * 60_000;
+    const merged = await releaseClosedPullRequestHandoffs({ ...h.deps, redis, now: () => now });
+    assert.deepEqual(merged, { inspected: 1, released: 1, refused: 0, errors: 0 });
+    const released = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(released?.status, HANDOFF_RELEASED);
+    assert.equal(released?.status_reason, 'released_pr_merged');
+    assert.ok(existsSync(path.join(h.fx.wt, 'feature.txt')), 'retained edits are never deleted');
+    assert.deepEqual(deleted, ['pending:acme:widgets:7']);
+    assert.equal(h.redis.store.has(LOCK), false, 'the operator lease is released');
+});
+
+test('the periodic pass leaves a hold whose agent is still running for a later pass', async () => {
+    const h = await createHarness();
+    const predecessor = await seedHandoff(h, { taskId: 'task-1' });
+    await advanceFollowupHandoff({ database }, predecessor, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' });
+    h.octokit.pull = { ...h.octokit.pull, state: 'closed', merged: false } as never;
+
+    const summary = await releaseClosedPullRequestHandoffs({
+        ...h.deps, inspectLiveness: async () => ({ liveness: 'running' }), now: () => 5_000_000,
+    });
+    assert.deepEqual(summary, { inspected: 1, released: 0, refused: 1, errors: 0 });
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
+});

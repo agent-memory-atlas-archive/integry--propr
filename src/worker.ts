@@ -40,7 +40,7 @@ import { ultrafixFailedStepFinalizerOptions } from './jobs/ultrafixFailedStepFin
 import { getTaskReplacementService } from './taskReplacement/index.js';
 import { recoverNonterminalGoals } from './goalRecovery.js';
 import { reconcileFollowupCiSuspensions } from './jobs/followupCiSuspension.js';
-import { recoverInterruptedFollowupHandoffs } from './jobs/followupHandoffRecovery.js';
+import { recoverFollowupHandoffsAndClosedHolds } from './jobs/closedPullRequestHandoffs.js';
 import { cancelClosedPullRequestValidation } from './jobs/closedPullRequestCiCancellation.js';
 import { prepareAgentRegistryAtStartup, processAgentImagePreparationJob, startAgentImageWatchdog } from './workerAgentPreparation.js';
 
@@ -403,7 +403,7 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
             closedPullRequests: await cancelClosedPullRequestValidation(),
             epicQueues: await reconcileEpicExecutionQueues(),
         }),
-        recoverFollowupHandoffs: () => recoverInterruptedFollowupHandoffs(),
+        recoverFollowupHandoffs: () => recoverFollowupHandoffsAndClosedHolds(),
     });
 
     const usageTipsRunner = await startUsageTipsSelectionRunner();
