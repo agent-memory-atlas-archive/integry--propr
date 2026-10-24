@@ -29,9 +29,9 @@ info:
     name: Apache-2.0
     identifier: Apache-2.0
   x-route-coverage:
-    total: 305
+    total: 306
     documented: 69
-    undocumented: 236
+    undocumented: 237
 servers:
   - url: "{origin}"
     description: Your ProPR API origin, for example the value of `API_PUBLIC_URL`.
