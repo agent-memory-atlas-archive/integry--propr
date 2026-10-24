@@ -39,7 +39,7 @@ In both strategies, **max parallel tasks** is a limit the agent enforces itself;
 
 Send a correction from the goal console or through MCP's `send_goal_input` to steer the existing session. The timeline records your message verbatim so you can distinguish operator input from agent output. All three deliver it into the running goal: Codex and Claude over their live control channels, and Antigravity by stopping at the next finished step and resuming the same conversation (see below). A queued input is not proof that the agent has already acted on it.
 
-**Pause**, **Resume** and **Cancel** also follow provider boundaries. A pending pause or cancellation can take time to acknowledge; watch the displayed state. Model changes apply at a boundary. Terminal goals no longer accept corrections.
+**Pause**, **Resume** and **Cancel** also follow provider boundaries. A pending pause or cancellation can take time to acknowledge; watch the displayed state. Model changes apply at a boundary. Terminal goals no longer accept corrections; continue them instead (see below).
 
 Goals are launched and managed from the Web UI, the [ProPR CLI](./propr-cli.md#goals) or [MCP](./mcp.md). All three use the same owner-scoped controls and status projection:
 
@@ -55,6 +55,7 @@ Goals are launched and managed from the Web UI, the [ProPR CLI](./propr-cli.md#g
 | Goals waiting on you, and what resolves each | `propr goal attention` | `list_goal_attention` |
 | Pause, resume, cancel | `propr goal pause\|resume\|cancel <id>` | `pause_goal`, `resume_goal`, `cancel_goal` |
 | Change the model | `propr goal model <id> <model>` | `set_goal_model` |
+| Continue a failed, completed or cancelled goal | `propr goal continue <id> [message]` | `continue_goal` |
 
 A typical terminal session:
 
@@ -110,6 +111,20 @@ For direct implementation, ProPR prepares the branch and opens the draft PR befo
 ```
 
 Optional `include` and `exclude` arrays select repository-relative files. ProPR validates, commits, pushes, and records the checkpoint, then resumes the conversation with acknowledgement. The agent must leave Git operations and PR creation to ProPR.
+
+## Continuing a finished goal
+
+A goal that failed, completed or was cancelled can be continued from the goal console (**Continue goal**), with `propr goal continue`, or with MCP's `continue_goal`. You can add instructions or attachments, or continue without them, for example to retry after a provider error.
+
+The goal reopens with the same agent, branch, draft PR and provider session. The agent first receives a message saying why the goal stopped (including the failure reason), followed by anything you added. Codex, Claude and Antigravity all switch their native goal back on, even if they had judged it complete.
+
+If the pull request changed while the goal was stopped:
+
+- **Merged:** the goal continues on a fresh branch from the base branch and opens a new draft PR, so already-merged commits are not proposed again.
+- **Closed without merging:** the goal keeps its branch and opens a new draft PR.
+- **Marked ready for review:** it is converted back to a draft, since goals publish to draft PRs.
+
+An expired worktree is rebuilt from the remote branch. If the branch was deleted, the goal continues on a fresh branch. If the branch or PR cannot be prepared, the goal fails again with the reason, and you can continue it once more.
 
 ## Completion
 

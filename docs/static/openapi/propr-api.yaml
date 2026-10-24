@@ -3907,6 +3907,32 @@ paths:
       x-propr-auth: member
       x-undocumented: true
       x-legacy-error: true
+  /api/goals/{goalId}/continue:
+    post:
+      operationId: postApiGoalsGoalIdContinue
+      summary: POST /api/goals/{goalId}/continue
+      description: This route is registered but not documented yet.
+      tags:
+        - Goals
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: goalId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success. The response body is not documented yet.
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-undocumented: true
+      x-legacy-error: true
   /api/goals/{goalId}/detail:
     get:
       operationId: getApiGoalsGoalIdDetail

@@ -8,6 +8,7 @@ import {
   AgentRegistry,
   getEventPublisher,
   GOAL_CONTINUE_INPUT,
+  buildGoalContinuationMessage,
   DEFAULT_GOAL_CHECKPOINT_INTERVAL_MINUTES,
   buildNativeGoalCommand,
   buildNativeGoalContext,
@@ -1155,6 +1156,147 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
     }
   };
 
+  /**
+   * Reopens a terminal goal (failed, completed or cancelled) in one fenced
+   * write and queues its next attempt on the same branch, PR and provider
+   * session. The continuation message tells the provider why the goal stopped
+   * and carries anything the operator added.
+   */
+  // eslint-disable-next-line complexity -- validation, idempotent replay and the fenced reopen stay in one boundary
+  const reopen = async (req: Request, res: Response, files: MulterFile[]) => {
+    const row = await findOwnedGoal(deps.db, req, res);
+    if (!row) return;
+    const key = requiredIdempotencyKey(req, res);
+    if (!key) return;
+    let body: Record<string, unknown>;
+    try { body = requestBody(req); } catch (error) {
+      return void res.status(400).json({ error: (error as Error).message });
+    }
+    if (body.message !== undefined && body.message !== null && typeof body.message !== 'string') {
+      return void res.status(400).json({ error: 'message must be a string' });
+    }
+    const message = typeof body.message === 'string' ? body.message.trim() : '';
+    if (message.length > 65_536) return void res.status(400).json({ error: 'Message is too long' });
+    const operation = 'goal.continue';
+    const attachmentIdentity = await identifyUploads(files);
+    const payloadHash = mutationHash(operation, {
+      goalId: row.goal_id,
+      message,
+      ...(attachmentIdentity.length > 0 ? { attachments: attachmentIdentity } : {}),
+    });
+    try {
+      if (await existingMutation(deps.db, row, key, operation, payloadHash)) {
+        return void res.json({ goal: await serializeGoal(deps.db, deps.redisClient, row) });
+      }
+    } catch (error) {
+      if (error instanceof IdempotencyConflictError) return void res.status(409).json({ error: error.message });
+      throw error;
+    }
+    if (!row.result_state) {
+      return void res.status(409).json({
+        error: row.desired_state === 'cancelled'
+          ? 'Goal is still being cancelled; continue it once the cancellation finishes'
+          : 'Goal is still active; send it input or resume it instead',
+      });
+    }
+    const previousResult = row.result_state;
+    let attachments: GoalAttachment[] = await storeAttachments(files, row.goal_id);
+    const operatorMessage = attachments.length ? appendGoalAttachments(message, attachments) : message;
+    const continuation = buildGoalContinuationMessage({
+      previousResult, failureReason: row.failure_reason, operatorMessage,
+    });
+    if (continuation.length > 65_536) {
+      await deleteGoalAttachments(attachments);
+      return void res.status(400).json({ error: 'Message and attachment references are too long' });
+    }
+    const generation = row.run_generation + 1;
+    const claimId = randomUUID();
+    // Time spent stopped is not goal activity.
+    const stoppedMs = row.completed_at ? Math.max(0, Date.now() - new Date(row.completed_at).getTime()) : 0;
+    let reopened = false;
+    try {
+      await deps.db.transaction(async trx => {
+        const changed = await trx('goals').where({
+          goal_id: row.goal_id, owner_id: row.owner_id,
+          run_generation: row.run_generation, result_state: previousResult,
+        }).update({
+          result_state: null, failure_reason: null, completed_at: null, task_reconciled_at: null,
+          desired_state: 'running', run_generation: generation, run_claim: claimId,
+          claimed_at: null, attempt_heartbeat_at: null, active_turn_id: null,
+          pause_confirmed_at: null, paused_at: null, resume_requested: false,
+          paused_ms: Number(row.paused_ms || 0) + stoppedMs,
+          continue_requested: true,
+          control_generation: trx.raw('control_generation + 1'),
+          updated_at: trx.fn.now(),
+        });
+        if (changed !== 1) return;
+        // Operator words appear in the goal timeline; a bare continue does not.
+        await trx('goal_inputs').insert({
+          input_id: randomUUID(),
+          goal_id: row.goal_id,
+          owner_id: row.owner_id,
+          idempotency_key: key,
+          operation,
+          payload_hash: payloadHash,
+          kind: message || attachments.length ? 'input' : 'resume',
+          message: continuation,
+          display_message: message || attachments.length ? message : null,
+          attachment_count: attachments.length,
+          state: 'pending',
+          created_at: trx.fn.now(),
+        });
+        if (attachments.length) {
+          const current = await trx('goals').where({ goal_id: row.goal_id, owner_id: row.owner_id }).first('attachments');
+          await trx('goals').where({ goal_id: row.goal_id, owner_id: row.owner_id }).update({
+            attachments: JSON.stringify([...parseGoalAttachments(current?.attachments), ...attachments]),
+          });
+        }
+        reopened = true;
+      });
+    } catch (error) {
+      await deleteGoalAttachments(attachments);
+      attachments = [];
+      if (await existingMutation(deps.db, row, key, operation, payloadHash).catch(() => null)) {
+        const current = await deps.db<GoalRow>('goals').where({ goal_id: row.goal_id }).first();
+        return void res.json({ goal: await serializeGoal(deps.db, deps.redisClient, current!) });
+      }
+      throw error;
+    }
+    if (!reopened) {
+      await deleteGoalAttachments(attachments);
+      return void res.status(409).json({ error: 'Goal changed while it was being continued; reload it and try again' });
+    }
+    await deps.redisClient.del(`worker:abort:${row.current_task_id}`);
+    const [repoOwner, repoName] = row.repository.split('/');
+    try {
+      await deps.taskQueue.add('processGoal', {
+        goalId: row.goal_id, taskId: row.current_task_id, repoOwner, repoName,
+        generation, claimId, recovery: false,
+      } satisfies GoalJobData, { jobId: goalJobId(row.goal_id, generation), attempts: 1 });
+    } catch (error) {
+      // The goal is durably running and unclaimed, so leased recovery enqueues it.
+      logger.warn({ goalId: row.goal_id, error: (error as Error).message }, 'Could not enqueue continued goal; recovery will retry');
+    }
+    const updated = await deps.db<GoalRow>('goals').where({ goal_id: row.goal_id }).first();
+    await respondWithGoalTransition(res, row, updated!);
+  };
+
+  const continueGoal = async (req: Request, res: Response) => {
+    const files = uploadedFiles(req);
+    try {
+      await reopen(req, res, files);
+    } catch (error) {
+      logger.warn({ error: (error as Error).message }, 'Could not continue goal');
+      if (!res.headersSent) {
+        const message = (error as Error).message || 'Could not continue goal';
+        const status = /not supported|unsupported|outside|invalid|file/i.test(message) ? 400 : 500;
+        res.status(status).json({ error: message });
+      }
+    } finally {
+      await cleanupTemporaryUploads(files);
+    }
+  };
+
   const attachment = async (req: Request, res: Response) => {
     const row = await findOwnedGoal(deps.db, req, res);
     if (!row) return;
@@ -1173,7 +1315,7 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
   };
 
   return {
-    capabilities, list, attention, get, detail, inputs, wait, previews, create, pause, resume, cancel, remove, requestModel, input, attachment,
+    capabilities, list, attention, get, detail, inputs, wait, previews, create, pause, resume, cancel, remove, requestModel, input, continueGoal, attachment,
     requireGoalTaskOwnership,
   };
 }

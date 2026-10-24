@@ -29,6 +29,7 @@ import {
   resolveIdempotencyKey,
   resumeGoal,
   sendGoalInput,
+  continueGoal,
   setGoalModel,
   waitGoalUntil,
   GOAL_WAIT_REPLY_GRACE_MS,
@@ -713,6 +714,7 @@ Examples:
   $ propr goal resume <goal-id>
   $ propr goal model <goal-id> <model>
   $ propr goal cancel <goal-id>
+  $ propr goal continue <goal-id> "Now add the VIN decoder pages"
 `);
 
   goal
@@ -1060,6 +1062,58 @@ Examples:
         console.log(`Idempotency key: ${result.idempotencyKey}`);
       } catch (error) {
         fail(error, { command: "input", json: options.json, goalId, idempotencyKey: key });
+      }
+    });
+
+  goal
+    .command("continue <goal-id> [message...]")
+    .description("Continue a goal that failed, completed or was cancelled, optionally with more instructions")
+    .option("-f, --file <path>", "Read the message from a file")
+    .option("--stdin", "Read the message from standard input")
+    .option("--idempotency-key <key>", "Reuse a key to retry this exact continuation without starting it twice")
+    .option("-j, --json", "Output the version 1 goal-continue JSON document")
+    .addHelpText("after", `
+The goal reopens with the same agent, branch, draft PR and provider session.
+The agent is told why the goal stopped, followed by your message, if any.
+A merged PR continues on a fresh branch with a new draft PR; a closed PR
+gets a new draft PR on the same branch.
+
+Use 'propr goal input' for a running goal and 'propr goal resume' for a
+paused one.
+
+Examples:
+  $ propr goal continue <goal-id>
+  $ propr goal continue <goal-id> "Also add the VIN decoder pages"
+  $ propr goal continue <goal-id> --file next-steps.md
+`)
+    .action(async (goalId: string, messageArg: string[] | undefined, options: {
+      file?: string; stdin?: boolean; idempotencyKey?: string; json?: boolean;
+    }) => {
+      let key: string | undefined;
+      try {
+        key = parseIdempotencyKey(options.idempotencyKey);
+        let message: string | undefined;
+        try {
+          message = (await resolveTextInput(messageArg, options))?.trim() || undefined;
+        } catch (error) {
+          throw new GoalUsageError((error as Error).message);
+        }
+        const result = await continueGoal(goalId, message, key);
+        if (options.json) {
+          printJson({
+            kind: "goal-continue",
+            goalId,
+            idempotencyKey: result.idempotencyKey,
+            attempts: result.attempts,
+            accepted: true,
+            goal: result.goal ? goalJson(result.goal) : null,
+          });
+          return;
+        }
+        console.log("Continue accepted. The goal is queued to run again on its branch and pull request.");
+        console.log(`Idempotency key: ${result.idempotencyKey}`);
+      } catch (error) {
+        fail(error, { command: "continue", json: options.json, goalId, idempotencyKey: key });
       }
     });
 

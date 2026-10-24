@@ -22,6 +22,31 @@ export type GoalDesiredState = 'running' | 'paused' | 'cancelled';
 export type GoalResultState = 'completed' | 'failed' | 'cancelled';
 
 export const GOAL_CONTINUE_INPUT = 'ProPR has acknowledged any checkpoint request from the previous turn. Continue working toward the goal.';
+/**
+ * First message of an attempt that continues a terminal goal. It says why the
+ * goal stopped, so the provider rechecks the branch instead of assuming its
+ * last turn succeeded, and carries any instructions the operator added.
+ */
+export function buildGoalContinuationMessage(options: {
+    previousResult: GoalResultState;
+    failureReason?: string | null;
+    operatorMessage?: string | null;
+}): string {
+    const reason = options.failureReason?.trim();
+    const stopped = options.previousResult === 'failed'
+        ? `the previous run failed${reason ? `: ${reason}` : ''}`
+        : options.previousResult === 'cancelled'
+            ? 'it was cancelled'
+            : 'it was completed';
+    const lines = [
+        `The user reopened this goal after ${stopped}.`,
+        'Check the current state of the branch and pull request before repeating any work, then continue working toward the goal.',
+    ];
+    const added = options.operatorMessage?.trim();
+    if (added) lines.push('', 'The user added these instructions:', added);
+    return lines.join('\n');
+}
+
 export const NATIVE_GOAL_COMMAND_PREFIX = '/goal ';
 export const CODEX_GOAL_OBJECTIVE_MAX_LENGTH = 4_000;
 export const CODEX_GOAL_USER_OBJECTIVE_MAX_LENGTH = CODEX_GOAL_OBJECTIVE_MAX_LENGTH

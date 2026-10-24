@@ -92,6 +92,12 @@ export interface AgentTaskOptions {
     initialControlInputMessage?: string;
     /** Durable ProPR checkpoint feedback to inject at the resumed Codex boundary. */
     initialGoalFeedback?: string;
+    /**
+     * The operator continued a terminal goal. The provider re-arms its native
+     * goal even when it recorded that goal complete, failed or cleared, instead
+     * of reporting the earlier outcome again.
+     */
+    continueTerminalGoal?: boolean;
     /** Durable controls observed only at provider turn boundaries. */
     goalControl?: GoalExecutionControl;
 

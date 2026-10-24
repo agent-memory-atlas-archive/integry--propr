@@ -421,6 +421,33 @@ describe('Claude native /goal protocol', () => {
     assert.deepEqual(fake.sent, []);
   });
 
+  for (const [verdict, recorded] of [
+    ['completed', GOAL_MET],
+    ['failed', goalStatus({ met: false, failed: true, reason: 'Judged impossible' })],
+  ] as const) {
+    test(`a continued goal whose session ${verdict} sets the goal again and delivers the continuation`, async () => {
+      const { fake, sessionId } = session((current, text) => {
+        // Claude writes a new set sentinel when the command is accepted.
+        if (text === COMMAND) current.transcript(GOAL_SET);
+        else {
+          current.transcript(GOAL_MET);
+          current.endTurn();
+        }
+      }, { transcript: GOAL_SET + recorded });
+      const control = fakeControl();
+
+      const completion = await run(fake, sessionId, control, {
+        resumeSessionId: sessionId, continueTerminalGoal: true,
+        initialControlInputId: 'input-4', initialControlInputMessage: 'The user reopened this goal',
+      });
+
+      assert.deepEqual(completion, { status: 'completed' });
+      assert.deepEqual(fake.sent, [COMMAND, 'The user reopened this goal']);
+      assert.deepEqual(control.delivered, [{ inputId: 'input-4', turnId: `${sessionId}:1` }]);
+      assert.deepEqual(control.undeliverable, []);
+    });
+  }
+
   test('a resumed session without a goal sets it again before steering pending input', async () => {
     const { fake, sessionId } = session((current, text) => {
       if (text !== COMMAND) {

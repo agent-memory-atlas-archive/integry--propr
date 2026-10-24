@@ -48,6 +48,7 @@ export interface GoalProjectionRow {
   active_turn_id: string | null;
   pause_confirmed_at: string | null;
   resume_requested: number | boolean;
+  continue_requested?: number | boolean;
   final_pr_number: number | null;
   final_pr_url: string | null;
   artifact_refs: string | unknown[] | null;

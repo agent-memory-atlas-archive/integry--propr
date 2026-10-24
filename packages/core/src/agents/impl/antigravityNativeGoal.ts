@@ -84,6 +84,8 @@ class AntigravityGoalProtocol {
     private turn = 0;
     private readonly control: GoalExecutionControl;
     private identityReported = false;
+    /** A continued terminal goal sets its native goal again in the existing conversation. */
+    private rearmPending: boolean;
     conversationId?: string;
     readonly segments: AntigravityGoalSegment[] = [];
     lastResponse?: string;
@@ -95,6 +97,7 @@ class AntigravityGoalProtocol {
     ) {
         this.control = options.goalControl!;
         this.conversationId = options.resumeConversationId || options.resumeSessionId;
+        this.rearmPending = Boolean(options.continueTerminalGoal && this.conversationId);
     }
 
     private async requestedStop(): Promise<StopState | null> {
@@ -114,6 +117,11 @@ class AntigravityGoalProtocol {
             };
         }
         const texts = [initialGoalFeedback, input].filter((text): text is string => Boolean(text));
+        if (this.rearmPending) {
+            // The native goal may have ended with the earlier run; the command
+            // arms it again before the continuation instructions.
+            return { text: [this.command, ...texts].join('\n\n'), inputIds: input && inputId ? [inputId] : [] };
+        }
         return {
             text: texts.length ? texts.join('\n\n') : GOAL_CONTINUE_INPUT,
             inputIds: input && inputId ? [inputId] : [],
@@ -230,7 +238,9 @@ class AntigravityGoalProtocol {
     }
 
     private async runSegment(message: GoalMessage): Promise<SegmentObservation & { turnId: string }> {
-        const launch = !this.conversationId;
+        // Only a launch keeps slash commands enabled, so a re-arm runs as one.
+        const launch = !this.conversationId || this.rearmPending;
+        this.rearmPending = false;
         const segment = await this.startSegment(message.text, { conversationId: this.conversationId, launch });
         this.segments.push(segment);
         await this.waitForIdentity(segment);

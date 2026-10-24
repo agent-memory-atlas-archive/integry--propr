@@ -275,6 +275,7 @@ propr goal pause <goal-id>
 propr goal resume <goal-id>
 propr goal model <goal-id> <model>            # Request a model change at the next provider boundary
 propr goal cancel <goal-id>
+propr goal continue <goal-id> "Now add the guides"   # Reopen a failed, completed or cancelled goal (message optional; or --file / --stdin)
 ```
 
 **Creating a goal starts work immediately.** `goal create` options:

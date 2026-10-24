@@ -522,19 +522,15 @@ class ClaudeGoalProtocol {
         }
     }
 
-    /** Establish the goal in this session and return the first steering messages, if any. */
-    private async start(state: ClaudeGoalState): Promise<ClaudeGoalCompletion | InitialMessage> {
-        const { options } = this;
-        const inputId = options.initialControlInputId;
-        const inputMessage = options.initialControlInputMessage;
-        // Checkpoint feedback and a queued input are distinct messages: the
-        // input's id is acknowledged only against the message that carries it,
-        // so an input that is not written here stays pending for a later turn.
-        const pending: GoalMessage[] = [
-            ...(options.initialGoalFeedback ? [{ text: options.initialGoalFeedback }] : []),
-            ...(inputMessage ? [{ text: inputMessage, ...(inputId ? { inputId } : {}) }] : []),
-        ];
+    /**
+     * The completion a resumed session already recorded, if it stands. A
+     * continued goal is set again despite a verdict; the new set sentinel makes
+     * it active, as for a cleared goal.
+     */
+    private async recordedVerdict(state: ClaudeGoalState): Promise<ClaudeGoalCompletion | null> {
+        if (this.options.continueTerminalGoal) return null;
         if (state.status === 'complete') {
+            const inputId = this.options.initialControlInputId;
             if (inputId) {
                 await this.control.markInputUndeliverable(
                     inputId,
@@ -548,6 +544,23 @@ class ClaudeGoalProtocol {
             this.recordGoal('failed', state);
             return { status: 'failed', error: impossibleGoalError(state) };
         }
+        return null;
+    }
+
+    /** Establish the goal in this session and return the first steering messages, if any. */
+    private async start(state: ClaudeGoalState): Promise<ClaudeGoalCompletion | InitialMessage> {
+        const { options } = this;
+        const inputId = options.initialControlInputId;
+        const inputMessage = options.initialControlInputMessage;
+        // Checkpoint feedback and a queued input are distinct messages: the
+        // input's id is acknowledged only against the message that carries it,
+        // so an input that is not written here stays pending for a later turn.
+        const pending: GoalMessage[] = [
+            ...(options.initialGoalFeedback ? [{ text: options.initialGoalFeedback }] : []),
+            ...(inputMessage ? [{ text: inputMessage, ...(inputId ? { inputId } : {}) }] : []),
+        ];
+        const verdict = await this.recordedVerdict(state);
+        if (verdict) return verdict;
         if (state.status === 'active') {
             return { messages: pending.length ? pending : [{ text: GOAL_CONTINUE_INPUT }] };
         }

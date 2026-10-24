@@ -19,7 +19,7 @@ const resizeImage = vi.hoisted(() => vi.fn());
 vi.mock('../api/goals', () => ({
   getGoalCapabilities: vi.fn(), listGoals: vi.fn(), getGoal: vi.fn(), createGoal: vi.fn(),
   getGoalVisualPreviews: vi.fn(),
-  pauseGoal: vi.fn(), resumeGoal: vi.fn(), cancelGoal: vi.fn(), deleteGoal: vi.fn(), requestGoalModel: vi.fn(), sendGoalInput: vi.fn(),
+  pauseGoal: vi.fn(), resumeGoal: vi.fn(), cancelGoal: vi.fn(), continueGoal: vi.fn(), deleteGoal: vi.fn(), requestGoalModel: vi.fn(), sendGoalInput: vi.fn(),
 }));
 vi.mock('../api/proprApi', () => ({ getInstanceCatalog: vi.fn(), getTaskLiveDetails: vi.fn() }));
 vi.mock('../components/TaskPlanner/imageUtils', () => ({ resizeImage }));
@@ -1188,8 +1188,9 @@ describe('GoalsPage', () => {
     expect(screen.getByRole('heading', { name: 'Implementation log' })).toHaveClass('text-[10px]', 'uppercase', 'font-bold', 'text-slate-500');
     expect(screen.queryByText("Follow the agent's progress or inspect the raw provider stream.")).not.toBeInTheDocument();
     // The locked state reads beside the status badge instead of occupying a sticky footer bar.
-    expect(within(title.parentElement!).getByText('Goal completed. Corrections disabled.')).toBeInTheDocument();
+    expect(within(title.parentElement!).getByText('Goal completed. Continue it to add more work.')).toBeInTheDocument();
     expect(screen.queryByLabelText('Correction or follow-up')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Model for next continuation')).not.toBeInTheDocument();
   });
 
   it('prints the metrics rail straight onto the console canvas and parks artifacts beside it', async () => {
@@ -1280,6 +1281,45 @@ describe('GoalsPage', () => {
 
     expect(screen.getByText('SUMMARY')).toHaveClass('text-slate-500');
     expect(screen.getByText('6m 59s')).toHaveClass('text-slate-500');
+  });
+
+  it('continues a failed goal with the instructions typed into the composer', async () => {
+    const failed = { ...goal, resultState: 'failed' as const, failureReason: 'Codex expected active turn id' };
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({ goal: failed });
+    vi.mocked(goalsApi.continueGoal).mockResolvedValue({ goal: { ...goal, resultState: null, failureReason: null } });
+    render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    expect(await screen.findByText('Goal failed. Continue it to try again.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Instructions for the continued goal'), { target: { value: '  Now add the VIN decoder pages.  ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+
+    await waitFor(() => expect(goalsApi.continueGoal).toHaveBeenCalledWith('goal-1', { message: 'Now add the VIN decoder pages.' }));
+    expect(await screen.findByRole('button', { name: 'Pause' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Continue goal' })).not.toBeInTheDocument();
+  });
+
+  it('continues a finished goal from the header without a message', async () => {
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({ goal: { ...goal, resultState: 'cancelled' as const, desiredState: 'cancelled' as const } });
+    vi.mocked(goalsApi.continueGoal).mockResolvedValue({ goal });
+    render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue goal' }));
+
+    await waitFor(() => expect(goalsApi.continueGoal).toHaveBeenCalledWith('goal-1', {}));
+  });
+
+  it('offers no continuation in read-only demo mode', async () => {
+    demoState.isDemoMode = true;
+    try {
+      vi.mocked(goalsApi.getGoal).mockResolvedValue({ goal: { ...goal, resultState: 'failed' as const } });
+      render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+      await screen.findByRole('heading', { name: goal.title });
+      expect(screen.queryByRole('button', { name: 'Continue goal' })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('Instructions for the continued goal')).not.toBeInTheDocument();
+    } finally {
+      demoState.isDemoMode = false;
+    }
   });
 
   it('accepts a correction while the initial provider identity is still pending', async () => {
