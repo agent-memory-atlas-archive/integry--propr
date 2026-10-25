@@ -150,7 +150,7 @@ Queue and worker behavior; see [Worker Runtime](../architecture/worker-runtime.m
 | `GIT_WORKTREES_BASE_PATH` | `/tmp/git-processor/worktrees` | Where workers create per-job worktrees. | Optional. |
 | `PUSH_RESCUE_RETENTION_DAYS` | `14` | How long push-salvage rescue refs (`refs/propr/rescue/<taskId>--<timestamp>`, aged from the creation time in the name) and rescue bundles are kept before the daemon deletes them; retained worktrees are never age-deleted. `0` disables the automatic deletion. See [Maintenance → Rejected Pushes](./maintenance.md#rejected-pushes-and-the-salvage-ladder). | Optional. |
 | `PUSH_RESCUE_BUNDLE_DIR` | `<DATA_DIR>/rescue` (next to the SQLite database) | Durable directory for git bundles written when a rejected push cannot reach a rescue ref. Bundles are stored as `<dir>/<owner>/<repo>/<taskId>.bundle`. Must be visible to both the worker (which writes) and the daemon (which prunes). | Optional. |
-| `PUSH_RESCUE_WORKTREE_RECORD_DIR` | `<DATA_DIR>/rescue-worktrees` (next to the SQLite database) | Worker-controlled records of worktrees kept by the last salvage rung. These records protect salvage state independently of legacy `WORKTREE_RETENTION_STRATEGY`; all checkouts are retained; a `.retention-info.json` inside the worktree is informational, since repository contents could forge it. Must be visible to the worker and to whatever runs the expired-worktree cleanup. | Optional. |
+| `PUSH_RESCUE_WORKTREE_RECORD_DIR` | `<DATA_DIR>/rescue-worktrees` (next to the SQLite database) | Worker-controlled records of worktrees kept by the last salvage rung. These records protect salvage state independently of `WORKTREE_RETENTION_STRATEGY`; such worktrees are never removed automatically; a `.retention-info.json` inside the worktree is informational, since repository contents could forge it. Must be visible to the worker and to whatever runs the expired-worktree cleanup. | Optional. |
 | `PUSH_RESCUE_SWEEP_INTERVAL_MS` | `21600000` (6 hours) | How often the daemon deletes expired rescue refs and bundles. | Optional tuning. |
 | `GIT_DEFAULT_BRANCH` | `main` | Default base branch for PRs. Per-repo overrides use `GIT_DEFAULT_BRANCH_<OWNER>_<REPO>` — see [Branch Configuration](../features/branch-config.md). | Optional. |
 | `GIT_SHALLOW_CLONE_DEPTH` | Empty (full clones) | Depth for shallow clones; leave empty to clone full history. | Optional. |
@@ -195,6 +195,9 @@ Whole Git worktrees are retained regardless of the legacy retention strategy. Th
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `WORKTREE_RETENTION_STRATEGY` | `always_delete` | When a finished job's worktree is removed. `always_delete`: whenever nothing in it would be lost. `keep_on_failure` / `keep_for_hours`: failed jobs keep theirs (the idle sweep can still remove them later). `always_keep`: never remove automatically. See [Maintenance → Repository And Worktree Cleanup](./maintenance.md#repository-and-worktree-cleanup). |
+| `WORKTREE_RETENTION_HOURS` | `24` | How long a worktree must be idle (no Git activity) before the daemon's sweep can remove it. |
+| `WORKTREE_SWEEP_INTERVAL_MS` | `3600000` | How often the daemon sweeps for idle worktrees whose work is stored in Git. |
 | `WORKTREE_ADMISSION_RESERVE_BYTES` | `2147483648` | Minimum free filesystem reserve required before worker admission. Positive safe integer; unknown capacity fails closed. |
 | `WORKTREE_TASK_BUDGET_BYTES` | `1073741824` | Additional capacity reservation per admitted task, shared through durable lifecycle claims. An estimate, not an enforced write quota. |
 

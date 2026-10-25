@@ -49,6 +49,7 @@ import {
 import { resetQueues, resetIssueLabels } from './daemon/queueReset.js';
 import { sweepDraftContext } from './daemon/draftContextSweep.js';
 import { sweepPushRescues } from './daemon/rescueRefSweep.js';
+import { scheduleWorktreeSweep } from './daemon/worktreeSweep.js';
 import { scheduleAgentRunSweeps } from './agentRunScheduler.js';
 import { scheduleUltrafixResumeSweep } from './daemon/ultrafixResumeSweep.js';
 import { scheduleEpicMergeProgressRetrySweep } from './daemon/epicMergeProgressRetrySweep.js';
@@ -288,6 +289,7 @@ async function startDaemon(options: DaemonOptions = {}): Promise<void> {
 
     const draftContextSweepInterval = await scheduleDraftContextSweep();
     const pushRescueSweepInterval = schedulePushRescueSweep();
+    const worktreeSweepInterval = scheduleWorktreeSweep();
     // Fires scheduled agents, retries runs the cost gate deferred, fails runs
     // whose worker stopped, and revokes leftover run-scoped MCP grants.
     const stopAgentRunSweeps = scheduleAgentRunSweeps();
@@ -462,6 +464,7 @@ async function startDaemon(options: DaemonOptions = {}): Promise<void> {
         clearInterval(heartbeatInterval);
         clearInterval(draftContextSweepInterval);
         clearInterval(pushRescueSweepInterval);
+        clearInterval(worktreeSweepInterval);
         clearInterval(ultrafixResumeSweepInterval);
         clearInterval(epicMergeProgressRetryInterval);
         clearInterval(autoMergeSweepInterval);

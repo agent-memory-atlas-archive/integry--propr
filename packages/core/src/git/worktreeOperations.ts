@@ -7,6 +7,7 @@ import { createHooklessGit } from './hooklessGit.js';
 import { resolveRepositoryWorktreePath } from './repositoryPaths.js';
 import { redactAuthenticatedGitUrl } from './repoBranching.js';
 import { isSalvageRetainedWorktree } from './pushSalvage.js';
+import { removeWorktreeIfDisposable, worktreeRemovalDisabled } from './worktreeReclaim.js';
 
 const WORKTREES_BASE_PATH = process.env.GIT_WORKTREES_BASE_PATH || "/tmp/git-processor/worktrees";
 
@@ -64,17 +65,25 @@ export async function cleanupWorktree(localRepoPath: string, worktreePath: strin
         return;
     }
 
-    // Worktrees are durable user work, not refetchable caches. Task completion,
-    // retention expiry and a successful push do not prove ignored files, staged
-    // blobs or detached history recoverable. Keep registration and branches too.
+    // A finished worktree whose work is all stored in Git (clean status, HEAD
+    // contained in a branch, remote ref or tag) is removed: each one carries its
+    // own node_modules and build output, and keeping them all fills the disk.
+    // Anything else is kept. Branches are never deleted here.
+    if (!worktreeRemovalDisabled(retentionStrategy)) {
+        const outcome = await removeWorktreeIfDisposable(worktreePath);
+        if (outcome.removed) {
+            logger.info({ worktreePath, branchName }, 'Removed finished worktree; its work is stored in Git');
+            return;
+        }
+        logger.info({ worktreePath, branchName, reason: outcome.reason }, 'Keeping worktree: it holds work not stored elsewhere');
+    }
+
     try {
         // Release the branch for a subsequent task without discarding the retained checkout.
         await createHooklessGit(worktreePath).raw(['checkout', '--detach']);
     } catch {
         // Unknown Git state remains intact, including its branch registration.
     }
-    logger.info({ worktreePath, branchName }, 'Keeping worktree: automatic deletion requires a complete recoverability proof');
-
 }
 
 /** Age is never a recoverability proof; legacy timers must not bypass storage policy. */

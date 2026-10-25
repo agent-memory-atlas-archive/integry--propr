@@ -217,3 +217,91 @@ for (const entry of ['issue', 'existing'] as const) {
         await assertPrivateWork(wt, saved);
     });
 }
+
+const { sweepIdleWorktrees } = await import('../packages/core/src/git/worktreeReclaim.js');
+
+/** A finished task: its commit is on the task branch and only ignored files remain. */
+async function finishedTask(branch = 'task') {
+    const wt = await create(branch);
+    await fs.writeFile(path.join(repo, '.gitignore'), 'private.env\nnode_modules/\n');
+    await fs.writeFile(path.join(worktree, '.gitignore'), 'private.env\nnode_modules/\n');
+    await fs.writeFile(path.join(worktree, 'tracked'), 'published');
+    await wt.add('.').commit('task work');
+    await fs.outputFile(path.join(worktree, 'node_modules', 'dep', 'index.js'), 'module.exports = 1;');
+    return (await wt.revparse(['HEAD'])).trim();
+}
+const registered = async () => (await git.raw(['worktree', 'list', '--porcelain'])).includes(worktree);
+
+for (const success of [true, false]) {
+    test(`cleanup removes a finished worktree whose work is stored in Git (success=${success}) and keeps its branch`, async () => {
+        const head = await finishedTask();
+        await cleanupWorktree(repo, worktree, 'task', { success, retentionStrategy: 'always_delete' });
+        assert.equal(await fs.pathExists(worktree), false);
+        assert.equal(await registered(), false);
+        assert.equal((await git.revparse(['refs/heads/task'])).trim(), head);
+    });
+}
+
+test('cleanup keeps a clean worktree whose detached HEAD no ref contains', async () => {
+    await finishedTask();
+    const wt = simpleGit(worktree);
+    await wt.checkout(['--detach']);
+    await fs.writeFile(path.join(worktree, 'tracked'), 'detached');
+    await wt.add('.').commit('detached only');
+    await cleanupWorktree(repo, worktree, 'task', { success: true });
+    assert.equal(await fs.pathExists(worktree), true);
+    assert.equal(await registered(), true);
+});
+
+test('cleanup keeps finished worktrees with always_keep, and failures with keep_on_failure', async () => {
+    await finishedTask();
+    await cleanupWorktree(repo, worktree, 'task', { success: true, retentionStrategy: 'always_keep' });
+    assert.equal(await fs.pathExists(worktree), true);
+    await cleanupWorktree(repo, worktree, 'task', { success: false, retentionStrategy: 'keep_on_failure' });
+    assert.equal(await fs.pathExists(worktree), true);
+});
+
+test('cleanup keeps a worktree in the middle of a merge', async () => {
+    await finishedTask();
+    const admin = (await fs.readFile(path.join(worktree, '.git'), 'utf8')).trim().slice('gitdir: '.length);
+    await fs.writeFile(path.join(admin, 'MERGE_HEAD'), initial);
+    await cleanupWorktree(repo, worktree, 'task', { success: true });
+    assert.equal(await fs.pathExists(worktree), true);
+});
+
+test('the idle sweep removes only idle, unreferenced, unmounted worktrees whose work is in Git', async () => {
+    const base = path.join(root, 'worktrees');
+    const make = async (name: string, dirty = false) => {
+        worktree = path.join(base, 'owner', repoName, name);
+        await finishedTask(name);
+        if (dirty) await fs.writeFile(path.join(worktree, 'untracked'), 'agent notes');
+        return worktree;
+    };
+    const idle = await make('idle');
+    const referenced = await make('referenced');
+    const mounted = await make('mounted');
+    const dirty = await make('dirty', true);
+    const recent = await make('recent');
+    const now = Date.now();
+    for (const dir of [idle, referenced, mounted, dirty]) {
+        const admin = (await fs.readFile(path.join(dir, '.git'), 'utf8')).trim().slice('gitdir: '.length);
+        for (const file of [dir, path.join(admin, 'HEAD'), path.join(admin, 'index'), path.join(admin, 'logs', 'HEAD')]) {
+            await fs.utimes(file, new Date(0), new Date(0)).catch(() => undefined);
+        }
+    }
+    const result = await sweepIdleWorktrees({
+        worktreesBasePath: base, minIdleHours: 24, now,
+        protectedPaths: async () => [referenced],
+        mountedPaths: async () => [base, path.join(mounted, 'src')],
+    });
+    assert.deepEqual(result.removed, [idle]);
+    for (const kept of [referenced, mounted, dirty, recent]) assert.equal(await fs.pathExists(kept), true, kept);
+    assert.equal(await fs.pathExists(idle), false);
+});
+
+test('the idle sweep removes nothing when liveness cannot be read', async () => {
+    await assert.rejects(sweepIdleWorktrees({
+        worktreesBasePath: path.join(root, 'worktrees'), minIdleHours: 0,
+        protectedPaths: async () => [], mountedPaths: async () => { throw new Error('docker unavailable'); },
+    }), /docker unavailable/);
+});

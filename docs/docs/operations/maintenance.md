@@ -118,7 +118,18 @@ ProPR keeps Git state under `/tmp/git-processor` on the host. The launcher mount
 - `/tmp/git-processor/clones/` — cached clones, one per monitored repository (`GIT_CLONES_BASE_PATH`)
 - `/tmp/git-processor/worktrees/` — per-task worktrees (`GIT_WORKTREES_BASE_PATH`)
 
-Worktrees are retained after completion. Cleanup may detach HEAD to free the task branch, but does not remove the checkout, branch history or worktree registration. `WORKTREE_RETENTION_STRATEGY=always_delete` is a legacy setting and does **not** authorize deletion; expiry and mtimes are never recovery proofs. Do not delete managed directories by hand to resolve disk pressure.
+Each task and follow-up gets its own worktree, usually with its own `node_modules` and build output (often 1–2 GB). When a job finishes, ProPR removes its worktree (checkout and registration, with `git worktree remove`) only if nothing in it would be lost:
+
+- no uncommitted, staged or untracked files (ignored files such as `node_modules` and build output don't count);
+- `HEAD` is contained in a local branch, remote-tracking ref or tag;
+- no merge, rebase, cherry-pick, revert or bisect in progress, the worktree isn't locked and has no submodules;
+- it isn't kept by push salvage.
+
+Branches are never deleted. Any worktree that fails a check is kept, with its HEAD detached so the branch is free for the next job. With `WORKTREE_RETENTION_STRATEGY=keep_on_failure` or `keep_for_hours`, failed jobs keep their worktree even when it passes the checks; `always_keep` turns automatic removal off entirely.
+
+The daemon also sweeps the worktree root at startup and every `WORKTREE_SWEEP_INTERVAL_MS` (default 1 hour). This clears worktrees left by attempts killed before cleanup, and those created before this behavior existed. It removes a worktree only when it passes the same checks and also: Git has seen no activity in it for `WORKTREE_RETENTION_HOURS` (default 24); no unfinished goal or unreleased follow-up handoff refers to it; and no running container mounts it. If Docker can't be queried, the sweep removes nothing.
+
+Do not delete managed directories by hand to resolve disk pressure; lower `WORKTREE_RETENTION_HOURS` instead and restart the daemon.
 
 The instance storage API provides supported dry-run and execute controls. Both require an authenticated instance administrator and, for POST, JSON plus `X-ProPR-Storage: 1`. Use your established instance API session:
 

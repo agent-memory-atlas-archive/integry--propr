@@ -74,7 +74,7 @@ The category inventory is intentionally explicit:
 | --- | --- |
 | `database_config` | SQLite DB/WAL/SHM and storage-control records; no database/config/.env wipe |
 | `repository_caches` | Configured clone root; only registered, proven recoverable caches can be deleted |
-| `worktrees` | Configured worktree root; retained as user work, no automatic/force deletion |
+| `worktrees` | Configured worktree root; a finished worktree is removed automatically (never forced) only when its work is all stored in Git — see [maintenance](../operations/maintenance.md#repository-and-worktree-cleanup); the storage API itself never deletes whole worktrees |
 | `salvage` | Managed rescue bundles and retention records; protected |
 | `task_history` | Explicit terminal-task records, DB execution details/logs and history through the task deletion domain; bytes are not separately attributable from SQLite |
 | `logs_artifacts` | Unsupported aggregate: host stdout/container logs, agent artifacts and externally stored previews do not have one safely enumerable ownership root |
@@ -133,8 +133,10 @@ Under the same barrier a candidate is moved to an isolated quarantine inside its
 filesystem, audited again and removed only on an identical fingerprint. Interruptions or
 path changes retain the quarantine. Neither quarantine nor worktree metadata is age-pruned.
 Legacy fetch-error recloning, force worktree removal, branch reset/deletion and age-only
-worktree/bundle pruning no longer bypass these protections. Worktree cleanup retains and
-non-forcibly detaches completed checkouts to release the branch for subsequent tasks.
+worktree/bundle pruning no longer bypass these protections. Worktree cleanup removes a
+completed checkout with non-forced `git worktree remove` only when its status is clean and its
+HEAD is contained in a branch, remote ref or tag; otherwise it retains it and detaches HEAD to
+release the branch for subsequent tasks.
 
 **Backup distinction:** fleet backups cover the database and durable configuration, not
 repository working copies. Refetching cannot recover uncommitted work or unpublished
