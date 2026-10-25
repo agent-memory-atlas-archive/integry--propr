@@ -453,8 +453,9 @@ export function continueGoal(
   message: string | undefined,
   idempotencyKey: string,
   options: GoalApiOptions = {},
+  model?: string,
 ): Promise<GoalMutationResult> {
-  return goalMutation(goalId, { method: "POST", suffix: "/continue", body: message ? { message } : {} }, idempotencyKey, options);
+  return goalMutation(goalId, { method: "POST", suffix: "/continue", body: { ...(message ? { message } : {}), ...(model ? { model } : {}) } }, idempotencyKey, options);
 }
 
 export function pauseGoal(goalId: string, idempotencyKey: string, options: GoalApiOptions = {}): Promise<GoalMutationResult> {

@@ -12,8 +12,8 @@
  * Each decision is taken against one snapshot bound: the goal's newest journal
  * sequence read first. SQLite serializes writers and assigns sequences in
  * commit order, so every event at or below that bound is already visible and
- * the prefix never changes. Immediate matches, event matching and terminal
- * reachability are all evaluated within that prefix, so a transition committed
+ * the prefix never changes. Immediate matches and event matching
+ * are evaluated within that prefix, so a transition committed
  * between two reads is never judged by one query and missed by another.
  *
  * The returned goal projection is different: it describes the goal now, so
@@ -31,7 +31,6 @@ import {
   type GoalWaitEvent,
   type GoalWaitLifecycleState,
   type GoalWaitOutcome,
-  isTerminalGoalWaitState,
 } from '@propr/shared';
 
 /** Fallback re-read interval when no notification arrives. Not a busy poll. */
@@ -312,12 +311,6 @@ export async function waitForGoal(options: GoalWaitOptions): Promise<GoalWaitRes
     return await query.orderBy('goal_events.sequence', 'desc').first() as GoalEventRow | undefined;
   };
 
-  /** Lifecycle state as of a snapshot bound, used only to judge the examined journal prefix. */
-  const lifecycleStateAt = async (goal: GoalWaitGoalRow, bound: number): Promise<GoalWaitLifecycleState> => {
-    const latest = await lifecycleEvent(bound);
-    return (latest?.state as GoalWaitLifecycleState | undefined) ?? goalWaitLifecycleState(goal);
-  };
-
   const finish = async (
     result: { outcome: GoalWaitOutcome; boundary: number; event?: GoalEventRow; matchedImmediately?: boolean },
   ): Promise<GoalWaitResult> => {
@@ -385,12 +378,7 @@ export async function waitForGoal(options: GoalWaitOptions): Promise<GoalWaitRes
       if (events.length === EVENT_PAGE) continue;
       // Every event through the bound has been examined and none qualified.
       boundary = Math.max(boundary, bound);
-      // A terminal goal journals nothing further. Its terminal event is either
-      // behind the caller's cursor or was examined above without qualifying, so
-      // no later event can match and waiting out the timeout would be pointless.
-      if (isTerminalGoalWaitState(await lifecycleStateAt(goal, bound))) {
-        return await finish({ outcome: 'unreachable', boundary });
-      }
+      // Terminal goals can be continued; their journal remains open.
       const remaining = deadline - Date.now();
       if (remaining <= 0) return await finish({ outcome: 'timed_out', boundary });
       if (options.signal?.aborted) throw abortedError();

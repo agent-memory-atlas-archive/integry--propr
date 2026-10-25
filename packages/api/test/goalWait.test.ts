@@ -223,7 +223,7 @@ test('resuming with a cursor replays every transition in order, across a databas
     const done = await waitForGoal({ ...options(fileDb), afterCursor: next.cursor, until: 'terminal' });
     assert.equal(done.event?.state, 'completed');
     const after = await waitForGoal({ ...options(fileDb), afterCursor: done.cursor, until: 'paused' });
-    assert.equal(after.outcome, 'unreachable', 'a terminal goal can never confirm a pause');
+    assert.equal(after.outcome, 'timed_out', 'a terminal goal can be continued and later paused');
   } finally {
     await fileDb.destroy();
     await rm(root, { recursive: true, force: true });
@@ -274,7 +274,7 @@ test('a checkpoint and completion committed between journal reads are matched, n
   // The worker publishes a checkpoint and then completes the goal after the
   // waiter's event read and before its terminal-reachability read.
   const result = await wait({
-    db: interleaveBeforeQuery(/'lifecycle'/, async () => {
+    db: interleaveBeforeQuery(/order by.*goal_events.*sequence.*asc/i, async () => {
       await insertCheckpoint('dddddddd-dddd-4ddd-8ddd-dddddddddddd', 'completed');
       await update({ result_state: 'completed', completed_at: '2026-10-04 10:05:00' });
     }),
@@ -286,7 +286,7 @@ test('a checkpoint and completion committed between journal reads are matched, n
   assert.equal(result.goal.lifecycleState, 'completed');
 
   const next = await wait({ until: 'checkpoint', afterCursor: result.cursor });
-  assert.equal(next.outcome, 'unreachable', 'only after the checkpoint is consumed is the completed goal unreachable');
+  assert.equal(next.outcome, 'timed_out', 'a continued goal could still publish a later checkpoint');
   assert.equal(next.event, null);
 });
 

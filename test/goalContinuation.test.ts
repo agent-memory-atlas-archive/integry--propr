@@ -136,14 +136,17 @@ test('the continued attempt tells the provider to re-arm, then clears the flag o
   const agent = {
     executeTask: async (options: AgentTaskOptions) => {
       captured.push(options);
+      await options.onGoalRearmed?.();
       return { success: false, modelUsed: 'gpt-5.6', executionTimeMs: 1, logs: '', modifiedFiles: [] };
     },
   };
   await executePreparedGoal(job, {
     goal, agent, githubToken: 'token', worktree: { worktreePath: goal.worktree_path, branchName: goal.branch_name },
-    pendingInput: null,
+    pendingInput: { input_id: 'bare-continue', kind: 'resume', message: 'ProPR reopened this goal after the previous run failed: steer error' },
   } as never);
 
+  assert.match(captured[0].initialControlInputMessage!, /previous run failed: steer error/);
+  assert.equal(captured[0].initialControlInputId, 'bare-continue');
   assert.equal(captured[0].continueTerminalGoal, true);
   assert.equal(captured[0].resumeSessionId, 'thread-1');
   const stored = await db('goals').where({ goal_id: goal.goal_id }).first();
@@ -187,3 +190,75 @@ for (const merged of [false, true]) {
     assert.equal((await db('goals').where({ goal_id: goal.goal_id }).first()).branch_name, goal.branch_name);
   });
 }
+
+for (const failure of ['before-session', 'after-session']) {
+  test(`continuation remains requested when provider fails ${failure} without re-arming`, async () => {
+    const { job, goal } = await continuedGoal(`goal-no-rearm-${failure}`);
+    await executePreparedGoal(job, {
+      goal, githubToken: 'token', worktree: { worktreePath: goal.worktree_path, branchName: goal.branch_name }, pendingInput: null,
+      agent: { executeTask: async () => ({ success: false, sessionId: failure === 'after-session' ? 'thread-1' : undefined, executionTimeMs: 1, logs: '', modifiedFiles: [] }) },
+    } as never);
+    assert.equal(Boolean((await db('goals').where({ goal_id: goal.goal_id }).first()).continue_requested), true);
+  });
+}
+
+test('transient PR reads retry once; permanent failures do not retry', async () => {
+  for (const status of [503, 403]) {
+    const { job, goal } = await continuedGoal(`goal-read-${status}`);
+    const { ops } = operations(openDraft);
+    let calls = 0;
+    ops.readPullRequest = async () => { if (++calls === 1) throw Object.assign(new Error('remote failure'), { status }); return openDraft; };
+    if (status === 503) await prepareContinuedGoal(job, goal, ops);
+    else await assert.rejects(prepareContinuedGoal(job, goal, ops), /remote failure/);
+    assert.equal(calls, status === 503 ? 2 : 1);
+  }
+});
+
+test('fresh branch continuation tells the provider where preserved work can be recovered', async () => {
+  const { job, goal } = await continuedGoal('goal-preserved-input');
+  await db('goal_inputs').insert({ input_id: 'preserved-input', idempotency_key: 'preserved-input', payload_hash: 'hash', goal_id: goal.goal_id, owner_id: goal.owner_id, kind: 'resume', operation: 'goal.continue', message: 'Continue after failure', state: 'pending' });
+  const { ops } = operations({ ...openDraft, merged: true });
+  await prepareContinuedGoal(job, goal, ops);
+  const input = await db('goal_inputs').where({ input_id: 'preserved-input' }).first();
+  assert.ok(input.message.includes(goal.worktree_path));
+  assert.ok(input.message.includes(goal.branch_name));
+});
+
+test('transient rebuild retries once without changing branch identity', async () => {
+  const { job, goal } = await continuedGoal('goal-rebuild-retry', { worktree_path: '/missing/retry' });
+  let calls = 0;
+  const { ops } = operations(openDraft, async () => {
+    if (++calls === 1) throw Object.assign(new Error('fetch reset'), { code: 'ECONNRESET' });
+    return '/rebuilt/retry';
+  });
+  const prepared = await prepareContinuedGoal(job, goal, ops);
+  assert.equal(calls, 2);
+  assert.equal(prepared.branch_name, goal.branch_name);
+  assert.equal(prepared.worktree_path, '/rebuilt/retry');
+});
+
+test('takeover during a transient repair error prevents retry', async () => {
+  const { job, goal } = await continuedGoal('goal-retry-takeover');
+  const { ops } = operations(openDraft);
+  let calls = 0;
+  ops.readPullRequest = async () => {
+    calls++;
+    await db('goals').where({ goal_id: goal.goal_id }).update({ run_claim: 'replacement' });
+    throw Object.assign(new Error('service unavailable'), { status: 503 });
+  };
+  await assert.rejects(prepareContinuedGoal(job, goal, ops), /lost its attempt claim/);
+  assert.equal(calls, 1);
+});
+
+test('a stale provider cannot acknowledge the replacement attempt re-arm', async () => {
+  const { job, goal } = await continuedGoal('goal-rearm-takeover');
+  await assert.rejects(executePreparedGoal(job, {
+    goal, githubToken: 'token', worktree: { worktreePath: goal.worktree_path, branchName: goal.branch_name }, pendingInput: null,
+    agent: { executeTask: async (options: AgentTaskOptions) => {
+      await db('goals').where({ goal_id: goal.goal_id }).update({ run_claim: 'replacement' });
+      await options.onGoalRearmed?.();
+      throw new Error('should not execute after lost claim');
+    } },
+  } as never), /lost its attempt claim/);
+  assert.equal(Boolean((await db('goals').where({ goal_id: goal.goal_id }).first()).continue_requested), true);
+});

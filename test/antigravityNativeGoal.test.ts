@@ -366,11 +366,13 @@ describe('Antigravity native goal protocol', () => {
         const state = harness();
         const idle = (): ScriptedStep[] => [{ text: 'Working.', result: { status: 'success', response: 'Working.' } }];
         const { segments, start } = scripted([idle(), [completed()]]);
+        let rearmed = 0;
         await runAntigravityGoalProtocol(start, taskOptions(state, {
-            resumeConversationId: 'agy-conversation', continueTerminalGoal: true,
+            resumeConversationId: 'agy-conversation', continueTerminalGoal: true, onGoalRearmed: async () => { rearmed += 1; },
             initialControlInputId: 'input-1', initialControlInputMessage: 'The user reopened this goal.',
         }), COMMAND);
 
+        assert.equal(rearmed, 1);
         // Only a launch keeps slash commands enabled, so the re-arm runs as one on the same conversation.
         assert.deepEqual(segments[0].options, { conversationId: 'agy-conversation', launch: true });
         assert.equal(segments[0].message, `${COMMAND}\n\nThe user reopened this goal.`);

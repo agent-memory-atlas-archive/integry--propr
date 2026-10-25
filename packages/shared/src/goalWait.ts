@@ -42,9 +42,8 @@ export type GoalWaitCondition = typeof GOAL_WAIT_CONDITIONS[number];
 /**
  * - `matched`: the condition (or, without one, a new event) was observed.
  * - `timed_out`: nothing qualifying happened before the deadline; this is not a goal failure.
- * - `unreachable`: no event after the cursor can ever match. The goal is
- *   terminal, and its terminal event either does not satisfy the condition or
- *   is already at or behind the cursor. Retrying with the same cursor is futile.
+ * - `unreachable`: reserved for conditions that cannot ever match. Terminal
+ *   goals can be continued and remain waitable from their terminal cursor.
  */
 export const GOAL_WAIT_OUTCOMES = ['matched', 'timed_out', 'unreachable'] as const;
 export type GoalWaitOutcome = typeof GOAL_WAIT_OUTCOMES[number];

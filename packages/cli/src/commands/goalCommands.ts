@@ -1068,6 +1068,7 @@ Examples:
   goal
     .command("continue <goal-id> [message...]")
     .description("Continue a goal that failed, completed or was cancelled, optionally with more instructions")
+    .option("--model <model>", "Model for the continued run")
     .option("-f, --file <path>", "Read the message from a file")
     .option("--stdin", "Read the message from standard input")
     .option("--idempotency-key <key>", "Reuse a key to retry this exact continuation without starting it twice")
@@ -1087,7 +1088,7 @@ Examples:
   $ propr goal continue <goal-id> --file next-steps.md
 `)
     .action(async (goalId: string, messageArg: string[] | undefined, options: {
-      file?: string; stdin?: boolean; idempotencyKey?: string; json?: boolean;
+      model?: string; file?: string; stdin?: boolean; idempotencyKey?: string; json?: boolean;
     }) => {
       let key: string | undefined;
       try {
@@ -1098,7 +1099,7 @@ Examples:
         } catch (error) {
           throw new GoalUsageError((error as Error).message);
         }
-        const result = await continueGoal(goalId, message, key);
+        const result = await continueGoal(goalId, message, key, {}, options.model);
         if (options.json) {
           printJson({
             kind: "goal-continue",
@@ -1204,7 +1205,7 @@ wait_limit; it is temporary, so re-run the command once another wait ends.
 Exit codes:
   ${GOAL_WAIT_EXIT_CODES.matched}    matched
   ${GOAL_WAIT_EXIT_CODES.timed_out}    timed out (not a goal failure; check the reported state and retry with the printed cursor)
-  ${GOAL_WAIT_EXIT_CODES.unreachable}    unreachable (the goal ended and no event after the cursor can match)
+  ${GOAL_WAIT_EXIT_CODES.unreachable}    unreachable (reserved; finished goals can be continued)
   ${GOAL_WAIT_EXIT_CODES.interrupted}  interrupted (Ctrl-C)
   1    error
 

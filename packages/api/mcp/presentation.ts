@@ -83,7 +83,7 @@ function goalWaitSummary(result: Args): string {
   const condition = result.condition ? ` for ${result.condition}` : ' for a new event';
   const state = result.goal?.lifecycleState;
   if (result.outcome === 'matched') return `Goal wait${condition} matched: ${result.event?.kind === 'checkpoint' ? 'new checkpoint' : result.event?.state ?? state}. Resume with cursor ${result.cursor}.`;
-  if (result.outcome === 'unreachable') return `Goal wait${condition} can no longer match: the goal is ${state} and records no further events after cursor ${result.cursor}. Do not retry with this cursor.`;
+  if (result.outcome === 'unreachable') return `Goal wait${condition} can no longer match: the requested condition cannot be reached after cursor ${result.cursor}. Do not retry with this cursor.`;
   // The projection can be newer than the examined events, so it may already be terminal; never deny that here.
   return `Goal wait${condition} timed out after ${result.timeoutSeconds}s. The timeout itself is not a goal failure; the goal is currently ${state}. Retry with cursor ${result.cursor}.`;
 }

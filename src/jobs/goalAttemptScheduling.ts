@@ -1,3 +1,4 @@
+import { sqliteTimestampMs } from '@propr/shared';
 import { randomUUID } from 'node:crypto';
 import { getEventPublisher, db, getIssueQueue, goalJobId, type GoalJobData } from '@propr/core';
 import type { GoalRow } from './goalAttemptState.js';
@@ -11,7 +12,7 @@ export async function enqueueNextGoalAttempt(
     const generation = current.generation + 1;
     const claimId = randomUUID();
     const completedPauseMs = goal.desired_state === 'paused' && goal.paused_at
-        ? Math.max(0, Date.now() - new Date(goal.paused_at).getTime())
+        ? Math.max(0, Date.now() - sqliteTimestampMs(goal.paused_at))
         : 0;
     const changed = await db('goals').where({
         goal_id: current.goalId,

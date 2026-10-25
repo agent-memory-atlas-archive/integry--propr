@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+    db,
     createWorktreeFromExistingBranch,
     cleanupWorktree,
     ensureGitRepository,
@@ -10,7 +11,7 @@ import {
     logger,
     type GoalJobData,
 } from '@propr/core';
-import { fencedGoal, fencedGoalUpdate, type GoalRow } from './goalAttemptState.js';
+import { fencedGoal, type GoalRow } from './goalAttemptState.js';
 
 export interface GoalPullRequestState {
     state: string;
@@ -64,24 +65,36 @@ export async function prepareContinuedGoal(
     const assertCurrent = async () => {
         if (!await fencedGoal(job)) throw new Error('Continued goal preparation lost its attempt claim');
     };
+    // Retry only transient transport/server failures, once, with authority
+    // rechecked before retrying any external operation.
+    const retry = async <T>(operation: () => Promise<T>): Promise<T> => {
+        try { return await operation(); } catch (error) {
+            const detail = error as { status?: number; code?: string; message?: string };
+            if (!(Number(detail.status) >= 500 || ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN'].includes(detail.code ?? '')
+                || /connection reset|fetch failed|socket hang up|timed out/i.test(detail.message ?? ''))) throw error;
+            await assertCurrent();
+            return operation();
+        }
+    };
     const updates: Record<string, unknown> = {};
+    let preservedCheckout: string | undefined;
     if (goal.final_pr_number) {
-        const pull = await operations.readPullRequest(goal.repository, goal.final_pr_number);
+        const pull = await retry(() => operations.readPullRequest(goal.repository, goal.final_pr_number!));
         if (pull?.merged) {
             Object.assign(updates, FRESH_BRANCH);
         } else if (!pull || pull.state !== 'open') {
             Object.assign(updates, { final_pr_number: null, final_pr_url: null });
         } else if (!pull.draft) {
             await assertCurrent();
-            await operations.convertToDraft(pull.nodeId, assertCurrent);
+            await retry(() => operations.convertToDraft(pull.nodeId, assertCurrent));
         }
     }
     await assertCurrent();
     const keepsBranch = !('branch_name' in updates);
     if (keepsBranch && hasSavedWorktree(goal) && !isDirectory(goal.worktree_path)) {
-        const rebuilt = await operations.rebuildWorktree({
+        const rebuilt = await retry(() => operations.rebuildWorktree({
             ...goal, worktree_path: goal.worktree_path, branch_name: goal.branch_name,
-        }, assertCurrent);
+        }, assertCurrent));
         if (rebuilt === null) Object.assign(updates, FRESH_BRANCH);
         else if (rebuilt !== goal.worktree_path) updates.worktree_path = rebuilt;
     }
@@ -89,12 +102,30 @@ export async function prepareContinuedGoal(
         // Recheck authority after remote reads, before mutating the saved checkout.
         await assertCurrent();
         await operations.cleanupWorktree({ ...goal, worktree_path: goal.worktree_path, branch_name: goal.branch_name }, assertCurrent);
+        preservedCheckout = `ProPR preserved the previous checkout at ${JSON.stringify(goal.worktree_path)} (previous branch ${JSON.stringify(goal.branch_name)}). Inspect it for uncommitted or unpublished work worth recovering onto the fresh branch.`;
     }
     if (Object.keys(updates).length === 0) return goal;
-    if (!await fencedGoalUpdate(job, updates)) throw new Error('Continued goal preparation lost its attempt claim');
+    await db.transaction(async trx => {
+        const changed = await trx('goals').where({
+            goal_id: job.goalId, current_task_id: job.taskId, run_generation: job.generation, run_claim: job.claimId,
+        }).whereNull('result_state').update(updates);
+        if (changed !== 1) throw new Error('Continued goal preparation lost its attempt claim');
+        if (preservedCheckout) {
+            const input = await trx('goal_inputs').where({ goal_id: job.goalId, operation: 'goal.continue', state: 'pending' })
+                .orderBy('sequence', 'desc').first('input_id', 'message');
+            if (input) await trx('goal_inputs').where({ input_id: input.input_id }).update({ message: `${input.message}\n\n${preservedCheckout}` });
+        }
+    });
     const updated = await fencedGoal(job);
     if (!updated) throw new Error('Continued goal preparation lost its attempt claim');
     return updated;
+}
+
+/** Recovery rotates attempt generations, but the accepted continuation stays the same. */
+export async function continuedGoalBootstrapId(goal: GoalRow): Promise<string> {
+    const input = await db('goal_inputs').where({ goal_id: goal.goal_id, owner_id: goal.owner_id, operation: 'goal.continue' })
+        .orderBy('sequence', 'desc').first('input_id');
+    return `goal-bootstrap:${goal.goal_id}:${input?.input_id ?? goal.run_generation}`;
 }
 
 const defaultContinuationOperations: GoalContinuationOperations = {

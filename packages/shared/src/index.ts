@@ -583,3 +583,5 @@ export * from './instanceStorage.js';
 export * from './fleetData.js';
 
 export * from './extensionProfiles.js';
+
+export { sqliteTimestampMs } from './sqliteTimestamp.js';

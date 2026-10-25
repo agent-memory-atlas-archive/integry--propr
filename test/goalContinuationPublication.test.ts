@@ -74,7 +74,7 @@ await mock.module('@propr/core', { namedExports: {
   prepareVisualPreviewEvidence: async () => ({ evidence: { assets: [], toolSuggestions: [] } }),
   cleanupPreparedVisualPreviewEvidence: async () => {},
 } });
-const { prepareContinuedGoal } = await import('../src/jobs/goalContinuation.js');
+const { continuedGoalBootstrapId, prepareContinuedGoal } = await import('../src/jobs/goalContinuation.js');
 const { ensureGoalWorktree, executePreparedGoal } = await import('../src/jobs/processGoalJob.js');
 const { publishDirectGoalCheckpoint } = await import('../src/jobs/goalCheckpointPublisher.js');
 const { db } = core;
@@ -149,7 +149,9 @@ for (const state of ['merged', 'closed', 'deleted'] as const) {
       assert.equal(git(worktree.worktreePath, 'rev-parse', 'HEAD'), git(repo, 'rev-parse', 'origin/main'));
       assert.equal(fs.existsSync(path.join(worktree.worktreePath, oldFile)), state === 'merged');
     }
-    const checkpointId = `continued-${id}`;
+    await db('goal_inputs').insert({ input_id: `continuation-${id}`, idempotency_key: `continue-${id}`, payload_hash: 'hash', goal_id: id, owner_id: goal.owner_id, operation: 'goal.continue', kind: 'resume', message: 'Continue', state: 'pending' });
+    const checkpointId = await continuedGoalBootstrapId(goal);
+    assert.equal(await continuedGoalBootstrapId({ ...goal, run_generation: goal.run_generation + 1 }), checkpointId, 'recovery keeps the accepted continuation bootstrap identity');
     const publication = await publishDirectGoalCheckpoint(job, { kind: 'bootstrap', checkpointId });
     assert.equal(publication.rejected, undefined);
     assert.equal(createdHead, worktree.branchName);

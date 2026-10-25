@@ -248,6 +248,8 @@ class AntigravityGoalProtocol {
         const turnId = `${this.conversationId ?? 'antigravity'}:${this.turn}`;
         // The CLI reports its conversation only after accepting the prompt.
         if (segment.conversationId) {
+            if (segment.protocolError) throw new Error(segment.protocolError);
+            if (launch && this.options.continueTerminalGoal) await this.options.onGoalRearmed?.();
             for (const inputId of message.inputIds) {
                 if (segment.protocolError) throw new Error(segment.protocolError);
                 await this.control.markInputDelivered(inputId, turnId);

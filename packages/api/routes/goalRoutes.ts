@@ -39,6 +39,7 @@ import {
   isGoalWaitCondition,
   normalizeGoalWaitTimeoutSeconds,
   validateGoalCreationOptions,
+  sqliteTimestampMs,
 } from '@propr/shared';
 import { timeApiStage } from '../apiPerformanceTiming.js';
 import { stopTaskExecution, type StopTaskExecutionResult } from './dockerRoutes.js';
@@ -1177,20 +1178,31 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
     }
     const message = typeof body.message === 'string' ? body.message.trim() : '';
     if (message.length > 65_536) return void res.status(400).json({ error: 'Message is too long' });
+    const model = body.model;
     const operation = 'goal.continue';
     const attachmentIdentity = await identifyUploads(files);
     const payloadHash = mutationHash(operation, {
       goalId: row.goal_id,
       message,
+      ...(model !== undefined ? { model } : {}),
       ...(attachmentIdentity.length > 0 ? { attachments: attachmentIdentity } : {}),
     });
     try {
       if (await existingMutation(deps.db, row, key, operation, payloadHash)) {
-        return void res.json({ goal: await serializeGoal(deps.db, deps.redisClient, row) });
+        const current = await deps.db<GoalRow>('goals').where({ goal_id: row.goal_id, owner_id: row.owner_id }).first();
+        return void res.json({ goal: await serializeGoal(deps.db, deps.redisClient, current!) });
       }
     } catch (error) {
       if (error instanceof IdempotencyConflictError) return void res.status(409).json({ error: error.message });
       throw error;
+    }
+    if (model !== undefined) {
+      const registry = AgentRegistry.getInstance();
+      await registry.ensureInitialized();
+      const agent = registry.getAgentById(row.agent_id);
+      if (typeof model !== 'string' || !agent || (!agent.config.supportedModels.includes(model) && agent.config.defaultModel !== model)) {
+        return void res.status(400).json({ error: 'Unsupported model' });
+      }
     }
     if (!row.result_state) {
       return void res.status(409).json({
@@ -1198,6 +1210,9 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
           ? 'Goal is still being cancelled; continue it once the cancellation finishes'
           : 'Goal is still active; send it input or resume it instead',
       });
+    }
+    if (!row.task_reconciled_at) {
+      return void res.status(409).json({ error: 'Goal is still finalizing; try continuing again shortly' });
     }
     const previousResult = row.result_state;
     let attachments: GoalAttachment[] = await storeAttachments(files, row.goal_id);
@@ -1212,7 +1227,7 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
     const generation = row.run_generation + 1;
     const claimId = randomUUID();
     // Time spent stopped is not goal activity.
-    const stoppedMs = row.completed_at ? Math.max(0, Date.now() - new Date(row.completed_at).getTime()) : 0;
+    const stoppedMs = row.completed_at ? Math.max(0, Date.now() - sqliteTimestampMs(row.completed_at)) : 0;
     let reopened = false;
     try {
       await deps.db.transaction(async trx => {
@@ -1226,6 +1241,7 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
           pause_confirmed_at: null, paused_at: null, resume_requested: false,
           paused_ms: Number(row.paused_ms || 0) + stoppedMs,
           continue_requested: true,
+          ...(model !== undefined ? { requested_model: model } : {}),
           control_generation: trx.raw('control_generation + 1'),
           updated_at: trx.fn.now(),
         });
@@ -1256,14 +1272,28 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
     } catch (error) {
       await deleteGoalAttachments(attachments);
       attachments = [];
-      if (await existingMutation(deps.db, row, key, operation, payloadHash).catch(() => null)) {
-        const current = await deps.db<GoalRow>('goals').where({ goal_id: row.goal_id }).first();
-        return void res.json({ goal: await serializeGoal(deps.db, deps.redisClient, current!) });
+      try {
+        if (await existingMutation(deps.db, row, key, operation, payloadHash)) {
+          const current = await deps.db<GoalRow>('goals').where({ goal_id: row.goal_id, owner_id: row.owner_id }).first();
+          return void res.json({ goal: await serializeGoal(deps.db, deps.redisClient, current!) });
+        }
+      } catch (replayError) {
+        if (replayError instanceof IdempotencyConflictError) return void res.status(409).json({ error: replayError.message });
+        throw replayError;
       }
       throw error;
     }
     if (!reopened) {
       await deleteGoalAttachments(attachments);
+      try {
+        if (await existingMutation(deps.db, row, key, operation, payloadHash)) {
+          const current = await deps.db<GoalRow>('goals').where({ goal_id: row.goal_id, owner_id: row.owner_id }).first();
+          return void res.json({ goal: await serializeGoal(deps.db, deps.redisClient, current!) });
+        }
+      } catch (error) {
+        if (error instanceof IdempotencyConflictError) return void res.status(409).json({ error: error.message });
+        throw error;
+      }
       return void res.status(409).json({ error: 'Goal changed while it was being continued; reload it and try again' });
     }
     await deps.redisClient.del(`worker:abort:${row.current_task_id}`);
@@ -1289,7 +1319,7 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
       logger.warn({ error: (error as Error).message }, 'Could not continue goal');
       if (!res.headersSent) {
         const message = (error as Error).message || 'Could not continue goal';
-        const status = /not supported|unsupported|outside|invalid|file/i.test(message) ? 400 : 500;
+        const status = /^(?:Binary files are not supported\.|Unsupported file type:|Invalid attachment filename$|Temporary upload path is outside the configured upload directory$)/i.test(message) ? 400 : 500;
         res.status(status).json({ error: message });
       }
     } finally {

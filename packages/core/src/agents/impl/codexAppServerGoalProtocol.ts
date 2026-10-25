@@ -252,11 +252,19 @@ async function observeNativeGoal(
             await applyNativeGoalStop(connection, { threadId, desiredState, objective });
             return { status: 'interrupted', error: 'Goal stopped at a provider turn boundary' };
         }
+        if (completedDuringCheckpoint && initialInput.pending && options.initialControlInputId) {
+            return { status: 'failed', error: 'Codex completed before the continuation input could be delivered' };
+        }
         if (completedDuringCheckpoint) return completion;
         const goal = checkpointFeedback
             ? { status: 'active' }
             : nativeGoalSnapshot(await connection.request('thread/goal/get', { threadId }));
-        if (goal.status === 'complete') return completion;
+        if (goal.status === 'complete') {
+            if (initialInput.pending && options.initialControlInputId) {
+                return { status: 'failed', error: 'Codex completed before the continuation input could be delivered' };
+            }
+            return completion;
+        }
         if (goal.status !== 'active') {
             return { status: 'failed', error: `Codex native goal entered ${goal.status} status` };
         }
@@ -279,7 +287,8 @@ async function rearmContinuedGoal(connection: AppServerConnection, threadId: str
     if (typeof current.objective === 'string' && current.objective !== objective) {
         throw new Error('Persisted Codex thread belongs to a different native goal objective');
     }
-    if (current.status === 'active') return;
+    // Setting active also starts an idle native goal; a previous failed steer
+    // can leave the goal active with no running turn.
     await connection.request('thread/goal/set', { threadId, objective, status: 'active' });
 }
 
@@ -292,6 +301,7 @@ export async function runGoalProtocol(
     const thread = await openGoalThread(connection, options, model);
     if (options.resumeSessionId && options.continueTerminalGoal) {
         await rearmContinuedGoal(connection, thread.id, nativeGoalObjective(options));
+        await options.onGoalRearmed?.();
     } else if (options.resumeSessionId) {
         const recoveredGoal = nativeGoalSnapshot(await connection.request('thread/goal/get', { threadId: thread.id }));
         if (recoveredGoal.objective !== nativeGoalObjective(options)) {
@@ -344,6 +354,7 @@ export async function runGoalProtocol(
             objective: nativeGoalObjective(options),
             status: 'active',
         });
+        if (options.continueTerminalGoal) await options.onGoalRearmed?.();
     }
     const effectiveModel = thread.model;
     // Applying/resuming an active external goal calls continue_if_idle() in the

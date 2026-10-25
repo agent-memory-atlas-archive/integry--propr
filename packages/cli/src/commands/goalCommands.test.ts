@@ -754,6 +754,12 @@ for (const message of [[], ['Fix', 'the', 'tests']]) {
   });
 }
 
+test('goal continue sends the selected model in the same request', async () => {
+  const result = await run(['continue', 'goal-1', '--model', 'gpt-5.6-luna', '--idempotency-key', 'continue-model'], () => ({ body: { goal: goalFixture() } }));
+  assert.equal(result.exitCode, undefined);
+  assert.deepEqual(result.requests[0].body, { model: 'gpt-5.6-luna' });
+});
+
 test('goal continue reads instructions from a file or stdin', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'goal-continue-'));
   try {

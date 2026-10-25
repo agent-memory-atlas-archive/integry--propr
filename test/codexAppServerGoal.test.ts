@@ -202,7 +202,7 @@ describe('pinned Codex 0.146 native external-goal activation', () => {
     assert.equal(connection.requests.some(request => request.method === 'turn/start' || request.method === 'turn/steer'), false);
   });
 
-  for (const status of ['complete', 'cleared', 'budgetLimited']) {
+  for (const status of ['complete', 'cleared', 'budgetLimited', 'active']) {
     test(`continuing a goal whose Codex thread is ${status} re-arms it and delivers the continuation`, async () => {
       const state = controls();
       const connection = new FakeConnection(true, 'before', false, status);
@@ -217,6 +217,33 @@ describe('pinned Codex 0.146 native external-goal activation', () => {
       assert.deepEqual(state.delivered, ['input-1']);
       const activation = connection.requests.find(request => request.method === 'thread/goal/set');
       assert.deepEqual(activation?.params, { threadId: 'thread-1', objective: '/goal Ship it', status: 'active' });
+    });
+  }
+
+  test('continuing an active but idle thread starts and observes a turn', async () => {
+    const state = controls();
+    const connection = new FakeConnection(true, 'before', false, 'active');
+    const request = connection.request.bind(connection);
+    connection.request = async (method, params, timeout) => {
+      const result = await request(method, params, timeout);
+      if (method === 'thread/resume') connection.started = [];
+      return result;
+    };
+    const result = await runGoalProtocol(connection as never, { ...options(state.control, true, true), continueTerminalGoal: true }, 'gpt-5.6');
+    assert.equal(result.completion?.status, 'completed');
+    assert.deepEqual(state.delivered, ['input-1']);
+  });
+
+  for (const checkpoint of [false, true]) {
+    test(`completion with undelivered continuation fails visibly (checkpoint: ${checkpoint})`, async () => {
+      const state = controls();
+      const connection = new FakeConnection(true, 'before', false, 'complete');
+      connection.steerRejections.push(new Error('no active turn to steer').message);
+      if (checkpoint) connection.declareCheckpoint({ kind: 'checkpoint', commitMessage: 'checkpoint', include: ['.'] });
+      const result = await runGoalProtocol(connection as never, { ...options(state.control, true, true), continueTerminalGoal: true }, 'gpt-5.6');
+      assert.equal(result.completion?.status, 'failed');
+      assert.match(result.completion?.error ?? '', /before the continuation input could be delivered/);
+      assert.deepEqual(state.delivered, []);
     });
   }
 

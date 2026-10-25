@@ -108,6 +108,8 @@ export interface AgentTaskOptions {
     retryReason?: string;
 
     // Callbacks
+    /** Confirmed provider re-arm; releases the durable continuation obligation. */
+    onGoalRearmed?: () => void | Promise<void>;
     onSessionId?: (sessionId: string, conversationId?: string) => void | Promise<void>;
     onContainerId?: (containerId: string, containerName: string) => void;
 

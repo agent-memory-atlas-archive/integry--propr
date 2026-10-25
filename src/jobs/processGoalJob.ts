@@ -1,5 +1,4 @@
 /* eslint-disable max-lines -- native goal execution and its fenced result reconciliation share one worker boundary */
-import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import type { Job } from 'bullmq';
 import {
@@ -45,7 +44,7 @@ import {
     type GoalRow,
 } from './goalAttemptState.js';
 import { enqueueNextGoalAttempt } from './goalAttemptScheduling.js';
-import { prepareContinuedGoal } from './goalContinuation.js';
+import { continuedGoalBootstrapId, prepareContinuedGoal } from './goalContinuation.js';
 import {
     publishDirectGoalCheckpoint,
     rejectDirectGoalCheckpoint,
@@ -344,7 +343,7 @@ async function prepareClaimedGoalAttempt(data: GoalJobData, claimed: GoalRow): P
         // goal lost, so its new draft PR is published under a fresh checkpoint.
         await publishDirectGoalCheckpoint(data, {
             kind: 'bootstrap',
-            ...(boundaryGoal.continue_requested ? { checkpointId: randomUUID() } : {}),
+            ...(boundaryGoal.continue_requested ? { checkpointId: await continuedGoalBootstrapId(boundaryGoal) } : {}),
         });
         boundaryGoal = await fencedGoal(data);
         if (!boundaryGoal) return { ready: false, result: { status: 'skipped', reason: 'goal_bootstrap_fence' } };
@@ -398,6 +397,11 @@ async function runPreparedGoal(data: GoalJobData, prepared: PreparedGoalAttempt)
             continueTerminalGoal: Boolean(goal.continue_requested),
             goalControl: control,
             environment: buildGoalPolicyEnvironment(goal.launch_strategy),
+            onGoalRearmed: async () => {
+                if (goal.continue_requested && !await fencedGoalUpdate(data, { continue_requested: false })) {
+                    throw new Error('Continued goal re-arm lost its attempt claim');
+                }
+            },
             onSessionId: async (sessionId, conversationId) => {
                 await saveSessionAndTaskState({
                     job: data, goal, sessionId, conversationId,
@@ -436,11 +440,7 @@ async function runPreparedGoal(data: GoalJobData, prepared: PreparedGoalAttempt)
 
 export async function executePreparedGoal(data: GoalJobData, prepared: PreparedGoalAttempt): Promise<AgentExecutionResult> {
     try {
-        const result = await runPreparedGoal(data, prepared);
-        // The provider ran with the continuation, so its native goal is armed
-        // again; later attempts of this run resume it normally.
-        if (prepared.goal.continue_requested) await fencedGoalUpdate(data, { continue_requested: false });
-        return result;
+        return await runPreparedGoal(data, prepared);
     } finally {
         // The provider process is gone, so no question or approval it raised is still waiting.
         await closeAttemptBlockers(data).catch(error => logger.warn(

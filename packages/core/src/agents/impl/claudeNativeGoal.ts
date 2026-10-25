@@ -51,6 +51,8 @@ export interface ClaudeGoalState {
     reason?: string;
     iterations: number;
     setAt?: number;
+    /** Number of accepted set sentinels in the saved transcript. */
+    setCount?: number;
 }
 
 interface GoalStatusAttachment {
@@ -92,6 +94,7 @@ export function readClaudeGoalState(transcript: string, condition: string): Clau
                 state.status = 'cleared';
             } else {
                 state.status = 'active';
+                state.setCount = (state.setCount ?? 0) + 1;
                 state.iterations = 0;
                 const setAt = record.timestamp ? Date.parse(record.timestamp) : NaN;
                 if (!Number.isNaN(setAt)) state.setAt = setAt;
@@ -369,6 +372,8 @@ function checkpointFeedback(outcome: GoalCheckpointOutcome): string {
 
 class ClaudeGoalProtocol {
     private turn = 0;
+    private priorSetCount = 0;
+    private rearmAcknowledged = false;
     private readonly control: GoalExecutionControl;
 
     constructor(
@@ -377,6 +382,12 @@ class ClaudeGoalProtocol {
         private readonly context: ClaudeGoalContext,
     ) {
         this.control = options.goalControl!;
+    }
+
+    private async acknowledgeRearm(): Promise<void> {
+        if (!this.options.continueTerminalGoal || this.rearmAcknowledged) return;
+        await this.options.onGoalRearmed?.();
+        this.rearmAcknowledged = true;
     }
 
     private nextTurnId(): string {
@@ -562,6 +573,7 @@ class ClaudeGoalProtocol {
         const verdict = await this.recordedVerdict(state);
         if (verdict) return verdict;
         if (state.status === 'active') {
+            await this.acknowledgeRearm();
             return { messages: pending.length ? pending : [{ text: GOAL_CONTINUE_INPUT }] };
         }
         // A fresh session receives its launch context before the goal exists,
@@ -600,6 +612,7 @@ class ClaudeGoalProtocol {
         feedback: string | undefined,
     ): Promise<ClaudeGoalCompletion | { next: string; nudge: boolean }> {
         const state = await this.goalState();
+        if ((state.setCount ?? 0) > this.priorSetCount) await this.acknowledgeRearm();
         // Completion requires Claude's recorded verdict; a successful turn
         // end alone can still leave the goal unmet.
         if (state.status === 'unknown') {
@@ -625,6 +638,7 @@ class ClaudeGoalProtocol {
                 error: `Claude cleared the native goal before it was met${result.text ? `: ${result.text}` : ''}`,
             };
         }
+        await this.acknowledgeRearm();
         this.recordGoal('active', state);
         if (feedback) return { next: feedback, nudge: false };
         if (result.isError && !stopRequested) {
@@ -635,6 +649,7 @@ class ClaudeGoalProtocol {
 
     async run(): Promise<ClaudeGoalCompletion> {
         const initialState = await this.goalState();
+        this.priorSetCount = initialState.setCount ?? 0;
         // A restored session stopped before observation still clears an active goal on cancel.
         const stopRequested = await this.requestedStop();
         if (stopRequested) return this.stop(stopRequested, initialState);

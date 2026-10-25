@@ -799,6 +799,7 @@ function GoalDetails({ goalId }: { goalId: string }) {
   const { isDemoMode } = useDemoMode();
   const [goal, setGoal] = useState<Goal | null>(null);
   const [message, setMessage] = useState('');
+  const [continuationModel, setContinuationModel] = useState<{ goalId: string; model: string } | undefined>();
   const correctionRef = useRef<HTMLTextAreaElement>(null);
   const [files, setFiles] = useState<File[]>([]);
   const [models, setModels] = useState<string[]>([]);
@@ -896,7 +897,7 @@ function GoalDetails({ goalId }: { goalId: string }) {
     if (!goal || isDemoMode) return;
     setBusy(true); setError(null);
     try {
-      const body = message.trim() ? { message: message.trim() } : {};
+      const body = { ...(message.trim() ? { message: message.trim() } : {}), ...(continuationModel?.goalId === goal.id ? { model: continuationModel.model } : {}) };
       const result = files.length > 0 ? await continueGoal(goal.id, body, files) : await continueGoal(goal.id, body);
       setGoal(result.goal); setMessage(''); setFiles([]);
     } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
@@ -1149,9 +1150,9 @@ function GoalDetails({ goalId }: { goalId: string }) {
         {/* A cancelling goal gets no footer bar: the locked state is already stated beside the status badge.
             A finished goal keeps the composer, which then continues the goal instead of correcting it. */}
         {(canMutate || canContinue) && <section aria-labelledby="correction-heading" className={`${railInset} sticky bottom-0 mt-auto bg-slate-50 pb-1 pt-10`}>
-          {canMutate && <div className="mb-2 flex flex-col items-end gap-1">
+          {(canMutate || canContinue) && <div className="mb-2 flex flex-col items-end gap-1">
             <label htmlFor="goal-continuation-model" className="text-xs text-slate-500">Model for next continuation</label>
-            <select id="goal-continuation-model" value={goal.requestedModel} onChange={event => act(() => requestGoalModel(goal.id, event.target.value))} className="max-w-48 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-700 shadow-sm">{models.map(item => <option key={item} value={item}>{getModelDisplayName(item)}</option>)}</select>
+            <select id="goal-continuation-model" value={canContinue && continuationModel?.goalId === goal.id ? continuationModel.model : goal.requestedModel} onChange={event => canContinue ? setContinuationModel({ goalId: goal.id, model: event.target.value }) : act(() => requestGoalModel(goal.id, event.target.value))} className="max-w-48 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-700 shadow-sm">{models.map(item => <option key={item} value={item}>{getModelDisplayName(item)}</option>)}</select>
           </div>}
           <div className="bg-white p-2 shadow-md ring-1 ring-slate-200/70">
             <h2 id="correction-heading" className="sr-only">{canContinue ? 'Continue this goal' : 'Send a correction'}</h2>

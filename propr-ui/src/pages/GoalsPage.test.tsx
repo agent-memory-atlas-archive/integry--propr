@@ -1190,7 +1190,7 @@ describe('GoalsPage', () => {
     // The locked state reads beside the status badge instead of occupying a sticky footer bar.
     expect(within(title.parentElement!).getByText('Goal completed. Continue it to add more work.')).toBeInTheDocument();
     expect(screen.queryByLabelText('Correction or follow-up')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('Model for next continuation')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Model for next continuation')).toBeInTheDocument();
   });
 
   it('prints the metrics rail straight onto the console canvas and parks artifacts beside it', async () => {
@@ -1292,9 +1292,12 @@ describe('GoalsPage', () => {
     expect(await screen.findByText('Goal failed. Continue it to try again.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Instructions for the continued goal'), { target: { value: '  Now add the VIN decoder pages.  ' } });
+    const model = await screen.findByLabelText('Model for next continuation');
+    await waitFor(() => expect(within(model).getByRole('option', { name: /Luna/ })).toBeInTheDocument());
+    fireEvent.change(model, { target: { value: 'gpt-5.6-luna' } });
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
 
-    await waitFor(() => expect(goalsApi.continueGoal).toHaveBeenCalledWith('goal-1', { message: 'Now add the VIN decoder pages.' }));
+    await waitFor(() => expect(goalsApi.continueGoal).toHaveBeenCalledWith('goal-1', { message: 'Now add the VIN decoder pages.', model: 'gpt-5.6-luna' }));
     expect(await screen.findByRole('button', { name: 'Pause' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Continue goal' })).not.toBeInTheDocument();
   });
