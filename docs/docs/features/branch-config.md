@@ -1,3 +1,8 @@
+---
+sidebar_label: "Branch Configuration"
+title: "Configure base branches for plans and tasks"
+description: "Choose base branches in Planner Studio, route labeled issues, and understand repository defaults and environment overrides."
+---
 # Branch Configuration
 
 Branch configuration tells ProPR which branch to plan from or implement against.
@@ -71,3 +76,8 @@ Check:
 - The branch exists on the remote — a configured branch that does not exist is skipped and detection falls through to the GitHub API.
 - The run has no explicit base branch. Labeled issues without a `base-<branch>` label use GitHub's default branch directly and consult the override only when that branch is missing on the remote.
 - The relevant containers were restarted after `.env` changed.
+
+## Next steps
+
+- [Planner Studio Walkthrough](/docs/tutorials/planner-studio)
+- [Launching Work](/docs/features/launching-work)

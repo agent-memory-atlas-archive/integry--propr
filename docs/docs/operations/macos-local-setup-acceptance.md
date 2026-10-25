@@ -1,3 +1,8 @@
+---
+sidebar_label: "Native macOS local setup acceptance"
+title: "Validate native macOS desktop local setup"
+description: "Follow macOS local setup acceptance requirements, provisioning evidence, and the remaining native lifecycle and sign-in checks."
+---
 # Native macOS local setup acceptance
 
 Issue #2969 changes the production wizard and shared host, not a Mac-only replica. Issue #2968 owns the common

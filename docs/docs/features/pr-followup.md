@@ -1,6 +1,8 @@
 ---
 sidebar_position: 6
-title: PR Follow-up
+sidebar_label: "PR Follow-up"
+title: "Refine pull requests with comments and AI review"
+description: "Continue work on a pull request with GitHub comments, AI reviews, fixes, model switches, and branch conflict resolution."
 ---
 
 # PR Follow-up
@@ -275,3 +277,8 @@ A failure of a listed check:
 GitHub still shows the check and its result. Unlisted checks keep blocking, and if the repository configuration cannot be read, every check blocks.
 
 {/* VIDEO PLACEHOLDER: Record a 45-second clip: post a natural follow-up comment on a ProPR-created PR, show the task appearing in the Web UI task list, then return to the PR to show the new commit and the completion comment. Show the completion comment's expandable slash-command block as the key moment. */}
+
+## Next steps
+
+- [PR Comment Commands](/docs/features/pr-commands)
+- [Visual Previews](/docs/features/visual-previews)

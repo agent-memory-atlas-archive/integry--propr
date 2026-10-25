@@ -1,3 +1,8 @@
+---
+sidebar_label: "Run ProPR From Your Chat Assistant"
+title: "Run tasks and PR workflows from chat with MCP"
+description: "Connect an authorized chat assistant to inspect work, launch tasks, and act on pull requests through ProPR MCP."
+---
 # Run ProPR From Your Chat Assistant
 
 Connect a chat assistant to ProPR through MCP to inspect running work, start tasks, and act on pull requests without leaving the conversation.
@@ -16,3 +21,8 @@ MCP must be enabled and configured on the instance first. Client support varies,
 - Ask what you started in the last hour and whether it finished, or ask how a ProPR feature or setting works.
 
 Use [the MCP access log](./web-ui.md#mcp-access-log) to inspect the assistant's calls. Manage or revoke direct instance connections at `/mcp/apps` on your instance.
+
+## Next steps
+
+- [Launching Work](/docs/features/launching-work)
+- [MCP Connections and Operator Tools](/docs/features/mcp)

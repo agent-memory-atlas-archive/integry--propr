@@ -1,5 +1,8 @@
 ---
 sidebar_position: 7
+sidebar_label: "Issue To Pull Request Walkthrough"
+title: "Issue to pull request walkthrough"
+description: "Turn a GitHub issue into a ProPR pull request, follow the agent run, review the result, and request follow-up changes."
 ---
 
 # Issue To Pull Request Walkthrough
@@ -75,8 +78,8 @@ If the run fails:
 5. Add clearer PR or issue instructions if needed.
 6. Re-run with a smaller scope or different model.
 
-Related pages:
+## Next steps
 
-- [Daily Use](./usage.md)
-- [Observability And Control](../features/observability.md)
-- [Work Splitting](../features/work-splitting.md)
+- [PR Comment Commands](/docs/features/pr-commands)
+- [Observability And Control](/docs/features/observability)
+- [Work Splitting](/docs/features/work-splitting)

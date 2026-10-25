@@ -1,3 +1,8 @@
+---
+sidebar_label: "Linux desktop release key"
+title: "Verify the Linux desktop release signing key"
+description: "Find the current ProPR Desktop Linux signing identity, download its public key, and review rotation and compromise procedures."
+---
 # Linux desktop release key
 
 The current owner-provisioned Linux desktop release identity, effective for new

@@ -1,6 +1,11 @@
 ---
-title: Automations
+sidebar_label: "Automations"
+title: "Schedule automations and recurring agent reports"
+description: "Create reusable automations that run on demand or on a schedule to investigate repositories and produce reports."
 ---
+
+# Automations
+
 
 An **Automation** is a saved, reusable definition that runs on demand or on a schedule and produces a free-form report. Use one for recurring investigation: a weekly dependency review, a daily triage of new issues, a check of a competitor's changelog, a summary of what merged last week. Use a [task](./launching-work.md) for a single change and a [goal](./goals.md) for a continuing objective.
 
@@ -346,3 +351,8 @@ Legacy stored operation receipts keep their original field names throughout
 this migration.
 
 Instance administrators can also manage reusable [agent extension profiles](./agent-extensions.md) for selected Claude and Codex task runs, with explicitly authorized MCP tools and immutable skill bundles.
+
+## Next steps
+
+- [Instance agent extensions](/docs/features/agent-extensions)
+- [Run ProPR From Your Chat Assistant](/docs/features/mcp-chat)

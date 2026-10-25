@@ -1,5 +1,7 @@
 ---
-title: Repository workflow file
+sidebar_label: "Repository workflow file"
+title: "Configure repository workflow policy and hooks"
+description: "Version repository instructions, setup hooks, validation commands, and auto-merge policy in .propr/workflow.yml."
 ---
 
 Version repository policy in the optional `.propr/workflow.yml`. ProPR reads it for each issue implementation and PR follow-up (including fixes), without restarting workers. `propr init` and `propr init repo` scaffold a commented example without overwriting existing files.
@@ -135,3 +137,8 @@ Repository policy can refine instance configuration but cannot grant permissions
 The generated container wrapper (all hooks and validation commands after shell quoting, including wrapper overhead) must fit within 120 KiB of UTF-8 text. This is checked when preparing the workflow, before agent execution. If it exceeds the limit, move long commands into repository scripts and invoke those scripts from the workflow. The 128 KiB source-file limit still applies independently.
 
 This reference covers issue implementations and PR follow-ups. Planning, reviews, imports and long-running Goals retain their existing policies, except that reviews also honor `limits.max_cost_usd`. Effective configuration is recorded per task; the Settings UI and MCP do not yet provide a merged per-branch editor.
+
+## Next steps
+
+- [Isolated And Safe Execution](/docs/features/execution-safety)
+- [Troubleshooting](/docs/operations/troubleshooting)

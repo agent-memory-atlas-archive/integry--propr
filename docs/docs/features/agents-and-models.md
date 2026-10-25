@@ -1,5 +1,8 @@
 ---
 sidebar_position: 5
+sidebar_label: "Agents and Models"
+title: "Choose coding agents and models for each task"
+description: "Configure supported coding agents, credentials, model labels, and per-phase routing for planning, implementation, and review."
 ---
 
 # Agents and Models
@@ -199,3 +202,8 @@ Planning, implementation, review, and follow-ups can each use a different agent 
 - Planner models are settings keys: `planner_context_model`, `planner_generation_model`, and `analysis_model_fast` (see `propr setting get`).
 - Reviews use the configured `pr_review_model` unless a model is named in the `/review` command.
 - Per-task overrides: issue labels, `propr issue implement -a <agent> -m <model>`, `/switch`, and `/use`.
+
+## Next steps
+
+- [ProPR CLI](/docs/features/propr-cli)
+- [Issue To Pull Request Walkthrough](/docs/tutorials/end-to-end-workflow)

@@ -1,3 +1,8 @@
+---
+sidebar_label: "Linux package authentication"
+title: "Authenticate Linux desktop DEB and RPM packages"
+description: "Verify signed ProPR Desktop Linux packages and review signing identity, release checks, and installed RPM acceptance requirements."
+---
 # Linux package authentication
 
 New public Linux previews authenticate **both DEB and RPM packages, on x64 and

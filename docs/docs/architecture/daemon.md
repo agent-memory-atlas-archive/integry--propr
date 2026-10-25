@@ -1,5 +1,8 @@
 ---
 sidebar_position: 2
+sidebar_label: "Daemon Architecture"
+title: "Daemon architecture and GitHub event intake"
+description: "Learn how the ProPR daemon detects eligible GitHub work, filters events, prevents duplicates, and queues jobs."
 ---
 
 # Daemon Architecture

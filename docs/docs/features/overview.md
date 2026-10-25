@@ -1,5 +1,8 @@
 ---
 sidebar_position: 2
+sidebar_label: "Feature Overview"
+title: "AI coding workflows: planning, tasks, and PR review"
+description: "Explore ProPR workflows for planning issues, running coding agents, reviewing pull requests, and tracking results."
 ---
 
 # Feature Overview
@@ -53,8 +56,6 @@ Every run leaves a task record you can inspect later.
 - [Observability and control](./observability.md): inspect task records, streamed logs, commits, costs, failures, and recovery state after every run.
 - [CLI workflows](./cli-workflows.md): source-development, validation, image, and maintenance commands for developing and operating ProPR itself. The end-user `propr` CLI is documented separately in [ProPR CLI](./propr-cli.md).
 
-Next: follow the [issue-to-PR walkthrough](../tutorials/end-to-end-workflow.md), or go straight to the [PR command reference](./pr-commands.md).
-
 ## Additional ways to work
 
 - [Launch a task](./launching-work.md) directly from an instruction or repository to-do.
@@ -62,3 +63,8 @@ Next: follow the [issue-to-PR walkthrough](../tutorials/end-to-end-workflow.md),
 - [Schedule an agent](./agents.md) that runs a saved prompt on demand or on a cron schedule and writes a report.
 - [Use Inbox and push](./inbox.md) to follow work across devices.
 - [Connect an MCP client](./mcp.md) with scoped repository consent.
+
+## Next steps
+
+- [Issue To Pull Request Walkthrough](/docs/tutorials/end-to-end-workflow)
+- [PR Comment Commands](/docs/features/pr-commands)

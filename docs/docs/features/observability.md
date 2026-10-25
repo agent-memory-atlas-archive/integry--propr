@@ -1,5 +1,8 @@
 ---
 sidebar_position: 7
+sidebar_label: "Observability And Control"
+title: "Monitor agent runs, logs, costs, and recovery"
+description: "Follow live agent output, inspect task records and costs, track provider capacity, and diagnose failed or interrupted work."
 ---
 
 # Observability And Control
@@ -40,3 +43,8 @@ Observability matters most when a run fails. ProPR tracks enough state to suppor
 - Re-run a follow-up with stronger instructions from the PR conversation
 - Switch models with `/switch` or `/use` when the current model is a bad fit
 - Revert a commit through a signed system task (authorized via `SYSTEM_TASK_SECRET`), which resets the branch and force-pushes
+
+## Next steps
+
+- [Metrics](/docs/operations/metrics)
+- [Agent Tank Usage Tracking](/docs/operations/agent-tank)

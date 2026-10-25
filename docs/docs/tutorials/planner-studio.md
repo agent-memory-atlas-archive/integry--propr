@@ -1,5 +1,8 @@
 ---
 sidebar_position: 8
+sidebar_label: "Planner Studio Walkthrough"
+title: "Planner Studio: turn an idea into GitHub issues"
+description: "Follow Define & Context, Review Plan, and Execution to turn a request into reviewed issues ready for agent implementation."
 ---
 
 # Planner Studio Walkthrough
@@ -89,12 +92,12 @@ See [ProPR CLI](../features/propr-cli.md) for the full command reference.
 - Split the work (higher granularity) if the plan is too broad.
 - Add better context — more attachments, a wider context level, or additional context repositories — if the plan is generic.
 
-Related pages:
-
-- [Planning Before Execution](../features/planning.md)
-- [Work Splitting](../features/work-splitting.md)
-- [Repository Knowledge](../features/repository-knowledge.md)
-
 ## Recover an earlier plan
 
 Use **Plan history** in the review editor to preview and restore an earlier snapshot. Restoring preserves the version it replaces. See [revision history and refinement](../features/planning.md#revision-history-and-refinement) before finalizing the plan.
+
+## Next steps
+
+- [Repository Knowledge](/docs/features/repository-knowledge)
+- [PR Comment Commands](/docs/features/pr-commands)
+- [Work Splitting](/docs/features/work-splitting)

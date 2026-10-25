@@ -1,6 +1,8 @@
 ---
 sidebar_position: 2
-title: FAQ
+sidebar_label: "FAQ"
+title: "ProPR FAQ: hosting, pricing, agents, and access"
+description: "Find answers about self-hosting, AI provider costs, GitHub access, data storage, and supported coding agents."
 ---
 
 # Frequently Asked Questions

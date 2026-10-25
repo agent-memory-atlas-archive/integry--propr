@@ -1,5 +1,8 @@
 ---
 sidebar_position: 1
+sidebar_label: "Introduction"
+title: "Official documentation and getting started"
+description: "Set up ProPR, sign in to your instance, and find guides for AI coding agents, GitHub pull requests, the CLI, and API."
 ---
 
 # Introduction
@@ -9,6 +12,18 @@ Welcome to ProPR, an AI engineering platform for planning, building, reviewing, 
 ## What is ProPR?
 
 ProPR connects to your GitHub repositories and keeps the pull request as the center of the workflow. It combines a Web UI dashboard, Planner Studio, a CLI, and multi-agent workers so you can move from an idea or GitHub issue to a reviewed pull request without stitching together separate tools.
+
+## Sign in, use the app, or find a reference
+
+To sign in to ProPR, open your own self-hosted instance's Web UI. Run `propr ui`
+from your stack directory to open it. See the [local setup guide](./tutorials/setup-local.md)
+for the instance address and the [Web UI guide](./features/web-ui.md) for the app's screens.
+If you use the optional relay, the [ProPR Connect dashboard](./operations/connect-dashboard.md)
+manages seats, relay tokens, and tunnels; repositories, agents, and tasks live in
+your instance's UI.
+
+- [ProPR CLI reference](./features/propr-cli.md): install, authenticate, control your stack, and manage work from the terminal.
+- [ProPR API reference](./operations/api-reference.md): HTTP endpoints, authentication, an interactive reference, and the OpenAPI specification.
 
 ## First 15 Minutes
 

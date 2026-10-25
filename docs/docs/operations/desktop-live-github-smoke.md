@@ -1,3 +1,8 @@
+---
+sidebar_label: "Optional nightly Desktop GitHub smoke"
+title: "Run the optional Desktop GitHub smoke check"
+description: "Prepare and run the optional nightly live GitHub smoke check with a dedicated browser profile and clear result classifications."
+---
 # Optional nightly Desktop GitHub smoke
 
 This is separate from the deterministic installed-RPM release gate. Signed preview publication never depends on this workflow. Its Actions summary reports `passed`, `reauthorization_required`, `account_mismatch`, `api_compatibility_failed`, `repository_access_failed`, `app_pairing_failed`, `runtime_source_mismatch`, or `configuration_failed`. Release validation can link the optional run and its result. A fixture success is never live acceptance evidence.

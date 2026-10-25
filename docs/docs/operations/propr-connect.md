@@ -1,3 +1,8 @@
+---
+sidebar_label: "ProPR Connect"
+title: "ProPR Connect: GitHub relay and hosted UI bridge"
+description: "Understand Connect event routing, relay tokens, managed tunnels, and which data remains on your self-hosted ProPR instance."
+---
 # ProPR Connect
 
 ProPR Connect is the hosted bridge between GitHub and self-hosted ProPR.

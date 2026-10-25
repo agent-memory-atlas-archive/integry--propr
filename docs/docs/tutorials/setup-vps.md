@@ -1,5 +1,8 @@
 ---
 sidebar_position: 4
+sidebar_label: "Secure VPS Deployment"
+title: "Deploy ProPR securely on a fresh Linux VPS"
+description: "Provision a Linux VPS, harden SSH and the firewall, configure Docker and TLS, and restrict who can trigger ProPR work."
 ---
 
 # Secure VPS Deployment
@@ -596,3 +599,8 @@ recovery — see [Deployment](../operations/deployment.md) and
 [Maintenance](../operations/maintenance.md). To remove all public inbound web
 traffic with a Cloudflare Tunnel and an SSO gate, take the tunnel branch at the
 step 3 decision point: [Advanced VPS Hardening](./setup-vps-hardening.md).
+
+## Next steps
+
+- [Production Deployment](/docs/operations/deployment)
+- [Issue To Pull Request Walkthrough](/docs/tutorials/end-to-end-workflow)

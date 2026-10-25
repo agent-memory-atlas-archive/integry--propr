@@ -1,3 +1,8 @@
+---
+sidebar_label: "Production Deployment"
+title: "Deploy and operate ProPR in production"
+description: "Run ProPR on a shared server with prebuilt images, persistent storage, backups, secure access, and a repeatable update flow."
+---
 # Production Deployment
 
 Use this page when ProPR should run on a shared server. For a laptop install, start with [Local Setup](../tutorials/setup-local.md). For the initial server walkthrough, see [Server Setup](../tutorials/setup-server.md).

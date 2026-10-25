@@ -1,3 +1,8 @@
+---
+sidebar_label: "Web UI Guide"
+title: "ProPR app guide: dashboard, tasks, and settings"
+description: "Open your instance UI to configure repositories and agents, launch tasks and plans, and track progress, usage, and previews."
+---
 # Web UI Guide
 
 The ProPR Web UI configures repositories and agents, launches work, and shows progress and usage. Open it with `propr ui`. For ports, authentication and deployment, see [Web UI integration](../operations/web-ui-integration.md); for terminal workflows, see the [CLI](./propr-cli.md).
@@ -159,3 +164,8 @@ viewer links require Connect authentication; the GitHub upload credential is
 still required for inline attachments.
 
 See [Visual previews](./visual-previews.md) for capture and publication behavior.
+
+## Next steps
+
+- [Launching Work](/docs/features/launching-work)
+- [Inbox and Notifications](/docs/features/inbox)

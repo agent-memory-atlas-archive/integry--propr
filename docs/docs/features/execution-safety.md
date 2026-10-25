@@ -1,5 +1,8 @@
 ---
 sidebar_position: 5
+sidebar_label: "Isolated And Safe Execution"
+title: "Agent isolation, execution safety, and recovery"
+description: "Understand task worktrees, container boundaries, system-managed Git operations, and recovery after failed agent runs."
 ---
 
 # Isolated And Safe Execution
@@ -251,3 +254,8 @@ Task reconciliation persists completion and recovery state. Follow-up cleanup
 finishes before releasing its worktree lock, and interrupted CI cancellation
 retains a restart obligation for a still-current PR head. See [CI cancellation](./pr-followup.md#cancelling-obsolete-checks-during-follow-up)
 for opt-in workflow selection and recovery behavior.
+
+## Next steps
+
+- [Security Overview](/docs/concepts/security-overview)
+- [Worker Architecture](/docs/architecture/worker)

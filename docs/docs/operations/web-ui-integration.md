@@ -1,3 +1,8 @@
+---
+sidebar_label: "Web UI Integration Guide"
+title: "Integrate the ProPR Web UI, API, and live updates"
+description: "Understand browser UI ports, authentication, API routes, WebSockets, and runtime API URL resolution when extending ProPR."
+---
 # Web UI Integration Guide
 
 This guide is for contributors working on ProPR's browser UI or building against the dashboard API. It explains how the UI fits together with the API, workers, and GitHub automation services — ports, authentication, WebSockets, and where to add code when extending the integration. For a tour of the UI's screens and what each does, see the [Web UI Guide](../features/web-ui.md). For deploying the UI and API in production, see [Production Deployment](./deployment.md); for driving a local stack from the hosted UI, see [Hosted UI Tunnel](./hosted-ui-tunnel.md).

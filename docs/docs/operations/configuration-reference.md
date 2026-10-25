@@ -1,7 +1,12 @@
 ---
 sidebar_position: 10
-title: Configuration Reference
+sidebar_label: "Configuration Reference"
+title: "ProPR environment configuration reference"
+description: "Look up stack .env variables, defaults, and when to override setup-generated values for authentication, agents, and operations."
 ---
+
+# Configuration Reference
+
 
 ProPR reads its configuration from the `.env` file in the stack root — the directory you run `propr` from. `propr setup`, `propr relay enroll`, and `propr tunnel setup` write most of these values for you; this page is the reference for reading or hand-editing the file. Where the value shipped in `.env.example` differs from the fallback the code uses when a variable is unset, both are shown.
 

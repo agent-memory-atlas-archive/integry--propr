@@ -1,3 +1,8 @@
+---
+sidebar_label: "Maintenance And Troubleshooting"
+title: "Maintain, update, back up, and remove ProPR"
+description: "Update your stack, check logs and storage, tune operations, and follow the teardown guide to remove ProPR artifacts."
+---
 # Maintenance And Troubleshooting
 
 Use this page after ProPR is already running.

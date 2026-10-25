@@ -1,3 +1,8 @@
+---
+sidebar_label: "Launching Work"
+title: "Launch a coding task, plan, or goal"
+description: "Choose New Task for a bounded change, New Plan for an issue breakdown, or New Goal for a continuing coding objective."
+---
 # Launching Work
 
 Use **New Task** for one bounded change, **New Plan** when you want to review a set of issues before execution, or **New Goal** for a continuing objective. The header defaults to New Task, switches to New Plan in Plans/Planner Studio, New Goal in Goals and New Automation in [Automations](./agents.md), and keeps the other actions in its menu. All three use configured repositories and agents.
@@ -21,3 +26,8 @@ MCP clients can use `create_task` with execute scope and a stable idempotency ke
 ## Plan, goal or agent?
 
 [Planner Studio](../tutorials/planner-studio.md) lets you edit, refine and approve a complete plan before creating issues. [Goals](./goals.md) keep an agent working toward an objective with progress, corrective inputs and pause/resume controls. [Agents](./agents.md) run a saved prompt on demand or on a schedule and write a report for recurring investigation.
+
+## Next steps
+
+- [Issue To Pull Request Walkthrough](/docs/tutorials/end-to-end-workflow)
+- [Planner Studio Walkthrough](/docs/tutorials/planner-studio)

@@ -1,3 +1,8 @@
+---
+sidebar_label: "GitHub Authentication"
+title: "Configure GitHub App authentication for ProPR"
+description: "Connect ProPR to GitHub through the shared App relay or your own GitHub App, then verify backend authentication and event intake."
+---
 # GitHub Authentication
 
 The ProPR backend (daemon, workers, API) acts on GitHub as a **GitHub App** —

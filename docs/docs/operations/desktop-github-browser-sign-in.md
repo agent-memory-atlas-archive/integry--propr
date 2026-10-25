@@ -1,3 +1,8 @@
+---
+sidebar_label: "Desktop GitHub browser sign-in"
+title: "Desktop GitHub browser sign-in and token handling"
+description: "Understand GitHub device authorization for desktop local setup, account changes, token expiry, and authentication boundaries."
+---
 # Desktop GitHub browser sign-in
 
 Linux and macOS local setup sign in through GitHub's OAuth device authorization flow before starting the local backend. Initial setup asks the user to open GitHub; **Change GitHub account** requests a fresh authorization even if another account was previously saved. No GitHub CLI, terminal emulator, global `gh` credentials, or running local API is needed for GitHub sign-in. The terminal-based `propr login` flow remains supported. Agent registry authentication is a separate operation and retains its existing handoff.

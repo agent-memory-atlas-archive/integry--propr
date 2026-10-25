@@ -1,6 +1,7 @@
 ---
-title: API reference
-description: OpenAPI 3.1 reference of the ProPR dashboard HTTP API, its authentication and error contract, and the @propr/client TypeScript client.
+sidebar_label: "API reference"
+title: "ProPR API reference and authentication"
+description: "Explore ProPR HTTP API endpoints, authentication, the OpenAPI specification, and curl examples for scripts and integrations."
 ---
 
 # API reference
