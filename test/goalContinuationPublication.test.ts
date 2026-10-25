@@ -39,6 +39,20 @@ const octokit = {
     throw new Error(`Unexpected GitHub request: ${route}`);
   },
 };
+const childProcess = await import('node:child_process');
+await mock.module('node:child_process', { namedExports: {
+  ...childProcess,
+  execFileSync: (...args: Parameters<typeof execFileSync>) => {
+    // Hosted runners use a different UID from the agent container. Keep the
+    // fixture owned by the test runner while exercising real Git operations.
+    if (args[0] === 'sudo' && args[1]?.[0] === 'chown') {
+      assert.deepEqual(args[1].slice(0, 4), ['chown', '-R', '1000:1000', '--']);
+      assert.ok(args[1][4].startsWith(`${root}${path.sep}`));
+      return Buffer.alloc(0);
+    }
+    return execFileSync(...args);
+  },
+} });
 const core = await import('@propr/core');
 await mock.module('@propr/core', { namedExports: {
   ...core,
