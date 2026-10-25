@@ -42,7 +42,7 @@ propr setup         # interactive wizard: checks, scaffold, images, GitHub auth,
 #   propr init stack   # scaffold .env + data/ logs/ repos/, detect agent credentials
 #   propr check        # verify Docker, images, agents, and GitHub auth
 #   propr start        # pull images and start the stack with a live dashboard
-#   propr ui           # open the Web UI`;
+#   propr ui on        # start the UI if it is stopped`;
 
 type IconName =
   | 'rocket'
@@ -264,8 +264,10 @@ function HomepageHeader() {
           </Link>
         </div>
         <p className={styles.signInNote}>
-          Looking for ProPR login? Open your own instance with <code>propr ui</code>{' '}
-          and sign in there. For relay seats, tokens, and tunnels, use the{' '}
+          Looking for ProPR login? Open your instance's Web UI (<code>http://localhost:5173</code>{' '}
+          by default on a local install, or the address you configured) and sign in with GitHub.{' '}
+          If the UI is stopped, run <code>propr ui on</code> from your stack directory to start it.{' '}
+          For relay seats, tokens, and tunnels, use the{' '}
           <Link to="/docs/operations/connect-dashboard">ProPR Connect dashboard</Link>.
         </p>
       </div>

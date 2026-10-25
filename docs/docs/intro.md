@@ -15,8 +15,10 @@ ProPR connects to your GitHub repositories and keeps the pull request as the cen
 
 ## Sign in, use the app, or find a reference
 
-To sign in to ProPR, open your own self-hosted instance's Web UI. Run `propr ui`
-from your stack directory to open it. See the [local setup guide](./tutorials/setup-local.md)
+To sign in to ProPR, open your own self-hosted instance's Web UI
+(`http://localhost:5173` by default on a local install, or the address you configured)
+and sign in with GitHub. If the UI is stopped, run `propr ui on` from your stack
+directory to start it. See the [local setup guide](./tutorials/setup-local.md)
 for the instance address and the [Web UI guide](./features/web-ui.md) for the app's screens.
 If you use the optional relay, the [ProPR Connect dashboard](./operations/connect-dashboard.md)
 manages seats, relay tokens, and tunnels; repositories, agents, and tasks live in
