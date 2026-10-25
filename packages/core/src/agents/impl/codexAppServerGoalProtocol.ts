@@ -239,7 +239,7 @@ async function observeNativeGoal(
         if (pendingFeedback && await steerRunningTurn(connection, { threadId, turnId, text: pendingFeedback })) {
             pendingFeedback = undefined;
         }
-        const completion = await observeActiveTurnWithThread(connection, threadId, turnId, options, initialInput);
+        const completion = await observeActiveTurnWithThread(connection, { threadId, turnId, initialInput }, options);
         await control.setActiveTurn(null);
         if (completion.status !== 'completed') return completion;
         const { boundary, completedDuringCheckpoint, checkpointFeedback } = await processCheckpointBoundary(
@@ -357,11 +357,10 @@ export async function runGoalProtocol(
 
 async function observeActiveTurnWithThread(
     connection: AppServerConnection,
-    threadId: string,
-    turnId: string,
+    turn: { threadId: string; turnId: string; initialInput: { pending: boolean } },
     options: AgentTaskOptions,
-    initialInput: { pending: boolean } = { pending: false },
 ): Promise<TurnCompletion> {
+    const { threadId, turnId, initialInput } = turn;
     const control = options.goalControl!;
     const objective = nativeGoalObjective(options);
     let completed: RpcMessage | null = null;
