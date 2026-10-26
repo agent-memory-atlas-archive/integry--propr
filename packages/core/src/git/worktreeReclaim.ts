@@ -161,6 +161,19 @@ export async function interruptedWorktreeRemovals(lifecycleRoot = repositoryStor
     return records;
 }
 
+/** A refusal with an intact tracked checkout needs no interrupted-removal diagnostic. */
+async function removalMayBeInterrupted(worktreePath: string, commonDir: string): Promise<boolean> {
+    // Concurrent successful removal needs no interrupted diagnostic.
+    const registered = (await git(commonDir, ['worktree', 'list', '--porcelain', '-z']))
+        .split('\0').includes(`worktree ${path.resolve(worktreePath)}`);
+    if (!await exists(worktreePath) && !registered) return false;
+    if (!registered) return true;
+    const gitDir = await worktreeGitDir(worktreePath);
+    if (!gitDir || !await exists(path.join(gitDir, 'index'))) return true;
+    await git(worktreePath, ['status', '--porcelain', '--untracked-files=no']);
+    return (await git(worktreePath, ['ls-files', '--deleted', '-z'])).length > 0;
+}
+
 /**
  * Removes a finished worktree (checkout and registration) when the proof passes.
  * Branches are kept. Uses `git worktree remove` without --force, so Git refuses
@@ -209,19 +222,7 @@ export async function removeWorktreeIfDisposable(
             let diagnosticNeeded = removalStarted;
             if (removalStarted) {
                 try {
-                    // Concurrent successful removal needs no interrupted diagnostic.
-                    const registered = (await git(proof.disposable ? proof.commonDir : root, ['worktree', 'list', '--porcelain', '-z']))
-                        .split('\0').includes(`worktree ${path.resolve(worktreePath)}`);
-                    if (!await exists(worktreePath) && !registered) diagnosticNeeded = false;
-                    // A refusal (dirty or locked) with every tracked file still
-                    // present is not evidence of an interrupted recursive delete.
-                    else if (registered) {
-                        const gitDir = await worktreeGitDir(worktreePath);
-                        if (gitDir && await exists(path.join(gitDir, 'index'))) {
-                            await git(worktreePath, ['status', '--porcelain', '--untracked-files=no']);
-                            if (!(await git(worktreePath, ['ls-files', '--deleted', '-z'])).length) diagnosticNeeded = false;
-                        }
-                    }
+                    diagnosticNeeded = await removalMayBeInterrupted(worktreePath, proof.disposable ? proof.commonDir : root);
                 } catch { /* Unknown/partial state keeps the diagnostic. */ }
             }
             if (recordWritten && !diagnosticNeeded) await fs.unlink(recordFile).catch(() => undefined);

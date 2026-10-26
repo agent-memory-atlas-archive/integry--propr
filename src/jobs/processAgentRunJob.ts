@@ -153,6 +153,10 @@ const UNREADABLE_DEFINITION_REASON = 'The agent definition snapshot is unreadabl
 const REPORTED_RUN_STATES = new Set<AutomationRunState>(['report_ready', 'awaiting_approval', 'acting', 'completed']);
 const TERMINAL_TASK_STATES = new Set<string>([TaskStates.COMPLETED, TaskStates.FAILED, TaskStates.CANCELLED]);
 
+function hasReportedRunState(run: StoredAgentRun | null): boolean {
+    return run !== null && REPORTED_RUN_STATES.has(run.state);
+}
+
 export function createAgentRunProcessor(overrides: Partial<AgentRunProcessorDeps> = {}) {
     const deps: AgentRunProcessorDeps = { ...defaultAgentRunProcessorDeps, ...overrides };
 
@@ -183,9 +187,7 @@ export function createAgentRunProcessor(overrides: Partial<AgentRunProcessorDeps
      * Errors propagate as `AgentRunSettlementError` so the delivery is retried,
      * and the redelivery reconciles the task from the run.
      */
-    async function settleTaskWithRun(
-        { runId, taskId, stateManager, log }: { runId: string; taskId: string; stateManager: AgentRunStateManager; log: Logger },
-    ): Promise<AutomationRunState | null> {
+    async function settleTaskWithRun({ runId, taskId, stateManager, log }: RunContext): Promise<AutomationRunState | null> {
         try {
             const current = await deps.getRun(runId);
             if (current?.state === 'cancelled') {
@@ -210,7 +212,7 @@ export function createAgentRunProcessor(overrides: Partial<AgentRunProcessorDeps
 
     /** Fails the task of a run already stored as failed; errors propagate so the delivery is retried. */
     async function markRunTaskFailed(
-        { runId, taskId, stateManager, log }: { runId: string; taskId: string; stateManager: AgentRunStateManager; log: Logger },
+        { runId, taskId, stateManager, log }: RunContext,
         error: Error,
     ): Promise<void> {
         try {
@@ -223,7 +225,7 @@ export function createAgentRunProcessor(overrides: Partial<AgentRunProcessorDeps
 
     /** Fails a claimed run and its task; returns the stored failure reason. */
     async function failRunningRun(
-        { runId, taskId, stateManager, log }: { runId: string; taskId: string; stateManager: AgentRunStateManager; log: Logger },
+        { runId, taskId, stateManager, log }: RunContext,
         error: unknown,
     ): Promise<string> {
         const usageLimit = error instanceof UsageLimitError;
@@ -256,10 +258,7 @@ export function createAgentRunProcessor(overrides: Partial<AgentRunProcessorDeps
     }
 
     /** The run left `running` (cancelled, or failed as abandoned) while the agent was executing. */
-    async function discardLateReport(
-        context: { runId: string; taskId: string; stateManager: AgentRunStateManager; log: Logger },
-        correlationId: string,
-    ): Promise<JobResult> {
+    async function discardLateReport(context: RunContext, correlationId: string): Promise<JobResult> {
         const { runId, taskId, log } = context;
         log.info({ runId, taskId }, 'Agent run left running before its report was stored');
         // The cancel endpoint may have failed to stop the task; end it with the run.
@@ -339,7 +338,7 @@ export function createAgentRunProcessor(overrides: Partial<AgentRunProcessorDeps
 
     function reportedRunResult(settled: StoredAgentRun | null, ids: { runId: string; taskId: string; correlationId: string }): JobResult {
         const state = settled?.state ?? null;
-        if (state && REPORTED_RUN_STATES.has(state)) return { status: 'complete', ...ids, state };
+        if (hasReportedRunState(settled)) return { status: 'complete', ...ids, state };
         return { status: state === 'failed' ? 'failed' : state === 'cancelled' ? 'cancelled' : 'skipped', ...ids };
     }
 
@@ -550,7 +549,7 @@ export function createAgentRunProcessor(overrides: Partial<AgentRunProcessorDeps
             // 10. Close the task. A redelivery repeats this if it is interrupted.
             const settled = await finalizeReportedRun({ run: reported, taskId, stateManager, log });
             log.info({ runId, taskId, agentAlias: alias, model, state: settled?.state ?? null }, 'Agent run report stored');
-            runSucceeded = settled !== null && REPORTED_RUN_STATES.has(settled.state);
+            runSucceeded = hasReportedRunState(settled);
             return reportedRunResult(settled, { runId, taskId, correlationId });
         } catch (error) {
             // The report is kept; the retried delivery finishes the run.
