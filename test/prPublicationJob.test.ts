@@ -160,7 +160,12 @@ const modules: Record<string, Record<string, unknown>> = {
             handledTaskIds.push(context.taskId);
             await stateManager.updateTaskState(context.taskId, 'failed');
         },
-        cleanupJob: async (options: { skipPendingCommentFollowup?: boolean; worktreeInfo?: unknown }) => { events.push(options.skipPendingCommentFollowup ? 'cleanup-capacity' : 'cleanup'); if (options.worktreeInfo) events.push('cleanup-worktree'); events.push('release:lock:pr:upstream:project:42'); }, toClaudeResult: noOp, buildStartingWorkCommentBody: () => 'Starting work',
+        cleanupJob: async (options: { skipPendingCommentFollowup?: boolean; worktreeInfo?: unknown; beforeReleaseLock?: () => Promise<void> }) => {
+            events.push(options.skipPendingCommentFollowup ? 'cleanup-capacity' : 'cleanup');
+            if (options.worktreeInfo) events.push('cleanup-worktree');
+            await options.beforeReleaseLock?.();
+            events.push('release:lock:pr:upstream:project:42');
+        }, toClaudeResult: noOp, buildStartingWorkCommentBody: () => 'Starting work',
     },
     prPendingComments: {
         restorePendingComments: async (...args: Parameters<typeof realPending.restorePendingComments>) => { events.push('restore'); if (realReentryHelpers) await realPending.restorePendingComments(...args); },
