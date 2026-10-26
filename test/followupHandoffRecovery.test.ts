@@ -599,3 +599,19 @@ test('status inspection names the retained worktree and the next action', async 
     assert.match(statuses[0].nextAction, /wait for the live agent/);
     assert.equal((await loadFollowupHandoffs({ database }, { status: HANDOFF_ACTIVE })).length, 1);
 });
+
+for (const phase of ['comment_published', 'cleanup_pending'] as const) {
+    test(`recovery retires ${phase} after normal cleanup removed the checkout`, async () => {
+        const h = await createHarness();
+        const record = await seedHandoff(h);
+        await advanceFollowupHandoff({ database }, record, {
+            phase, commit_hash: originHead(h.fx), completion_comment_url: 'https://example.test/comment/1',
+        });
+        git(h.fx.local, 'worktree', 'remove', h.fx.wt);
+        const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+        assert.equal(summary.published, 1);
+        assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+        assert.equal(h.counters.commits + h.counters.pushes + h.counters.released, 0);
+        assert.equal(h.octokit.comments.length, 0);
+    });
+}

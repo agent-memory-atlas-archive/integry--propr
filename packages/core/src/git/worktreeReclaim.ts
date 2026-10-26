@@ -1,10 +1,12 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import logger from '../utils/logger.js';
 import { isSalvageRetainedWorktree } from './pushSalvage.js';
 import { generatedPayloadStorage } from '../storage/generatedPayloads.js';
+import { repositoryStorageLifecycle } from '../storage/lifecycle.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -20,6 +22,8 @@ export type WorktreeKeepReason =
     | 'salvage_retained'
     | 'locked'
     | 'operation_in_progress'
+    | 'hidden_index_entries'
+    | 'in_use'
     | 'uncommitted_changes'
     | 'unpublished_commits'
     | 'unknown_git_state'
@@ -29,7 +33,7 @@ export type WorktreeDisposability =
     | { disposable: true; commonDir: string }
     | { disposable: false; reason: WorktreeKeepReason };
 
-const IN_PROGRESS_MARKERS = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'rebase-merge', 'rebase-apply'];
+const IN_PROGRESS_MARKERS = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'rebase-merge', 'rebase-apply', 'sequencer'];
 
 function worktreesRoot(): string {
     return path.resolve(process.env.GIT_WORKTREES_BASE_PATH || '/tmp/git-processor/worktrees');
@@ -89,6 +93,12 @@ export async function proveWorktreeDisposable(worktreePath: string, root = workt
         for (const marker of IN_PROGRESS_MARKERS) {
             if (await exists(path.join(gitDir, marker))) return { disposable: false, reason: 'operation_in_progress' };
         }
+        // Lowercase tags mean assume-unchanged; S/s mean skip-worktree.
+        // Neither status nor non-forced removal sees edits hidden by these flags.
+        const entries = await git(worktreePath, ['ls-files', '-v', '-z']);
+        if (entries.split('\0').some(entry => /^[a-zS] /.test(entry))) {
+            return { disposable: false, reason: 'hidden_index_entries' };
+        }
         if ((await git(worktreePath, ['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'])).trim()) {
             return { disposable: false, reason: 'uncommitted_changes' };
         }
@@ -102,32 +112,84 @@ export async function proveWorktreeDisposable(worktreePath: string, root = workt
     }
 }
 
+/** Diagnostic only: an interrupted proof never authorizes forced deletion. */
+export function worktreeRemovalRecordsRoot(lifecycleRoot = repositoryStorageLifecycle.root): string {
+    return path.join(lifecycleRoot, 'worktree-removals');
+}
+
+export async function interruptedWorktreeRemovals(lifecycleRoot = repositoryStorageLifecycle.root): Promise<Array<{ id: string; worktreePath: string }>> {
+    const root = worktreeRemovalRecordsRoot(lifecycleRoot);
+    const names = await fs.readdir(root).catch(error => {
+        if (error.code === 'ENOENT') return [] as string[];
+        throw error;
+    });
+    const records: Array<{ id: string; worktreePath: string }> = [];
+    for (const name of names.filter(name => /^[a-f0-9]{64}\.json$/.test(name)).slice(0, 100)) {
+        const record = JSON.parse(await fs.readFile(path.join(root, name), 'utf8'));
+        if (typeof record.worktreePath === 'string') records.push({ id: name.slice(0, -5), worktreePath: record.worktreePath });
+    }
+    return records;
+}
+
 /**
  * Removes a finished worktree (checkout and registration) when the proof passes.
  * Branches are kept. Uses `git worktree remove` without --force, so Git refuses
  * anything that became dirty after the proof, and worktrees with submodules.
  */
-export async function removeWorktreeIfDisposable(worktreePath: string, root = worktreesRoot()): Promise<{ removed: true } | { removed: false; reason: WorktreeKeepReason }> {
-    const proof = await proveWorktreeDisposable(worktreePath, root);
-    if (!proof.disposable) return { removed: false, reason: proof.reason };
-    try {
-        // Deleting a large node_modules can take minutes on a busy disk.
-        await git(proof.commonDir, ['worktree', 'remove', path.resolve(worktreePath)], 15 * 60_000);
-    } catch (error) {
-        logger.warn({ worktreePath, error: (error as Error).message }, 'Git refused to remove the worktree; keeping it');
-        return { removed: false, reason: 'remove_failed' };
-    }
-    await generatedPayloadStorage().forget(worktreePath).catch(error => {
-        logger.warn({ worktreePath, error: (error as Error).message }, 'Could not drop generated payload records of a removed worktree');
+export async function removeWorktreeIfDisposable(
+    worktreePath: string, root = worktreesRoot(),
+    stillUnused?: (afterDetach: boolean) => Promise<boolean>,
+): Promise<{ removed: true } | { removed: false; reason: WorktreeKeepReason }> {
+    // Covers proof, deletion and record retirement. Generated-payload cleanup
+    // and clone quarantine take the exclusive side of this cross-process gate.
+    return repositoryStorageLifecycle.use(async () => {
+        let proof = await proveWorktreeDisposable(worktreePath, root);
+        if (!proof.disposable) return { removed: false, reason: proof.reason };
+        if (stillUnused && !await stillUnused(false)) return { removed: false, reason: 'in_use' };
+        const recordRoot = worktreeRemovalRecordsRoot();
+        const recordFile = path.join(recordRoot, `${createHash('sha256').update(path.resolve(worktreePath)).digest('hex')}.json`);
+        try {
+            // Free the task branch before potentially slow recursive deletion.
+            // Never force checkout, and refresh all Git evidence after detaching.
+            await git(worktreePath, ['checkout', '--detach']);
+            await fs.mkdir(recordRoot, { recursive: true });
+            const temporaryRecord = path.join(recordRoot, `pending-${randomUUID()}`);
+            await fs.writeFile(temporaryRecord, JSON.stringify({ worktreePath: path.resolve(worktreePath), startedAt: new Date().toISOString() }));
+            await fs.rename(temporaryRecord, recordFile);
+            // Earlier candidates can take minutes. Liveness snapshots from the
+            // start of the sweep cannot authorize removal of a later candidate.
+            if (stillUnused && !await stillUnused(true)) {
+                await fs.unlink(recordFile);
+                return { removed: false, reason: 'in_use' };
+            }
+            // Docker/database inspection above can await external APIs. Refresh
+            // hidden-index, operation and ref evidence after those boundaries.
+            proof = await proveWorktreeDisposable(worktreePath, root);
+            if (!proof.disposable) {
+                await fs.unlink(recordFile);
+                return { removed: false, reason: proof.reason };
+            }
+            await git(proof.commonDir, ['worktree', 'remove', path.resolve(worktreePath)], 15 * 60_000);
+        } catch (error) {
+            logger.warn({ worktreePath, recordFile, error: (error as Error).message },
+                'Worktree removal failed or was interrupted; inspect the remnant and permissions before operator recovery (no forced retry)');
+            return { removed: false, reason: 'remove_failed' };
+        }
+        await generatedPayloadStorage().forget(worktreePath).catch(error => {
+            logger.warn({ worktreePath, error: (error as Error).message }, 'Could not drop generated payload records of a removed worktree');
+        });
+        await fs.unlink(recordFile).catch(error => {
+            logger.warn({ worktreePath, error: (error as Error).message }, 'Could not retire worktree removal diagnostic');
+        });
+        return { removed: true };
     });
-    return { removed: true };
 }
 
 export interface WorktreeSweepOptions {
     worktreesBasePath?: string;
     /** Only worktrees with no Git activity for this long are considered. */
     minIdleHours: number;
-    /** Worktrees still referenced by live work (goals, follow-up handoffs). */
+    /** Worktrees still referenced by live work (goals, follow-up handoffs, task repository roots). */
     protectedPaths: () => Promise<Iterable<string>>;
     /** Host paths bind-mounted into running containers. Throw when unknown. */
     mountedPaths: () => Promise<Iterable<string>>;
@@ -158,7 +220,11 @@ function mountUsesWorktree(mount: string, worktreePath: string): boolean {
 /** Worktree directories at <root>/<owner>/<repo>/<task>. */
 async function listWorktreeDirectories(root: string): Promise<string[]> {
     const directories: string[] = [];
-    const children = async (dir: string) => (await fs.readdir(dir, { withFileTypes: true }).catch(() => []))
+    const children = async (dir: string) => (await fs.readdir(dir, { withFileTypes: true }).catch(error => {
+        if (dir === root) throw new Error(`Cannot read worktree root ${root}: ${error.message}`);
+        logger.warn({ directory: dir, error: error.message }, 'Could not enumerate worktrees');
+        return [];
+    }))
         .filter(entry => entry.isDirectory() && !entry.isSymbolicLink()).map(entry => path.join(dir, entry.name));
     for (const owner of await children(root)) {
         for (const repo of await children(owner)) {
@@ -179,19 +245,36 @@ let sweeping = false;
 export async function sweepIdleWorktrees(options: WorktreeSweepOptions): Promise<WorktreeSweepResult> {
     const result: WorktreeSweepResult = { removed: [], kept: 0, skipped: 0 };
     if (sweeping || worktreeRemovalDisabled()) return result;
+    if (!Number.isSafeInteger(options.minIdleHours) || options.minIdleHours <= 0
+        || !Number.isSafeInteger(options.minIdleHours * 3_600_000)) {
+        logger.warn({ minIdleHours: options.minIdleHours }, 'Skipped idle worktree sweep: invalid retention hours');
+        return result;
+    }
     sweeping = true;
     try {
         const root = path.resolve(options.worktreesBasePath ?? worktreesRoot());
-        const protectedPaths = [...await options.protectedPaths()].map(p => path.resolve(p));
-        const mounts = [...await options.mountedPaths()].map(p => path.resolve(p));
-        const now = options.now ?? Date.now();
-        const minIdleMs = Math.max(0, options.minIdleHours) * 3_600_000;
+        const minIdleMs = options.minIdleHours * 3_600_000;
+        const unused = async (worktreePath: string): Promise<boolean> => {
+            const protectedPaths = [...await options.protectedPaths()].map(p => path.resolve(p));
+            const mounts = [...await options.mountedPaths()].map(p => path.resolve(p));
+            if (protectedPaths.some(p => mountUsesWorktree(worktreePath, p)) || mounts.some(m => mountUsesWorktree(m, worktreePath))) return false;
+            const gitDir = await worktreeGitDir(worktreePath);
+            return !!gitDir && (options.now ?? Date.now()) - await lastActivity(worktreePath, gitDir) >= minIdleMs;
+        };
+        // Confirm authority even when no candidate directory exists.
+        await options.protectedPaths();
+        await options.mountedPaths();
         for (const worktreePath of await listWorktreeDirectories(root)) {
-            if (protectedPaths.some(p => p === worktreePath) || mounts.some(m => mountUsesWorktree(m, worktreePath))) { result.skipped++; continue; }
+            if (!await unused(worktreePath)) { result.skipped++; continue; }
             const gitDir = await worktreeGitDir(worktreePath);
             if (!gitDir) { result.kept++; continue; }
-            if (now - await lastActivity(worktreePath, gitDir) < minIdleMs) { result.skipped++; continue; }
-            const outcome = await removeWorktreeIfDisposable(worktreePath, root);
+            // Detaching refreshes HEAD/index mtimes; idle age was checked above.
+            const outcome = await removeWorktreeIfDisposable(worktreePath, root, async afterDetach => {
+                if (!afterDetach) return unused(worktreePath);
+                const protectedPaths = [...await options.protectedPaths()].map(p => path.resolve(p));
+                const mounts = [...await options.mountedPaths()].map(p => path.resolve(p));
+                return !protectedPaths.some(p => mountUsesWorktree(worktreePath, p)) && !mounts.some(m => mountUsesWorktree(m, worktreePath));
+            });
             if (outcome.removed) result.removed.push(worktreePath);
             else result.kept++;
         }

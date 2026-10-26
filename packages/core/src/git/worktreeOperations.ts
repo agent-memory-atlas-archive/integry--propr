@@ -75,7 +75,9 @@ export async function cleanupWorktree(localRepoPath: string, worktreePath: strin
             logger.info({ worktreePath, branchName }, 'Removed finished worktree; its work is stored in Git');
             return;
         }
-        logger.info({ worktreePath, branchName, reason: outcome.reason }, 'Keeping worktree: it holds work not stored elsewhere');
+        const uncertain = ['remove_failed', 'unknown_git_state', 'not_a_worktree'].includes(outcome.reason);
+        logger[uncertain ? 'warn' : 'info']({ worktreePath, branchName, reason: outcome.reason },
+            uncertain ? 'Worktree cleanup needs inspection; checkout or Git state is unavailable' : 'Keeping worktree due to retention or Git safety checks');
     }
 
     try {

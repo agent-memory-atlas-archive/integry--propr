@@ -1,3 +1,4 @@
+import { interruptedWorktreeRemovals } from '../git/worktreeReclaim.js';
 import type { StorageServices } from './services.js';
 import { removeRegisteredCache } from './cacheRemoval.js';
 import { GeneratedPayloadStorage } from './generatedPayloads.js';
@@ -79,6 +80,12 @@ export class InstanceStorageService {
         const observation = await observeStorage(instanceId, [{ category: 'worktrees', path: resolveRepositoryClonePath(worktreesRoot.path, record.owner, record.name) }], { maxEntries: 10_000, maxMs: 250 });
         const category = observation.categories.find(category => category.category === 'worktrees')!;
         repositories.push({ id: record.id, name: `${record.owner}/${record.name}`, category: 'worktrees', estimatedBytes: category.bytes, protectedReasons: ['worktrees'] });
+      }
+      // Interrupted removal is evidence for inspection, never authority to
+      // discard deletion-only status or a missing .git file on a later pass.
+      for (const removal of await interruptedWorktreeRemovals(this.services.lifecycle.root)) {
+        repositories.push({ id: `worktree-removal-${removal.id}`, name: `${path.basename(removal.worktreePath)} (removal interrupted; inspect permissions and registration)`,
+          category: 'worktrees', estimatedBytes: null, protectedReasons: ['unknown_git_state'] });
       }
       // Registry reads are rotating, bounded batches. Never claim a batch is a full inventory.
       return { version: 1, instanceId, state: 'partial', observedAt: new Date().toISOString(),

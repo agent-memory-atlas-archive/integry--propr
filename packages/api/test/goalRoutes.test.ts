@@ -509,6 +509,21 @@ test('goal routes keep metadata owner-scoped and queue ordinary input on the sam
         assert.equal(stopped.filter(taskId => taskId === 'goal-task-2').length, 2);
         assert.equal((await database('goals').where({ goal_id: 'goal-2' }).first()).result_state, 'cancelled');
 
+        // Finished/reconciled goals may have had their checkout reclaimed.
+        // Every continuation entry point must keep the terminal generation fixed.
+        const terminalBefore = await database('goals').where({ goal_id: 'goal-5' }).first();
+        await database('goals').where({ goal_id: 'goal-5' }).update({ result_state: 'completed', desired_state: 'paused', worktree_path: '/missing/reclaimed-checkout' });
+        const queuedBeforeTerminal = queued.length;
+        for (const action of ['resume', 'input'] as const) {
+            const terminalRequest = request('owner-2', { goalId: 'goal-5' }, { message: 'continue' });
+            terminalRequest.get = () => `terminal-${action}`;
+            const rejected = response();
+            await routes[action](terminalRequest, rejected.res);
+            assert.equal(rejected.state.status, 409);
+        }
+        assert.equal(queued.length, queuedBeforeTerminal);
+        assert.equal((await database('goals').where({ goal_id: 'goal-5' }).first()).run_generation, terminalBefore.run_generation);
+
         const hiddenDelete = response();
         await routes.remove(request('owner-1', { goalId: 'goal-9' }), hiddenDelete.res);
         assert.equal(hiddenDelete.state.status, 404);

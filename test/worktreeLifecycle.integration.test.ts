@@ -1,5 +1,6 @@
-import { test, before, beforeEach, after } from 'node:test';
+import { test, before, beforeEach, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'fs-extra';
 import path from 'node:path';
 import os from 'node:os';
@@ -218,7 +219,7 @@ for (const entry of ['issue', 'existing'] as const) {
     });
 }
 
-const { sweepIdleWorktrees } = await import('../packages/core/src/git/worktreeReclaim.js');
+const { sweepIdleWorktrees, proveWorktreeDisposable, removeWorktreeIfDisposable, interruptedWorktreeRemovals } = await import('../packages/core/src/git/worktreeReclaim.js');
 
 /** A finished task: its commit is on the task branch and only ignored files remain. */
 async function finishedTask(branch = 'task') {
@@ -301,7 +302,149 @@ test('the idle sweep removes only idle, unreferenced, unmounted worktrees whose 
 
 test('the idle sweep removes nothing when liveness cannot be read', async () => {
     await assert.rejects(sweepIdleWorktrees({
-        worktreesBasePath: path.join(root, 'worktrees'), minIdleHours: 0,
+        worktreesBasePath: path.join(root, 'worktrees'), minIdleHours: 1,
         protectedPaths: async () => [], mountedPaths: async () => { throw new Error('docker unavailable'); },
     }), /docker unavailable/);
+});
+
+for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+    test(`cleanup and sweep retain tracked modifications hidden by ${flag}`, async () => {
+        const wt = await create();
+        await wt.raw(['update-index', flag, 'tracked']);
+        await fs.writeFile(path.join(worktree, 'tracked'), 'hidden private edits');
+        assert.equal((await wt.raw(['status', '--porcelain'])).trim(), '');
+        assert.deepEqual(await proveWorktreeDisposable(worktree), { disposable: false, reason: 'hidden_index_entries' });
+        await cleanupWorktree(repo, worktree, 'task', { success: true });
+        const result = await sweepIdleWorktrees({ minIdleHours: 1, now: Date.now() + 48 * 3_600_000,
+            protectedPaths: async () => [], mountedPaths: async () => [] });
+        assert.ok(!result.removed.includes(worktree));
+        assert.equal(await fs.readFile(path.join(worktree, 'tracked'), 'utf8'), 'hidden private edits');
+        assert.equal(await registered(), true);
+    });
+}
+
+for (const operation of ['cherry-pick', 'revert']) {
+    test(`cleanup retains a manually committed conflict with a pending ${operation} sequence`, async () => {
+        await git.checkoutLocalBranch('source');
+        await fs.writeFile(path.join(repo, 'tracked'), 'source A');
+        await git.add('.').commit('A');
+        const a = (await git.revparse(['HEAD'])).trim();
+        await fs.writeFile(path.join(repo, 'second'), 'source B');
+        await git.add('.').commit('B');
+        const b = (await git.revparse(['HEAD'])).trim();
+        await git.checkout('main');
+        const wt = await create();
+        await fs.writeFile(path.join(worktree, 'tracked'), 'task conflict');
+        await wt.add('.').commit('task conflict');
+        await assert.rejects(wt.raw([operation, a, b]));
+        await fs.writeFile(path.join(worktree, 'tracked'), 'resolved');
+        await wt.add('tracked').commit('manual resolution');
+        const admin = (await wt.revparse(['--absolute-git-dir'])).trim();
+        assert.equal(await fs.pathExists(path.join(admin, operation === 'revert' ? 'REVERT_HEAD' : 'CHERRY_PICK_HEAD')), false);
+        const todo = await fs.readFile(path.join(admin, 'sequencer', 'todo'), 'utf8');
+        assert.equal((await wt.raw(['status', '--porcelain'])).trim(), '');
+        assert.deepEqual(await proveWorktreeDisposable(worktree), { disposable: false, reason: 'operation_in_progress' });
+        await cleanupWorktree(repo, worktree, 'task', { success: true });
+        assert.equal(await fs.readFile(path.join(admin, 'sequencer', 'todo'), 'utf8'), todo);
+    });
+}
+
+test('removal detaches first and records a partial deletion without treating it as retry authority', async () => {
+    await finishedTask();
+    const wt = simpleGit(worktree);
+    const { repositoryStorageLifecycle } = await import('../packages/core/src/storage/lifecycle.js');
+    const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+    const wrapper = path.join(bin, 'git');
+    // Model a recursive removal which unlinks one tracked file, then fails.
+    // This wrapper affects only the fixture's next worktree remove invocation.
+    await fs.writeFile(wrapper, `#!/bin/sh
+case " $* " in
+  *" worktree remove "*)
+    /bin/rm -- "$PROPR_TEST_REMOVAL_TARGET/tracked"
+    exit 42
+    ;;
+esac
+exec "$PROPR_TEST_REAL_GIT" "$@"
+`, { mode: 0o755 });
+    process.env.PROPR_TEST_REAL_GIT = realGit;
+    process.env.PROPR_TEST_REMOVAL_TARGET = worktree;
+    let checks = 0;
+    try {
+        const outcome = await removeWorktreeIfDisposable(worktree, undefined, async () => {
+            assert.equal(await repositoryStorageLifecycle.busy(), true, 'the read claim covers all awaited checks');
+            if (++checks === 2) assert.equal((await wt.raw(['branch', '--show-current'])).trim(), '', 'branch freed before slow removal');
+            return true;
+        });
+        assert.deepEqual(outcome, { removed: false, reason: 'remove_failed' });
+    } finally {
+        await fs.remove(wrapper);
+        delete process.env.PROPR_TEST_REAL_GIT;
+        delete process.env.PROPR_TEST_REMOVAL_TARGET;
+    }
+    assert.equal(await fs.pathExists(path.join(worktree, 'tracked')), false);
+    assert.ok((await interruptedWorktreeRemovals()).some(record => record.worktreePath === worktree));
+    assert.equal(await repositoryStorageLifecycle.busy(), false, 'claim released only after failure');
+    assert.deepEqual(await removeWorktreeIfDisposable(worktree), { removed: false, reason: 'uncommitted_changes' });
+    assert.equal(await registered(), true, 'a diagnostic cannot authorize forced removal of deleted files');
+});
+
+test('removal rechecks Git state after detaching and does not discard newly hidden edits', async () => {
+    await finishedTask();
+    const wt = simpleGit(worktree);
+    let checks = 0;
+    const outcome = await removeWorktreeIfDisposable(worktree, undefined, async () => {
+        if (++checks === 2) {
+            await wt.raw(['update-index', '--assume-unchanged', 'tracked']);
+            await fs.writeFile(path.join(worktree, 'tracked'), 'hidden after initial proof');
+        }
+        return true;
+    });
+    assert.deepEqual(outcome, { removed: false, reason: 'hidden_index_entries' });
+    assert.equal(await fs.readFile(path.join(worktree, 'tracked'), 'utf8'), 'hidden after initial proof');
+});
+
+test('sweep refreshes task and mount authority before deletion and accepts protected repository roots', async () => {
+    await finishedTask();
+    for (const protection of ['repository', 'new-reference', 'new-mount']) {
+        let reads = 0;
+        const result = await sweepIdleWorktrees({ minIdleHours: 1, now: Date.now() + 48 * 3_600_000,
+            protectedPaths: async () => {
+                reads++;
+                return protection === 'repository' ? [path.dirname(worktree)]
+                    : protection === 'new-reference' && reads >= 3 ? [worktree] : [];
+            },
+            mountedPaths: async () => protection === 'new-mount' && reads >= 3 ? [worktree] : [],
+        });
+        assert.ok(!result.removed.includes(worktree));
+        assert.equal(await fs.pathExists(worktree), true);
+    }
+});
+
+test('sweep rejects invalid idle ages before consulting external authority', async () => {
+    for (const minIdleHours of [NaN, Infinity, 0, -1, 0.5, Number.MAX_SAFE_INTEGER]) {
+        const result = await sweepIdleWorktrees({ minIdleHours,
+            protectedPaths: async () => { throw new Error('must not query'); }, mountedPaths: async () => [] });
+        assert.deepEqual(result.removed, []);
+    }
+});
+
+test('sweep reports an unreadable worktree root instead of silently treating it as empty', async () => {
+    await fs.writeFile(path.join(repo, 'not-a-directory'), 'file');
+    await assert.rejects(sweepIdleWorktrees({ worktreesBasePath: path.join(repo, 'not-a-directory'), minIdleHours: 1,
+        protectedPaths: async () => [], mountedPaths: async () => [] }), /Cannot read worktree root/);
+});
+
+test('cleanup warns for unavailable Git state instead of claiming the checkout holds unpublished work', async () => {
+    const { default: logger } = await import('../packages/core/src/utils/logger.js');
+    const warnings: Array<{ reason?: string; message: string }> = [];
+    const warn = mock.method(logger, 'warn', (context: { reason?: string }, message: string) => {
+        warnings.push({ reason: context.reason, message });
+    });
+    try {
+        await cleanupWorktree(repo, worktree, 'task', { success: true });
+        const unavailable = warnings.find(warning => warning.reason === 'not_a_worktree');
+        assert.ok(unavailable);
+        assert.match(unavailable.message, /needs inspection/);
+        assert.doesNotMatch(unavailable.message, /work not stored elsewhere/);
+    } finally { warn.mock.restore(); }
 });

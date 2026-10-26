@@ -464,7 +464,7 @@ async function startDaemon(options: DaemonOptions = {}): Promise<void> {
         clearInterval(heartbeatInterval);
         clearInterval(draftContextSweepInterval);
         clearInterval(pushRescueSweepInterval);
-        clearInterval(worktreeSweepInterval);
+        if (worktreeSweepInterval) clearInterval(worktreeSweepInterval);
         clearInterval(ultrafixResumeSweepInterval);
         clearInterval(epicMergeProgressRetryInterval);
         clearInterval(autoMergeSweepInterval);
