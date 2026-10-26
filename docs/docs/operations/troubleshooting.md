@@ -1,6 +1,8 @@
 ---
 sidebar_position: 11
-title: Troubleshooting
+sidebar_label: "Troubleshooting"
+title: "Troubleshoot ProPR tasks, agents, Git, and tunnels"
+description: "Find symptom-based checks and recovery steps for failed tasks, Git pushes, stuck queues, missing metrics, and hosted UI tunnels."
 ---
 
 # Troubleshooting

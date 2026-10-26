@@ -1,3 +1,8 @@
+---
+sidebar_label: "Validation only: stage-one Linux candidate (#3002)"
+title: "Linux desktop validation candidate and open gates"
+description: "Review the stage-one Linux desktop validation candidate, remaining native qualification, and package lifecycle acceptance gates."
+---
 # Validation only: stage-one Linux candidate (#3002)
 
 This remains a **draft validation candidate**, not merge or publication approval.

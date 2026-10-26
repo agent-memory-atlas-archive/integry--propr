@@ -1,5 +1,8 @@
 ---
 sidebar_position: 6
+sidebar_label: "Source Development Setup"
+title: "Run ProPR from source for local development"
+description: "Start ProPR from a source checkout with Docker Compose to change code, run tests, build docs, or build images."
 ---
 
 # Source Development Setup
@@ -105,3 +108,8 @@ npm run images:smoke
 ```
 
 Use the normal prebuilt-image setup for actual end-user installs.
+
+## Next steps
+
+- [CLI Workflows](/docs/features/cli-workflows)
+- [Issue To Pull Request Walkthrough](/docs/tutorials/end-to-end-workflow)

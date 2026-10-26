@@ -1,6 +1,11 @@
 ---
-title: Goals
+sidebar_label: "Goals"
+title: "Run continuing coding goals with checkpoints"
+description: "Start an ongoing coding objective, follow its session and branch, send corrections, and control checkpoints and completion."
 ---
+
+# Goals
+
 
 Goals keep a coding-agent session working toward a continuing objective. Use a [task](./launching-work.md) for a single bounded request, or a [plan](./planning.md) when you want to approve the issue breakdown first.
 
@@ -116,3 +121,8 @@ Optional `include` and `exclude` arrays select repository-relative files. ProPR 
 ProPR publishes the final direct-implementation checkpoint and validates an **open draft PR on the saved goal branch against the expected base branch**. A provider saying it is finished, or reporting a different PR, cannot bypass this validation. Inspect goal details for checkpoint, input-delivery, and final PR evidence.
 
 When validating a runtime upgrade, run a disposable goal through creation, activity, a checkpoint, operator input, pause/resume, cancellation, and successful final draft PR validation. Unit tests and CLI help probes alone do not establish that the authenticated integration works end to end.
+
+## Next steps
+
+- [Observability And Control](/docs/features/observability)
+- [PR Comment Commands](/docs/features/pr-commands)

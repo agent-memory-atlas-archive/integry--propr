@@ -1,6 +1,8 @@
 ---
 sidebar_position: 7
-title: Task Assignment
+sidebar_label: "Task Assignment"
+title: "Assign tasks and pull requests through GitHub"
+description: "Assign ProPR work through its GitHub issue or pull request and configure automatic PR assignment and review requests."
 ---
 
 # Task Assignment
@@ -94,3 +96,8 @@ Every option below is **off by default**.
 The gate is instance-wide and applies to every repository. The three repository options are repository-wide: every branch entry of a monitored repository shares them, and a client that does not send a field never changes it. `none` (or `null` through MCP, or an empty **Assignee** field) clears the default assignee so the source issue author is assigned again. The default assignee and the review request have no effect while automatic assignment is off. `propr repo list` shows the repository options as `Off` or, for example, `On (@octocat, review)`.
 
 What the repository options do, and every reason ProPR may decline to assign, is described in [Automatic Pull Request Assignment](./pr-followup.md#automatic-pull-request-assignment). Every setting's location is also listed in [Where Each Setting Lives](../operations/settings-locations.md).
+
+## Next steps
+
+- [Where Each Setting Lives](/docs/operations/settings-locations)
+- [Web UI Guide](/docs/features/web-ui)

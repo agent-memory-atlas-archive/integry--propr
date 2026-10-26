@@ -1,5 +1,8 @@
 ---
 sidebar_position: 2
+sidebar_label: "Local Setup"
+title: "Install ProPR locally with Docker and the CLI"
+description: "Run ProPR on your machine with prebuilt Docker images, configure GitHub and agent access, and open the Web UI."
 ---
 
 # Local Setup
@@ -195,3 +198,8 @@ Service images are pinned to the release version of the control plane that start
 - **Launcher path:** `docker pull propr/launcher:latest`, then re-run the `docker run` command; the launcher pulls the matching service images.
 
 Data, logs, and repositories persist in your runtime directory either way.
+
+## Next steps
+
+- [Issue To Pull Request Walkthrough](/docs/tutorials/end-to-end-workflow)
+- [ProPR CLI](/docs/features/propr-cli)

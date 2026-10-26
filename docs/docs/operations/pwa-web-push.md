@@ -1,6 +1,8 @@
 ---
 sidebar_position: 8
-title: PWA, Web Push, and Badges
+sidebar_label: "PWA, Web Push, and Badges"
+title: "Install the ProPR PWA and configure Web Push"
+description: "Install the ProPR Web UI as a PWA and configure optional push notifications, badges, HTTPS, and reverse proxy caching."
 ---
 
 # PWA, Web Push, and Badges

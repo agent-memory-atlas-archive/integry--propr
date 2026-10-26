@@ -1,5 +1,7 @@
 ---
-title: Visual Previews
+sidebar_label: "Visual Previews"
+title: "Add visual preview evidence to pull requests"
+description: "Enable repository previews so agent changes can include focused screenshots or videos in PRs and follow-up comments."
 ---
 
 # Visual Previews
@@ -167,3 +169,8 @@ Task and goal details show published previews beside the work that produced them
 ![Task detail showing published visual evidence in the full-width preview gallery](/img/screenshots/0.9.0/previews.png)
 
 Private GitHub attachments use ProPR's authenticated media endpoint, including through the desktop network boundary. If an image is unavailable, follow the displayed diagnostic and check that the current GitHub authorization can read that repository and PR. Reauthenticate with GitHub when requested; a public attachment URL alone does not grant access to private evidence. Managed-original viewer links have their own Connect sign-in and repository authorization requirements. See [Desktop troubleshooting](../operations/desktop-application.md#troubleshooting) for the distinction between GitHub reauthorization and re-pairing an instance.
+
+## Next steps
+
+- [Repository workflow file](/docs/features/repository-workflow)
+- [Desktop application](/docs/operations/desktop-application)

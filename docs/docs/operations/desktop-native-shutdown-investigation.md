@@ -1,3 +1,8 @@
+---
+sidebar_label: "Native Linux shutdown investigation (#2973)"
+title: "Investigate native Linux desktop shutdown crashes"
+description: "Capture opt-in evidence for the unresolved native Linux shutdown crash and follow the remaining diagnosis and qualification steps."
+---
 # Native Linux shutdown investigation (#2973)
 
 Status: **root cause unconfirmed; native fix and Ubuntu qualification remain open**.

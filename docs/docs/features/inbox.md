@@ -1,3 +1,8 @@
+---
+sidebar_label: "Inbox and Notifications"
+title: "Inbox notifications and work triage"
+description: "Find task, plan, review, and system events in Inbox, open related work, and configure personal notification preferences."
+---
 # Inbox and Notifications
 
 **Inbox** collects plan, task, review, pull-request, indexing and system events. Open an item to reach its relevant task, plan or goal. More items load as you browse; read/dismiss changes synchronize across tabs. Dismissing an item does not cancel the work behind it.
@@ -34,3 +39,8 @@ Open **Settings → Notifications** to choose Inbox and Push categories, quiet h
 Install the web app using your browser's install control. In Settings, choose **Enable on this browser** and grant notification permission, then enable Push for the desired categories. On supported iOS/iPadOS, add ProPR to the Home Screen in Safari and open that installed app before subscribing.
 
 Browser support, HTTPS, permission and the server's push configuration determine delivery; an Inbox event does not guarantee an OS notification. See [PWA and Web Push operations](../operations/pwa-web-push.md) for VAPID configuration, proxy requirements, backup and recovery. Desktop native notifications and connection setup are covered in [Desktop](../operations/desktop-application.md).
+
+## Next steps
+
+- [Web UI Guide](/docs/features/web-ui)
+- [PWA, Web Push, and Badges](/docs/operations/pwa-web-push)

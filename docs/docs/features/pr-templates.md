@@ -1,6 +1,11 @@
 ---
-title: Pull request templates
+sidebar_label: "Pull request templates"
+title: "Customize pull request titles and descriptions"
+description: "Add a repository PR template for required sections, ticket references, and checklists in ProPR-generated pull requests."
 ---
+
+# Pull request templates
+
 
 ProPR writes a title and description for every pull request it opens. Add an optional `.propr/pr-template.md` to make them follow your team's conventions, such as required sections, ticket references or checklists. `propr init` scaffolds an example in which everything is commented out, and `propr repo validate` checks the file in a local checkout.
 
@@ -139,3 +144,8 @@ A template can never fail a run. When ProPR cannot read or render the template (
 - **Continuation pull requests**: when ProPR cannot push to a contributor's branch, publication or [publication recovery](./pr-followup.md) opens a continuation pull request. Its default "Continuation of …" text is the `summary` section, and other sections are added as configured. The `Continue #N:` title is kept, as is the hidden continuation marker that ProPR uses to find the pull request. If the result would exceed GitHub's description limit, the default description is used.
 
 Follow-up work on an existing pull request does not rewrite its description, and follow-up completion comments are not affected by templates. Goal pull requests keep their own description.
+
+## Next steps
+
+- [PR Follow-up](/docs/features/pr-followup)
+- [Issue To Pull Request Walkthrough](/docs/tutorials/end-to-end-workflow)

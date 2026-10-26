@@ -1,5 +1,8 @@
 ---
 sidebar_position: 2
+sidebar_label: "Daily Use"
+title: "Use ProPR daily: plan, implement, and review"
+description: "Plan work, run labeled GitHub issues, refine pull requests, and monitor or recover tasks in your daily ProPR workflow."
 ---
 
 # Daily Use
@@ -98,13 +101,6 @@ When something looks wrong, open the task record first. Check:
 
 Most recovery starts from the PR conversation: add a clearer follow-up comment, switch models, rerun a review/fix loop, or split the remaining work into a smaller task.
 
-## Common Next Steps
-
-- For local setup, see [Setup](./setup.md).
-- For larger work, see [Work Splitting](../features/work-splitting.md).
-- For task records and logs, see [Observability And Control](../features/observability.md).
-- For CLI and source-development commands, see [CLI Workflows](../features/cli-workflows.md).
-
 ## Launch from the UI and follow up
 
 Use [New Task](../features/launching-work.md) for a single instruction, a [goal](../features/goals.md)
@@ -112,3 +108,10 @@ for continuing work with corrections, or Planner Studio for a reviewed issue pla
 The dashboard summarizes current activity and [Inbox](../features/inbox.md) opens
 the corresponding task, plan or goal. Notification preferences are personal;
 repository settings can suppress future notifications without stopping work.
+
+<span id="common-next-steps" />
+
+## Next steps
+
+- [PR Comment Commands](/docs/features/pr-commands)
+- [Observability And Control](/docs/features/observability)

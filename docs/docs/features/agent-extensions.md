@@ -1,3 +1,8 @@
+---
+sidebar_label: "Instance agent extensions"
+title: "Configure agent skills and MCP extensions"
+description: "Manage instance extension profiles with authorized MCP tools and skill bundles for selected Claude and Codex task runs."
+---
 # Instance agent extensions
 
 Instance Settings → Agent Extensions & Packages → Skills & MCP servers manages native Core
@@ -143,3 +148,8 @@ MCP catalogs and environment authentication. The browser test renders the actual
 settings editor and checks security/provenance/history and write-only controls.
 
 Skill-bearing runs require a Linux worker with `/proc/self/fd` available for secure directory-handle staging. Non-Linux workers reject skill staging with an explicit error; MCP-only profiles do not require these staging primitives.
+
+## Next steps
+
+- [MCP Connections and Operator Tools](/docs/features/mcp)
+- [Agents and Models](/docs/features/agents-and-models)

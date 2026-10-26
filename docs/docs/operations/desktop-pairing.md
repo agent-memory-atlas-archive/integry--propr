@@ -1,3 +1,8 @@
+---
+sidebar_label: "Desktop pairing protocol"
+title: "Desktop pairing protocol and instance tokens"
+description: "Pair a trusted desktop client with a ProPR instance using browser approval and opaque tokens without exposing GitHub credentials."
+---
 # Desktop pairing protocol
 
 Packaged desktop clients authenticate to one ProPR instance with an opaque

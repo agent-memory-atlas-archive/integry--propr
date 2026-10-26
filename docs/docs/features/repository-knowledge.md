@@ -1,5 +1,8 @@
 ---
 sidebar_position: 9
+sidebar_label: "Repository Knowledge"
+title: "Index repository knowledge for coding agents"
+description: "Add repository context and todos, inspect indexing health, and reindex when planning or agent runs lack useful knowledge."
 ---
 
 # Repository Knowledge
@@ -80,3 +83,8 @@ In those cases, reindex the repository, improve todos, add clearer workflow guid
 If repository knowledge looks stale, use **Reindex** in the repository's **Settings** tab (or `propr repo index`). Reindex before high-stakes runs after major refactors, dependency changes, directory moves, or repository renames. For routine follow-up on a small PR, the PR diff and comments may be enough.
 
 Low-level indexing recovery details live in the operations docs; see [Maintenance And Troubleshooting](../operations/maintenance.md).
+
+## Next steps
+
+- [Planner Studio Walkthrough](/docs/tutorials/planner-studio)
+- [Planning Before Execution](/docs/features/planning)

@@ -1,5 +1,8 @@
 ---
 sidebar_position: 10
+sidebar_label: "Work Splitting"
+title: "Split coding work into reviewable pull requests"
+description: "Break large requests into planned issues, choose an execution strategy, and keep agent changes small enough to review."
 ---
 
 # Work Splitting
@@ -61,3 +64,8 @@ A second kind of splitting works across models instead of across scope: add seve
 ## Follow-Up Work
 
 When a PR reveals additional work, capture it as a new planned issue or [repository todo](./repository-knowledge.md) if it is outside the current PR's scope. Keeping follow-up separate prevents review loops from absorbing unrelated cleanup.
+
+## Next steps
+
+- [Planner Studio Walkthrough](/docs/tutorials/planner-studio)
+- [Issue To Pull Request Walkthrough](/docs/tutorials/end-to-end-workflow)

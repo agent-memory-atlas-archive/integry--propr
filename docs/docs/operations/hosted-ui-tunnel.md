@@ -1,3 +1,8 @@
+---
+sidebar_label: "Hosted UI Tunnel"
+title: "Connect the hosted ProPR UI to your local API"
+description: "Set up a managed Cloudflare Tunnel so the hosted UI can reach your local API, and verify URLs, authentication, and security."
+---
 # Hosted UI Tunnel
 
 The hosted ProPR UI at `https://app.propr.dev` can drive a locally-running stack from your browser. An optional **Cloudflare Tunnel** — a managed sidecar running the official `cloudflare/cloudflared` image — publishes your local **API** at a per-instance hostname `https://t-<id>.propr.dev`. You keep everything running on your own machine and skip owning a public domain or operating an inbound proxy.

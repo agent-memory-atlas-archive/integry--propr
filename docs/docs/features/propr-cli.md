@@ -1,5 +1,8 @@
 ---
 sidebar_position: 12
+sidebar_label: "ProPR CLI"
+title: "ProPR CLI: install, authenticate, and run tasks"
+description: "Install propr-cli, start a local stack, authenticate to a backend, and manage plans, issues, tasks, repositories, and agents."
 ---
 
 # ProPR CLI
@@ -569,3 +572,8 @@ propr task get <task-id>
 ```
 
 The CLI package also exports its modules for programmatic use from Node.js — see `packages/cli/README.md` in the source repository.
+
+## Next steps
+
+- [Issue To Pull Request Walkthrough](/docs/tutorials/end-to-end-workflow)
+- [API reference](/docs/operations/api-reference)

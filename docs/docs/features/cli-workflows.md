@@ -1,5 +1,8 @@
 ---
 sidebar_position: 11
+sidebar_label: "CLI Workflows"
+title: "Source development CLI and Docker workflows"
+description: "Run ProPR development scripts, Docker Compose services, image builds, migrations, and operational debugging from source."
 ---
 
 # CLI Workflows
@@ -94,3 +97,8 @@ npm run fix-labels     # repair issue label state
 CLI debugging should be targeted and temporary. Examples include checking container logs (`npm run compose:logs` or `docker logs propr-worker`), inspecting Redis queue state, or verifying that mounted credential paths exist.
 
 For ongoing operations, prefer the dashboard, task records, and [Maintenance And Troubleshooting](../operations/maintenance.md).
+
+## Next steps
+
+- [Source Development Setup](/docs/tutorials/setup-source)
+- [Maintenance And Troubleshooting](/docs/operations/maintenance)

@@ -1,3 +1,8 @@
+---
+sidebar_label: "Agent Tank Usage Tracking"
+title: "Track coding agent usage limits with Agent Tank"
+description: "Enable Agent Tank to show live provider capacity and record per-call usage deltas alongside ProPR LLM log entries."
+---
 # Agent Tank Usage Tracking
 
 [Agent Tank](https://agenttank.io) monitors the usage limits of your AI coding agent CLIs. ProPR integrates with it to show live provider capacity in the Web UI and to record per-call usage deltas alongside every LLM log entry.

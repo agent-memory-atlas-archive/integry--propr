@@ -1,3 +1,8 @@
+---
+sidebar_label: "Dashboard Usage Tips"
+title: "Discover workflows with dashboard usage tips"
+description: "Use installation-relevant dashboard tips to find ProPR capabilities, launch strategies, and controls for temporary dismissal."
+---
 # Dashboard Usage Tips
 
 A compact strip beneath historical dashboard statistics links to documented ProPR capabilities. A worker ranks installation-relevant tips approximately once a day using the repository indexing agent and its configured fallback. Each tip explains why it fits your workflow using observed activity in your instance, suggests a documented action, and describes how it could help. These recommendations use installation-wide signals, not individual activity histories. If model generation fails, signal-based recommendations still explain the context and benefit. No extra model setting is needed. Up to three eligible tips appear; fewer or none is normal.
@@ -32,3 +37,8 @@ Discovery scores occupy the 70–79 range, below strong corrective gaps. Candida
 **Display history is not tracked.** Rendering, mounting, reloading and reading tips record no impressions, display counts, first/last-shown timestamps, or acknowledgements. Only an explicit dismissal records acknowledgement. Previous selection does not make a tip ineligible.
 
 The committed catalog is generated from documentation with `npm run tips:generate`. The generator links each tip to its published `/docs/...` route and fails if the target page or heading anchor does not exist; `npm run tips:check` reports catalog drift, and `node scripts/generate-usage-tips.mjs --check --site <build-dir>` also verifies every link against a fresh Docusaurus build. Its stable identities survive wording changes, preserving dismissal history. Runtime services import the catalog and never read the documentation tree.
+
+## Next steps
+
+- [Launching Work](/docs/features/launching-work)
+- [Goals](/docs/features/goals)

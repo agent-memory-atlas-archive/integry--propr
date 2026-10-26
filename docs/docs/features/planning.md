@@ -1,5 +1,8 @@
 ---
 sidebar_position: 3
+sidebar_label: "Planning Before Execution"
+title: "Plan GitHub issues before agent execution"
+description: "Build a draft in Planner Studio, gather repository context, refine the plan, and approve issues before coding begins."
 ---
 
 # Planning Before Execution
@@ -88,3 +91,8 @@ When you finalize a plan, ProPR creates the GitHub issues without trigger or mod
 - Come back later and add a processing label (`AI` or `propr`) to have ProPR implement them after all.
 
 This makes Planner Studio useful as a planning layer on its own, even for teams that do not use ProPR for implementation.
+
+## Next steps
+
+- [Planner Studio Walkthrough](/docs/tutorials/planner-studio)
+- [Repository Knowledge](/docs/features/repository-knowledge)

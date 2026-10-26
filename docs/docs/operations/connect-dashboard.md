@@ -1,6 +1,8 @@
 ---
 sidebar_position: 9
-title: Connect Dashboard
+sidebar_label: "Connect Dashboard"
+title: "ProPR Connect dashboard: seats, tokens, and tunnels"
+description: "Manage relay-connected installation seats, delivery history, relay tokens, and hosted UI tunnels in the Connect dashboard."
 ---
 
 # Connect Dashboard

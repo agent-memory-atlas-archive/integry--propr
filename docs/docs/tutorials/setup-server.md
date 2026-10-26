@@ -1,5 +1,8 @@
 ---
 sidebar_position: 3
+sidebar_label: "Server Setup"
+title: "Set up ProPR on a shared server"
+description: "Configure a server deployment with prebuilt images, public URLs, GitHub access, and a working ProPR Web UI."
 ---
 
 # Server Setup
@@ -160,3 +163,8 @@ propr remote-status
 CLI authentication uses GitHub Bearer tokens and is enabled by default (`ENABLE_BEARER_AUTH=true`).
 
 Before opening the server to traffic, harden the host and deployment: [Secure VPS Deployment](./setup-vps.md) covers OS hardening, the host firewall, localhost port binding, and TLS, and [Advanced VPS Hardening](./setup-vps-hardening.md) removes public inbound traffic entirely with a Cloudflare Tunnel and an SSO gate. For ongoing server care, see [Maintenance And Troubleshooting](../operations/maintenance.md).
+
+## Next steps
+
+- [Issue To Pull Request Walkthrough](/docs/tutorials/end-to-end-workflow)
+- [Production Deployment](/docs/operations/deployment)

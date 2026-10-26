@@ -1,3 +1,8 @@
+---
+sidebar_label: "Metrics"
+title: "Monitor system metrics, LLM usage, and costs"
+description: "Read dashboard health, per-call LLM logs, usage metrics, and cost breakdowns, or query the metrics APIs directly."
+---
 # Metrics
 
 ProPR records every task and every model call. The Web UI turns those records into two surfaces — the dashboard for aggregate health and the LLM Log page for per-call detail — backed by JSON APIs you can query directly. This page covers where each number comes from, how cost is calculated, and how to read the numbers week to week.

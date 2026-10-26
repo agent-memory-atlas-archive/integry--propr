@@ -1,5 +1,8 @@
 ---
 sidebar_position: 8
+sidebar_label: "Self-Hosted Operation"
+title: "Self-host ProPR with Docker and your credentials"
+description: "Choose local or server deployment, run published Docker images, and understand which data stays on your infrastructure."
 ---
 
 # Self-Hosted Operation
@@ -50,3 +53,8 @@ Run from source when you want to:
 - Develop new agent integrations
 
 For that path, install Node.js 22+, run `npm ci`, and use the development Compose stack or direct service commands — see [CLI Workflows](./cli-workflows.md) and [Source Setup](../tutorials/setup-source.md).
+
+## Next steps
+
+- [Local Setup](/docs/tutorials/setup-local)
+- [Server Setup](/docs/tutorials/setup-server)

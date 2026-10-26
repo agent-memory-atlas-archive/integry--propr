@@ -1,5 +1,7 @@
 ---
-title: Desktop application
+sidebar_label: "Desktop application"
+title: "ProPR Desktop app: install and connect an instance"
+description: "Install ProPR Desktop, pair with your instance, manage connections, and use supported guided local setup on Linux or macOS."
 ---
 
 # Desktop application

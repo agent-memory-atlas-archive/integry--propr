@@ -1,6 +1,8 @@
 ---
 sidebar_position: 3
-title: Security Overview
+sidebar_label: "Security Overview"
+title: "Self-hosted security and data boundaries"
+description: "Understand where ProPR stores code and credentials, how agent runs are isolated, and who can trigger work."
 ---
 
 # Security Overview

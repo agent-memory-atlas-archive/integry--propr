@@ -1,5 +1,8 @@
 ---
 sidebar_position: 1
+sidebar_label: "Setup"
+title: "Set up ProPR: local, server, or source install"
+description: "Choose an installation path and use the guided propr setup wizard to verify your host, connect GitHub, and start ProPR."
 ---
 
 # Setup
@@ -117,3 +120,8 @@ Once ProPR is running, configure it through either control surface — the Web U
 5. Run a small test issue or Planner Studio draft (or `propr plan create "..." --wait`).
 
 For day-to-day use, see [Daily Use](./usage.md). Before exposing ProPR beyond your own machine, harden the host and deployment: see [Secure VPS Deployment](./setup-vps.md) and [Advanced VPS Hardening](./setup-vps-hardening.md).
+
+## Next steps
+
+- [Issue To Pull Request Walkthrough](/docs/tutorials/end-to-end-workflow)
+- [ProPR CLI](/docs/features/propr-cli)

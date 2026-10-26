@@ -1,3 +1,8 @@
+---
+sidebar_label: "MCP Connections and Operator Tools"
+title: "Configure MCP access and operator tools"
+description: "Enable the ProPR MCP server, set allowed scopes, authorize clients, and manage connected apps for operator workflows."
+---
 # MCP Connections and Operator Tools
 
 MCP lets a connected coding or chat client inspect and operate ProPR using scoped authorization. It is disabled by default. Administrators use **Settings → Integrations & MCP → MCP Server** to manage enablement and the allowed scope ceiling (default: `read`, `plan`, `review`). The UI-managed path derives an HTTPS origin and encryption key from existing instance configuration and persists an instance identity. An explicit `MCP_ENABLED=true` selects environment-managed configuration, where the settings page shows the status but no toggle or ceiling; `false` prevents UI enablement. Missing configuration is shown as a setup problem; demo mode cannot enable MCP.
@@ -103,3 +108,8 @@ queued; a sequential receipt remains accepted until the queue completes.
 Unselected pending issues never start through the queue.
 
 Mutations require their corresponding scopes and repository access, and return durable receipts. Queue acceptance is not completion. Keep idempotency keys stable when retrying the same request, and repeat its arguments exactly. Failures return a structured error with a stable `code`, the `stage` where it failed and whether it is `retryable`. See the [full operator/setup reference](https://github.com/integry/propr/blob/main/docs/mcp.md) and [tool coverage](https://github.com/integry/propr/blob/main/docs/mcp-coverage.md) for schemas, Connect registration and deployment requirements.
+
+## Next steps
+
+- [Run ProPR From Your Chat Assistant](/docs/features/mcp-chat)
+- [Security Overview](/docs/concepts/security-overview)

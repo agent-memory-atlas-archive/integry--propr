@@ -1,5 +1,7 @@
 ---
-title: Synthetic Pools
+sidebar_label: "Synthetic Pools"
+title: "Pool agent accounts for capacity and failover"
+description: "Create virtual agent pools to rotate accounts, balance capacity, and retry eligible calls without changing task routing."
 ---
 
 # Synthetic Pools
@@ -112,3 +114,8 @@ An abbreviated two-tier document looks like this (synthetic agent and member IDs
   }]
 }
 ```
+
+## Next steps
+
+- [Agent Tank Usage Tracking](/docs/operations/agent-tank)
+- [Observability And Control](/docs/features/observability)

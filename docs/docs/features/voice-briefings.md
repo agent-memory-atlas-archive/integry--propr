@@ -1,5 +1,7 @@
 ---
-title: Voice Briefings
+sidebar_label: "Voice Briefings"
+title: "Voice briefings for task status and commands"
+description: "Enable experimental voice briefings to hear current work status and use supported spoken commands in the ProPR UI."
 ---
 
 # Voice Briefings
@@ -121,3 +123,8 @@ Microphone permission in **System Settings → Privacy & Security** and restart 
 
 Release-verification checklists and implementation notes live in the repository's
 `docs/voice-and-push-release-verification.md`.
+
+## Next steps
+
+- [Observability And Control](/docs/features/observability)
+- [Desktop application](/docs/operations/desktop-application)
