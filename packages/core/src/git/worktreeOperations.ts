@@ -3,11 +3,10 @@ import { SimpleGit } from 'simple-git';
 import fs from 'fs-extra';
 import path from 'path';
 import logger from '../utils/logger.js';
-import { createHooklessGit } from './hooklessGit.js';
 import { resolveRepositoryWorktreePath } from './repositoryPaths.js';
 import { redactAuthenticatedGitUrl } from './repoBranching.js';
 import { isSalvageRetainedWorktree } from './pushSalvage.js';
-import { mountUsesWorktree, removeWorktreeIfDisposable, worktreeRemovalDisabled } from './worktreeReclaim.js';
+import { detachRetainedWorktree, mountUsesWorktree, removeWorktreeIfDisposable, worktreeRemovalDisabled } from './worktreeReclaim.js';
 import { runningContainerMountSources } from './worktreeMounts.js';
 
 const WORKTREES_BASE_PATH = process.env.GIT_WORKTREES_BASE_PATH || "/tmp/git-processor/worktrees";
@@ -59,7 +58,7 @@ export async function cleanupWorktree(localRepoPath: string, worktreePath: strin
         // Preserve staged/untracked work while freeing the PR branch for a retry.
         // Never force this checkout: if detaching fails, keep the only copy anyway.
         try {
-            await createHooklessGit(worktreePath).raw(['checkout', '--detach']);
+            await detachRetainedWorktree(worktreePath);
         } catch (error) {
             logger.warn({ worktreePath, error: (error as Error).message }, 'Failed to detach retained worktree');
         }
@@ -71,26 +70,34 @@ export async function cleanupWorktree(localRepoPath: string, worktreePath: strin
     // own node_modules and build output, and keeping them all fills the disk.
     // Anything else is kept. Branches are never deleted here.
     if (!worktreeRemovalDisabled(retentionStrategy)) {
-        const outcome = await removeWorktreeIfDisposable(worktreePath, undefined, async () => {
-            try {
-                return !(await runningContainerMountSources()).some(mount => mountUsesWorktree(mount, worktreePath));
-            } catch (error) {
-                logger.warn({ worktreePath, error: (error as Error).message }, 'Container mount authority unavailable; keeping worktree');
-                return false;
+        try {
+            const outcome = await removeWorktreeIfDisposable(worktreePath, undefined, async () => {
+                try {
+                    if ((await runningContainerMountSources()).some(mount => mountUsesWorktree(mount, worktreePath))) return false;
+                    // Read after Docker's awaited boundary, on both sides of detach.
+                    const { db } = await import('../db/connection.js');
+                    return !await db('pr_followup_handoffs').whereNot('status', 'released')
+                        .where('worktree_path', worktreePath).first('worktree_path');
+                } catch (error) {
+                    logger.warn({ worktreePath, error: (error as Error).message }, 'Worktree liveness authority unavailable; keeping worktree');
+                    return false;
+                }
+            });
+            if (outcome.removed) {
+                logger.info({ worktreePath, branchName }, 'Removed finished worktree; its work is stored in Git');
+                return;
             }
-        });
-        if (outcome.removed) {
-            logger.info({ worktreePath, branchName }, 'Removed finished worktree; its work is stored in Git');
-            return;
+            const uncertain = ['remove_failed', 'unknown_git_state', 'not_a_worktree'].includes(outcome.reason);
+            logger[uncertain ? 'warn' : 'info']({ worktreePath, branchName, reason: outcome.reason },
+                uncertain ? 'Worktree cleanup needs inspection; checkout or Git state is unavailable' : 'Keeping worktree due to retention or Git safety checks');
+        } catch (error) {
+            logger.warn({ worktreePath, error: (error as Error).message }, 'Worktree removal claim failed; retaining checkout and releasing branch');
         }
-        const uncertain = ['remove_failed', 'unknown_git_state', 'not_a_worktree'].includes(outcome.reason);
-        logger[uncertain ? 'warn' : 'info']({ worktreePath, branchName, reason: outcome.reason },
-            uncertain ? 'Worktree cleanup needs inspection; checkout or Git state is unavailable' : 'Keeping worktree due to retention or Git safety checks');
     }
 
     try {
         // Release the branch for a subsequent task without discarding the retained checkout.
-        await createHooklessGit(worktreePath).raw(['checkout', '--detach']);
+        await detachRetainedWorktree(worktreePath);
     } catch {
         // Unknown Git state remains intact, including its branch registration.
     }

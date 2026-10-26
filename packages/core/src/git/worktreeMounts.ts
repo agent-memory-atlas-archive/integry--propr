@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import logger from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -36,18 +37,12 @@ export async function runningContainerMountSources(executeDockerCommand: DockerQ
         const command: unknown = JSON.parse(commandJson);
         const labels = JSON.parse(labelsJson) as Record<string, string> | null;
         const mounts = JSON.parse(mountsJson) as Array<{ Source: string }>;
-        // Recognize the shipped Compose commands and packaged launcher's app
-        // entrypoints. Arbitrary task containers mounting shared storage still
-        // protect it; an ancestor path alone is never service identity.
-        const service = Array.isArray(command) && (
-            (command.length === 3 && command[0] === 'npm' && command[1] === 'run'
-                && ['daemon', 'worker', 'indexing-worker', 'api'].includes(command[2])
-                && labels?.['com.docker.compose.service'] === command[2])
-            || (command.length === 2 && command[0] === 'node'
-                && ({ 'dist/src/daemon.js': 'daemon', 'dist/src/worker.js': 'worker',
-                    'dist/src/indexing_worker.js': 'indexing-worker', 'dist/packages/api/server.js': 'api' } as Record<string, string>)[command[1]] === labels?.['propr.service']
-                && typeof labels?.['propr.service'] === 'string')
-        );
+        // Service identity is a deployment label, independent of wrappers,
+        // entrypoints and additional command arguments. Unlabelled tasks fail closed.
+        const services = ['daemon', 'worker', 'indexing-worker', 'api'];
+        const service = services.includes(labels?.['propr.service'] ?? '')
+            || services.includes(labels?.['com.docker.compose.service'] ?? '');
+        void command; // Parse/validate the complete Docker response even with label identity.
         return mounts.map(mount => {
             if (typeof mount.Source !== 'string') throw new Error('Invalid Docker mount source');
             return { source: mount.Source, service };
@@ -55,3 +50,11 @@ export async function runningContainerMountSources(executeDockerCommand: DockerQ
     });
 }
 
+
+let startupProbe: Promise<void> | undefined;
+/** A process-level diagnostic; each removal still refreshes Docker authority. */
+export function probeWorktreeReclamationDocker(): Promise<void> {
+    return startupProbe ??= runningContainerMountSources().then(() => undefined).catch(error => {
+        logger.warn({ error: (error as Error).message }, 'Worktree reclamation disabled: Docker unavailable; provide the Docker CLI on PATH and access to its socket');
+    });
+}

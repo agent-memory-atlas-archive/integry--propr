@@ -162,7 +162,10 @@ await mock.module('@propr/core', { namedExports: {
         calls.push({ operation: 'worktree', args: { repo, branchName, worktreePath } });
         return { worktreePath, branchName };
     },
-    cleanupWorktree: async (_repo: string, worktree: string) => { await rm(worktree, { recursive: true, force: true }); },
+    cleanupWorktree: async (_repo: string, worktree: string, _branch: string, options: { success?: boolean } = {}) => {
+        calls.push({ operation: 'cleanup', args: { worktree, options } });
+        await rm(worktree, { recursive: true, force: true });
+    },
     pushBranch: async (worktree: string, branchName: string, options: { repoUrl: string; authToken: string }) => {
         assert.equal(options.authToken, token);
         calls.push({ operation: 'forkPush', args: { worktree, branchName, options } });
@@ -502,6 +505,9 @@ test('a force push that removes the captured baseline fails before execution and
     forcePushBeforeClone = true;
     await assert.rejects(run(), /retry preparation before implementation/);
     assert.equal(prompts.length, 0);
+    const cleanups = calls.filter(call => call.operation === 'cleanup');
+    assert.ok(cleanups.length > 0);
+    for (const cleanup of cleanups) assert.equal((cleanup.args.options as { success?: boolean }).success, false);
     assert.equal(await findPRContinuation(ref), undefined);
     const worktree = calls.find(c => c.operation === 'worktree')!.args as { worktreePath: string };
     await assert.rejects(import('node:fs/promises').then(fs => fs.access(worktree.worktreePath)), { code: 'ENOENT' });

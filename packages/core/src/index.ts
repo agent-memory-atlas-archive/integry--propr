@@ -662,5 +662,5 @@ export { generateManagedDependencies } from './storage/managedDependencies.js';
 
 export * from './extensions/extensionProfileStore.js';
 
-export { runningContainerMountSources } from './git/worktreeMounts.js';
+export { runningContainerMountSources, probeWorktreeReclamationDocker } from './git/worktreeMounts.js';
 export { resolveRepositoryWorktreeRoot } from './git/repositoryPaths.js';

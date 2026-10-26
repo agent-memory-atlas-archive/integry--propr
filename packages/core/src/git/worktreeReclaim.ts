@@ -46,8 +46,25 @@ export function worktreeRemovalDisabled(strategy = process.env.WORKTREE_RETENTIO
     return strategy === 'always_keep';
 }
 
+/** Bound delays to Node's supported timer range, including job-end callers. */
+export function worktreeGateWarningDelay(): number {
+    const raw = process.env.WORKTREE_SWEEP_INTERVAL_MS;
+    const value = Number(raw);
+    return raw && /^\d+$/.test(raw) && Number.isSafeInteger(value) && value > 0 && value <= 2_147_483_647
+        ? value : 3_600_000;
+}
+
 async function git(cwd: string, args: string[], timeout = 120_000): Promise<string> {
+    // Discover names without running a filter. Override every repository driver;
+    // disabling attributes alone would still leave in-repository .gitattributes.
+    const config = await execFileAsync('git', ['-C', cwd, 'config', '--null', '--list'], { timeout: 120_000 });
+    const filters = new Set(config.stdout.split('\0').map(entry => entry.split('\n')[0])
+        .filter(key => /^filter\..+\.(clean|smudge|process|required)$/.test(key))
+        .map(key => key.slice(0, key.lastIndexOf('.'))));
+    const overrides = [...filters].flatMap(name => ['-c', `${name}.clean=`, '-c', `${name}.smudge=`,
+        '-c', `${name}.process=`, '-c', `${name}.required=false`]);
     const { stdout } = await execFileAsync('git', [
+        ...overrides,
         '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'safe.directory=*', '-C', cwd, ...args,
     ], { timeout, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' } });
     return stdout;
@@ -73,6 +90,11 @@ export async function worktreeGitDir(worktreePath: string): Promise<string | nul
     } catch {
         return null;
     }
+}
+
+/** Also used by cleanup's fallback so configured filters never run on the host. */
+export async function detachRetainedWorktree(worktreePath: string): Promise<void> {
+    await git(worktreePath, ['checkout', '--detach']);
 }
 
 /** Proves that removing the checkout cannot lose work. Changes nothing. */
@@ -171,6 +193,7 @@ export async function removeWorktreeIfDisposable(
             // start of the sweep cannot authorize removal of a later candidate.
             if (stillUnused && !await stillUnused(true)) {
                 await fs.unlink(recordFile);
+                logger.warn({ worktreePath }, 'Worktree became in use after detach; checkout retained with detached HEAD');
                 return { removed: false, reason: 'in_use' };
             }
             // Docker/database inspection above can await external APIs. Refresh
@@ -183,9 +206,27 @@ export async function removeWorktreeIfDisposable(
             removalStarted = true;
             await git(proof.commonDir, ['worktree', 'remove', path.resolve(worktreePath)], 15 * 60_000);
         } catch (error) {
-            if (recordWritten && !removalStarted) await fs.unlink(recordFile).catch(() => undefined);
+            let diagnosticNeeded = removalStarted;
+            if (removalStarted) {
+                try {
+                    // Concurrent successful removal needs no interrupted diagnostic.
+                    const registered = (await git(proof.disposable ? proof.commonDir : root, ['worktree', 'list', '--porcelain', '-z']))
+                        .split('\0').includes(`worktree ${path.resolve(worktreePath)}`);
+                    if (!await exists(worktreePath) && !registered) diagnosticNeeded = false;
+                    // A refusal (dirty or locked) with every tracked file still
+                    // present is not evidence of an interrupted recursive delete.
+                    else if (registered) {
+                        const gitDir = await worktreeGitDir(worktreePath);
+                        if (gitDir && await exists(path.join(gitDir, 'index'))) {
+                            await git(worktreePath, ['status', '--porcelain', '--untracked-files=no']);
+                            if (!(await git(worktreePath, ['ls-files', '--deleted', '-z'])).length) diagnosticNeeded = false;
+                        }
+                    }
+                } catch { /* Unknown/partial state keeps the diagnostic. */ }
+            }
+            if (recordWritten && !diagnosticNeeded) await fs.unlink(recordFile).catch(() => undefined);
             logger.warn({ worktreePath, recordFile, error: (error as Error).message },
-                removalStarted ? 'Worktree removal failed or was interrupted; inspect the remnant and permissions before operator recovery (no forced retry)' : 'Worktree removal preparation failed; checkout retained');
+                diagnosticNeeded ? 'Worktree removal failed or was interrupted; inspect the remnant and permissions before operator recovery (no forced retry)' : 'Worktree removal refused or already completed; no interrupted-removal evidence');
             return { removed: false, reason: 'remove_failed' };
         }
         await generatedPayloadStorage().forget(worktreePath).catch(error => {
@@ -196,7 +237,7 @@ export async function removeWorktreeIfDisposable(
         });
         return { removed: true };
     }, undefined, { recordUse: false, waitWarning: {
-        afterMs: Number(process.env.WORKTREE_SWEEP_INTERVAL_MS) || 3_600_000,
+        afterMs: worktreeGateWarningDelay(),
         warn: () => logger.warn({ worktreePath }, 'Worktree removal is waiting for the storage lifecycle gate; inspect lifecycle ownership'),
     } });
 }

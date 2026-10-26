@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'fs-extra';
 import path from 'node:path';
 import os from 'node:os';
+import knex from 'knex';
 import { simpleGit, type SimpleGit } from 'simple-git';
 
 // Import production entry points only after isolating their fixed storage paths.
@@ -17,6 +18,11 @@ await fs.ensureDir(bin);
 await fs.writeFile(path.join(bin, 'docker'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
 await fs.writeFile(path.join(bin, 'sudo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
 process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
+const handoffDb = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+await handoffDb.schema.createTable('pr_followup_handoffs', table => {
+    table.string('worktree_path'); table.string('status'); table.string('phase');
+});
+await mock.module('../packages/core/src/db/connection.js', { namedExports: { db: handoffDb } });
 const { cleanupExistingBranch, addWorktreeWithoutTracking, removeStaleWorktreeRegistration } =
     await import('../packages/core/src/git/worktreeCreation.js');
 const { cleanupWorktree, cleanupExpiredWorktrees, safePruneWorktrees,
@@ -44,7 +50,7 @@ beforeEach(async () => {
     await git.add('.').commit('initial');
     initial = (await git.revparse(['HEAD'])).trim();
 });
-after(async () => fs.remove(root));
+after(async () => { await handoffDb.destroy(); await fs.remove(root); });
 
 async function create(branch = 'task') {
     await fs.ensureDir(path.dirname(worktree));
@@ -684,3 +690,113 @@ fi
         } finally { await fs.writeFile(docker, '#!/bin/sh\nexit 0\n', { mode: 0o755 }); }
     });
 }
+
+for (const late of [false, true]) {
+    test(`job-end cleanup retains a committed handoff (appears after detach=${late})`, async () => {
+        await finishedTask();
+        let reads = 0;
+        // Add the durable obligation at the same awaited boundary used by Docker.
+        const original = handoffDb.client.query.bind(handoffDb.client);
+        handoffDb.client.query = async (...args: Parameters<typeof original>) => {
+            const query = args[1] as { sql?: string };
+            if (query.sql?.startsWith('select') && ++reads === (late ? 2 : 1)) {
+                await handoffDb('pr_followup_handoffs').connection(args[0]).insert({ worktree_path: worktree, phase: 'committed', status: 'active' });
+            }
+            return original(...args);
+        };
+        try {
+            await cleanupWorktree(repo, worktree, 'task');
+            assert.equal(await fs.pathExists(worktree), true);
+            assert.equal(await registered(), true);
+            assert.equal((await simpleGit(worktree).raw(['branch', '--show-current'])).trim(), '');
+        } finally { handoffDb.client.query = original; }
+        await handoffDb('pr_followup_handoffs').where({ worktree_path: worktree }).update({ status: 'released' });
+        await cleanupWorktree(repo, worktree, 'task');
+        assert.equal(await fs.pathExists(worktree), false, 'only released obligations allow removal');
+    });
+}
+
+test('lifecycle claim failure still detaches a retained job-end worktree', async () => {
+    await finishedTask();
+    const { repositoryStorageLifecycle } = await import('../packages/core/src/storage/lifecycle.js');
+    const failing = mock.method(repositoryStorageLifecycle, 'use', async () => { throw new Error('claim write failed'); });
+    try {
+        await cleanupWorktree(repo, worktree, 'task');
+        assert.equal(await fs.pathExists(worktree), true);
+        assert.equal((await simpleGit(worktree).raw(['branch', '--show-current'])).trim(), '');
+    } finally { failing.mock.restore(); }
+});
+
+test('omitted retention strategy honors always_keep from the environment', async () => {
+    await finishedTask();
+    const previous = process.env.WORKTREE_RETENTION_STRATEGY;
+    process.env.WORKTREE_RETENTION_STRATEGY = 'always_keep';
+    try { await cleanupWorktree(repo, worktree, 'task'); }
+    finally {
+        if (previous === undefined) delete process.env.WORKTREE_RETENTION_STRATEGY;
+        else process.env.WORKTREE_RETENTION_STRATEGY = previous;
+    }
+    assert.equal(await fs.pathExists(worktree), true);
+});
+
+test('proof, removal and fallback detach never execute repository filter drivers', async () => {
+    await finishedTask();
+    const marker = path.join(root, 'filter-ran');
+    await fs.writeFile(path.join(worktree, '.gitattributes'), 'tracked filter=hostile\n');
+    await simpleGit(worktree).add('.gitattributes').commit('attributes');
+    for (const [key, value] of [['clean', `touch ${marker}; cat`], ['smudge', `touch ${marker}; cat`], ['process', `touch ${marker}; exit 1`], ['required', 'true']]) {
+        execFileSync('git', ['-C', repo, 'config', `filter.hostile.${key}`, value]);
+    }
+    await fs.writeFile(path.join(worktree, 'tracked'), 'published');
+    await fs.writeFile(path.join(worktree, 'keep'), 'force fallback');
+    await cleanupWorktree(repo, worktree, 'task');
+    assert.equal(await fs.pathExists(marker), false);
+    assert.equal(await fs.pathExists(worktree), true, 'untracked attributes keep the checkout');
+    await fs.remove(path.join(worktree, 'keep'));
+    assert.deepEqual(await removeWorktreeIfDisposable(worktree), { removed: true });
+    assert.equal(await fs.pathExists(marker), false);
+});
+
+for (const mode of ['refused', 'concurrent']) {
+    test(`removal retires diagnostics when ${mode} leaves no partial tracked checkout`, async () => {
+        await finishedTask();
+        const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+        const wrapper = path.join(bin, 'git');
+        await fs.writeFile(wrapper, `#!/bin/sh
+case " $* " in
+  *" worktree remove "*)
+    ${mode === 'concurrent' ? '"$PROPR_TEST_REAL_GIT" "$@"' : 'echo changed >> "$PROPR_TEST_REMOVAL_TARGET/tracked"'}
+    exit 42
+    ;;
+esac
+exec "$PROPR_TEST_REAL_GIT" "$@"
+`, { mode: 0o755 });
+        process.env.PROPR_TEST_REAL_GIT = realGit;
+        process.env.PROPR_TEST_REMOVAL_TARGET = worktree;
+        try {
+            assert.deepEqual(await removeWorktreeIfDisposable(worktree), { removed: false, reason: 'remove_failed' });
+            assert.ok(!(await interruptedWorktreeRemovals()).some(record => record.worktreePath === worktree));
+            assert.equal(await fs.pathExists(worktree), mode === 'refused');
+        } finally {
+            await fs.remove(wrapper);
+            delete process.env.PROPR_TEST_REAL_GIT;
+            delete process.env.PROPR_TEST_REMOVAL_TARGET;
+        }
+    });
+}
+
+test('storage gate warning delay rejects unsupported Node timer values', async () => {
+    const { worktreeGateWarningDelay } = await import('../packages/core/src/git/worktreeReclaim.js');
+    const previous = process.env.WORKTREE_SWEEP_INTERVAL_MS;
+    try {
+        for (const value of ['2147483648', '-1', 'Infinity', '0', '1.5', '20ms', '']) {
+            process.env.WORKTREE_SWEEP_INTERVAL_MS = value;
+            assert.equal(worktreeGateWarningDelay(), 3_600_000);
+        }
+        process.env.WORKTREE_SWEEP_INTERVAL_MS = '2147483647';
+        assert.equal(worktreeGateWarningDelay(), 2147483647);
+    } finally {
+        if (previous === undefined) delete process.env.WORKTREE_SWEEP_INTERVAL_MS;
+        else process.env.WORKTREE_SWEEP_INTERVAL_MS = previous;
+    }
+});

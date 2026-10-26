@@ -22,7 +22,7 @@ let dockerResponse = { exitCode: 0, stdout: '', stderr: '' };
 const { runningContainerMountSources: inspectMounts } = await import('../packages/core/src/git/worktreeMounts.js');
 const { resolveRepositoryWorktreeRoot } = await import('../packages/core/src/git/repositoryPaths.js');
 await mock.module('@propr/core', { namedExports: {
-    db: database,
+    db: database, probeWorktreeReclamationDocker: async () => {},
     logger: { warn: (_context: unknown, message: string) => { warnings.push(message); warningContexts.push(_context); } },
     sweepIdleWorktrees: async () => { sweeps++; return { removed: [], kept: 0, skipped: 0 }; },
     runningContainerMountSources: () => inspectMounts(async (_command, args) => {
@@ -145,4 +145,48 @@ test('Docker inspection preserves service classification without exempting task 
     assert.deepEqual(mounts, [true, true, false, false].map(service => ({ source: '/tmp/git-processor', service })));
     await assert.rejects(inspectMounts(async (_command, args) => ({ exitCode: 0, stderr: '', stdout: args[0] === 'ps' ? 'container' : '{broken' })));
     await assert.rejects(inspectMounts(async () => { throw Object.assign(new Error('spawn docker ENOENT'), { code: 'ENOENT' }); }), /ENOENT/);
+});
+
+test('blocked-repository diagnostics are bounded while authority remains fresh', async () => {
+    await database('tasks').insert(Array.from({ length: 60 }, (_, i) => ({ task_id: `orphan-${i}`, repository: 'owner/blocked' })));
+    assert.equal((await referencedWorktreePaths()).length, 1);
+    const diagnostic = warningContexts[0] as { taskCount: number; blockedRepositoryCount: number; sample: unknown[] };
+    assert.equal(diagnostic.taskCount, 60);
+    assert.equal(diagnostic.blockedRepositoryCount, 1);
+    assert.equal(diagnostic.sample.length, 20);
+    await database('task_history').insert(Array.from({ length: 60 }, (_, i) => ({ task_id: `orphan-${i}`, state: 'completed' })));
+    assert.deepEqual(await referencedWorktreePaths(database, false), []);
+    assert.equal(warningContexts.length, 1);
+});
+
+test('deployment service labels tolerate wrapper entrypoints and extra arguments', async () => {
+    const rows = [
+        [['wrapper', 'node', 'dist/src/worker.js', '--production'], { 'propr.service': 'worker' }],
+        [['node', 'dist/src/daemon.js', '--production'], { 'com.docker.compose.service': 'daemon' }],
+        [['npm', 'run', 'worker'], { 'propr.service': 'agent' }],
+    ].map(([command, labels]) => [command, labels, [{ Source: '/tmp/git-processor' }]].map(value => JSON.stringify(value)).join('\t')).join('\n');
+    assert.deepEqual(await inspectMounts(async (_command, args) => ({ exitCode: 0, stderr: '', stdout: args[0] === 'ps' ? 'containers' : rows })),
+        [true, true, false].map(service => ({ source: '/tmp/git-processor', service })));
+});
+
+test('startup Docker failure is reported once per process', async () => {
+    const fs = await import('node:fs/promises');
+    const os = await import('node:os');
+    const { default: coreLogger } = await import('../packages/core/src/utils/logger.js');
+    const { probeWorktreeReclamationDocker } = await import('../packages/core/src/git/worktreeMounts.js');
+    const bin = await fs.mkdtemp(path.join(os.tmpdir(), 'docker-probe-'));
+    await fs.writeFile(path.join(bin, 'docker'), '#!/bin/sh\nexit 42\n', { mode: 0o755 });
+    const previous = process.env.PATH;
+    const warning = mock.method(coreLogger, 'warn', () => {});
+    process.env.PATH = bin;
+    try {
+        await Promise.all([probeWorktreeReclamationDocker(), probeWorktreeReclamationDocker()]);
+        await probeWorktreeReclamationDocker();
+        assert.equal(warning.mock.callCount(), 1);
+        assert.match(String(warning.mock.calls[0].arguments[1]), /Worktree reclamation disabled: Docker unavailable/);
+    } finally {
+        process.env.PATH = previous;
+        warning.mock.restore();
+        await fs.rm(bin, { recursive: true });
+    }
 });

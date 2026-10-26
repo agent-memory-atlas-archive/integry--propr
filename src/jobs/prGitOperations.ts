@@ -47,7 +47,7 @@ export async function createPullRequestHeadWorktree(
         repoName: target.repoName,
     });
     const discardAndFail = async (message: string) => {
-        await cleanupWorktree(localRepoPath, worktreeInfo.worktreePath, worktreeInfo.branchName);
+        await cleanupWorktree(localRepoPath, worktreeInfo.worktreePath, worktreeInfo.branchName, { success: false });
         throw new Error(message);
     };
     if (options.requiredHeadSha && !await containsCommit(worktreeInfo.worktreePath, options.requiredHeadSha)) {

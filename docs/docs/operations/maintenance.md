@@ -125,15 +125,23 @@ Each task and follow-up gets its own worktree, usually with its own `node_module
 - no tracked entries flagged assume-unchanged or skip-worktree; no merge, rebase, cherry-pick/revert sequence or bisect in progress, the worktree isn't locked and has no submodules;
 - it isn't kept by push salvage.
 
+Sparse checkouts and indexes using skip-worktree or assume-unchanged are never automatically disposable (`hidden_index_entries`).
+
 Branches are never deleted. Any worktree that fails a check is kept, with its HEAD detached so the branch is free for the next job. With `WORKTREE_RETENTION_STRATEGY=keep_on_failure` or `keep_for_hours`, failed jobs keep their worktree even when it passes the checks; `always_keep` turns automatic removal off entirely.
 
 The daemon also sweeps the worktree root at startup and every `WORKTREE_SWEEP_INTERVAL_MS` (default 1 hour). This clears worktrees left by attempts killed before cleanup, and those created before this behavior existed. It removes a worktree only when it passes the same checks and also: Git has seen no activity in it for `WORKTREE_RETENTION_HOURS` (default 24); no unfinished or unreconciled goal or unreleased follow-up handoff refers to it, and no task in its repository has a nonterminal or unknown durable state; and no running container mounts it. If Docker can't be queried, the sweep removes nothing. Completed, reconciled goals cannot resume or reuse their saved checkout; paused and unreconciled goals remain protected.
 
 To clear the backlog sooner after deployment, lower `WORKTREE_RETENTION_HOURS` (for example, to `2`) and restart the daemon. A clean checkout held without a mounted container or a live durable task/goal/handoff reference is protected only by its idle age. Keep the threshold above the longest such host-side wait, including long CI waits in external or unrecorded flows.
 
+Both workers and the daemon need the Docker CLI on PATH and access to the Docker socket. Startup emits `Worktree reclamation disabled: Docker unavailable` if the probe fails; each cleanup still refreshes liveness. Service mounts of the shared root are exempt only for containers labelled `propr.service` or `com.docker.compose.service` with `daemon`, `worker`, `indexing-worker` or `api`, independently of their command. Only deployment services should carry those labels.
+
 The daemon needs access to the Docker socket, the clone/worktree roots at their host paths, and the same `PUSH_RESCUE_WORKTREE_RECORD_DIR` as workers. The supplied Compose and packaged launcher mount `/var/run/docker.sock` and `/tmp/git-processor` for the daemon; custom root paths need equivalent mounts. An unreadable worktree root logs a skipped-sweep warning.
 
-Removal detaches HEAD before deleting the checkout, freeing the task branch even when ignored build output takes minutes to remove. A failed or interrupted removal can leave a partial checkout. Its diagnostic lives outside the checkout under the shared storage lifecycle directory's `worktree-removals/` and appears in storage inventory as requiring inspection. Inspect permissions and Git registrations before operator recovery; deletion-only status or a missing `.git` file never authorizes forced removal.
+Job-end removal also retains any checkout named by an unreleased follow-up handoff, including committed work awaiting publication.
+
+Sweep diagnostics report the number of nonterminal tasks, the number of blocked repositories, and a sample of at most 20 tasks once per sweep. To reconcile a blocked repository, inspect the sampled tasks and their latest history, confirm that no job, goal, container or recovery obligation is active, then cancel or finish orphaned tasks through normal task controls. Do not infer termination from age alone or delete history to bypass protection. Callers that omit a retention strategy honor `WORKTREE_RETENTION_STRATEGY`, including `always_keep`.
+
+Removal detaches HEAD before deleting the checkout, freeing the task branch even when ignored build output takes minutes to remove. If a fresh reference or mount appears after detach, the checkout is kept detached and a warning records that outcome. A failed or interrupted removal can leave a partial checkout. Its diagnostic lives outside the checkout under the shared storage lifecycle directory's `worktree-removals/` and appears in storage inventory as requiring inspection. Inspect permissions and Git registrations before operator recovery; deletion-only status or a missing `.git` file never authorizes forced removal.
 
 The instance storage API provides supported dry-run and execute controls. Both require an authenticated instance administrator and, for POST, JSON plus `X-ProPR-Storage: 1`. Use your established instance API session:
 

@@ -153,6 +153,7 @@ describe('processAgentActionJob', () => {
     assert.deepEqual(h.grants.requested, ['action']);
     assert.deepEqual(h.grants.revoked, ['grant-1']);
     assert.equal(h.cleanup.mock.callCount(), 1);
+    assert.equal(h.cleanup.mock.calls[0].arguments[0], true);
     // Its own workspace, so it never collides with an auto run's report workspace.
     assert.equal((h.prepareWorkspace.mock.calls[0].arguments[0] as unknown as { runId: string }).runId, 'run-1-action');
   });
@@ -180,6 +181,7 @@ describe('processAgentActionJob', () => {
     assert.equal(h.taskState(), 'failed');
     assert.deepEqual(h.grants.revoked, ['grant-1']);
     assert.equal(h.cleanup.mock.callCount(), 1);
+    assert.equal(h.cleanup.mock.calls[0].arguments[0], false);
   });
 
   test('an agent that throws fails the run, and the grant is still revoked', async () => {

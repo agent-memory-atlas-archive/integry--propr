@@ -43,6 +43,11 @@ const mockRedisClient = {
     get: mock.fn(async (key: string) => mockRedisStore.get(key) ?? null),
     del: mock.fn(async (key: string) => { mockRedisStore.delete(key); }),
     setex: mock.fn(async (key: string, _ttl: number, value: string) => { mockRedisStore.set(key, value); }),
+    eval: mock.fn(async (_script: string, _count: number, key: string, token: string, ttl?: number) => {
+        if (mockRedisStore.get(key) !== token) return 0;
+        if (ttl === undefined) await mockRedisClient.del(key);
+        return 1;
+    }),
     on: mock.fn(),
     quit: mock.fn(async () => {}),
 };
@@ -780,10 +785,18 @@ describe('processMergeConflictJob', () => {
         assert.ok(body.includes('system-triggered'));
     });
 
-    test('cleans up worktree and releases lock in finally block', async () => {
+    test('renews the PR lock through slow worktree cleanup and releases it afterwards', async t => {
+        t.mock.timers.enable({ apis: ['setInterval'] });
         const job = createMockJob();
         let lockHeldDuringCleanup: boolean | undefined;
-        mockCleanupWorktree.mock.mockImplementation(async () => { lockHeldDuringCleanup = mockRedisStore.has('lock:pr:test-owner:test-repo:42'); });
+        mockCleanupWorktree.mock.mockImplementation(async () => {
+            lockHeldDuringCleanup = mockRedisStore.has('lock:pr:test-owner:test-repo:42');
+            const before = mockRedisClient.eval.mock.callCount();
+            t.mock.timers.tick(30_000);
+            await Promise.resolve();
+            assert.equal(mockRedisClient.eval.mock.callCount(), before + 1, 'renewal stays active during deletion');
+            assert.equal(mockRedisClient.eval.mock.calls.at(-1)!.arguments[4], 3600);
+        });
         try {
             await processMergeConflictJob(job);
         } finally {

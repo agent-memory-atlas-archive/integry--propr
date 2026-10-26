@@ -494,6 +494,7 @@ export function createAgentRunProcessor(overrides: Partial<AgentRunProcessorDeps
         activeRuns.add(runId);
         let workspace: AgentRunWorkspace | undefined;
         let reportStored = false;
+        let runSucceeded = false;
         let mcpGrant: IssuedAgentRunMcpGrant | null = null;
         try {
             await stateManager.updateTaskState(taskId, TaskStates.PROCESSING, { reason: 'Preparing agent workspace' });
@@ -549,6 +550,7 @@ export function createAgentRunProcessor(overrides: Partial<AgentRunProcessorDeps
             // 10. Close the task. A redelivery repeats this if it is interrupted.
             const settled = await finalizeReportedRun({ run: reported, taskId, stateManager, log });
             log.info({ runId, taskId, agentAlias: alias, model, state: settled?.state ?? null }, 'Agent run report stored');
+            runSucceeded = settled !== null && REPORTED_RUN_STATES.has(settled.state);
             return reportedRunResult(settled, { runId, taskId, correlationId });
         } catch (error) {
             // The report is kept; the retried delivery finishes the run.
@@ -559,7 +561,7 @@ export function createAgentRunProcessor(overrides: Partial<AgentRunProcessorDeps
             // 11. Nothing was committed or pushed: end the MCP grant and remove the workspace.
             activeRuns.delete(runId);
             await revokeGrantQuietly(deps.mcpGrants.revoke, runId, mcpGrant, log);
-            await workspace?.cleanup();
+            await workspace?.cleanup(runSucceeded);
         }
     };
 }
