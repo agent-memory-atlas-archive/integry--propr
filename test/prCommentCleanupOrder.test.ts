@@ -45,13 +45,14 @@ for (const deferred of [false, true]) test(`the PR lock is held until the worktr
     const log = { debug: noOp, info: noOp, warn: noOp, error: noOp };
     await cleanupJob({
         skipPendingCommentFollowup: deferred,
+        beforeReleaseLock: async () => { events.push('heartbeat-stopped'); },
         stateManager: { getTaskState: async () => null } as never, lockKey: 'lock:pr:acme:web:42', lockToken: 'token', taskId: 'task-1',
         localRepoPath: '/repo', worktreeInfo: { worktreePath: '/worktrees/pr-42', branchName: 'feature' } as never,
         repoOwner: 'acme', repoName: 'web', pullRequestNumber: 42, jobBranchName: 'feature', jobLlm: null,
         correlatedLogger: log as never, redisClient: { llen: async () => { assert.equal(deferred, false, 'a delayed job must own the retry without enqueueing pending comments'); return 0; } } as never,
     });
     // The next job for this PR can only start once the branch is free again.
-    assert.deepEqual(events, ['ci-released', 'worktree-removed', 'lock-released']);
+    assert.deepEqual(events, ['ci-released', 'worktree-removed', 'heartbeat-stopped', 'lock-released']);
 });
 
 for (const reason of ['cancelled_by_user', 'cancelled_pr_closed', undefined]) {

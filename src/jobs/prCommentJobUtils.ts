@@ -359,6 +359,8 @@ export async function handleJobError(error: Error, job: Job<CommentJobData>, opt
 export interface CleanupOptions {
     /** False when the attempt failed before publishing its work. */
     success?: boolean;
+    /** Keep renewal active through slow deletion, then drain it before releasing. */
+    beforeReleaseLock?: () => Promise<void>;
     /** Capacity deferral keeps pending work on the same delayed job. */
     skipPendingCommentFollowup?: boolean;
     stateManager: WorkerStateManager; lockKey: string; lockToken: string;
@@ -395,6 +397,7 @@ export async function cleanupJob(options: CleanupOptions): Promise<void> {
         }
     }
 
+    await options.beforeReleaseLock?.();
     if (await releasePRProcessingLock(redisClient, lockKey, lockToken)) {
         correlatedLogger.debug('Released PR processing lock');
     }

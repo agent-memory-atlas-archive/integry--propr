@@ -1,3 +1,4 @@
+import { startPRProcessingLockHeartbeat, releasePRProcessingLock } from './prProcessingLock.js';
 import { Job } from 'bullmq';
 import type { Logger } from 'pino';
 import { logger } from '@propr/core';
@@ -288,14 +289,12 @@ function buildBaseMergeOptions(options: {
 }
 
 async function releaseMergeJobResources(options: {
-    lockKey: string;
-    correlationId: string;
     localRepoPath: string | undefined;
     worktreeInfo: WorktreeInfo | undefined;
     jobSucceeded: boolean;
     correlatedLogger: Logger;
 }): Promise<void> {
-    const { lockKey, correlationId, localRepoPath, worktreeInfo, jobSucceeded, correlatedLogger } = options;
+    const { localRepoPath, worktreeInfo, jobSucceeded, correlatedLogger } = options;
     // Remove the worktree first: it holds the PR branch until then, and the next
     // job for this PR would fail to check it out.
     if (localRepoPath && worktreeInfo) {
@@ -304,11 +303,6 @@ async function releaseMergeJobResources(options: {
         } catch (cleanupError) {
             correlatedLogger.warn({ error: (cleanupError as Error).message }, 'Failed to cleanup worktree');
         }
-    }
-
-    const lockOwner = await redisClient.get(lockKey);
-    if (lockOwner === correlationId) {
-        await redisClient.del(lockKey);
     }
 }
 
@@ -336,116 +330,126 @@ export async function processMergeConflictJob(job: Job<MergeConflictJobData>): P
     const lockStatus = await acquireMergeJobLock(lockKey, correlationId, job, correlatedLogger);
     if (!lockStatus.acquired) return lockStatus.result;
 
-    const modelName = await resolveModelForTask(correlatedLogger);
-
+    const stopHeartbeat = startPRProcessingLockHeartbeat({
+        redisClient, lockKey, lockToken: correlationId,
+        onError: error => correlatedLogger.warn({ error }, 'Failed to renew merge job PR lock'),
+        onLockLost: () => correlatedLogger.warn({ lockKey }, 'Merge job PR lock was lost'),
+    });
     try {
-        await stateManager.createTaskStateIfAbsent(taskId, {
-            number: pullRequestNumber, repoOwner, repoName, modelName,
-            type: 'merge_conflict', pullRequestNumber,
-            // Lets a /merge comment posted through MCP find the task it started.
-            ...(commandCommentId === undefined ? {} : { commandCommentId }),
-        } as unknown as Parameters<typeof stateManager.createTaskState>[1], correlationId, String(job.id ?? taskId));
-    } catch (stateError) {
-        correlatedLogger.warn({ taskId, error: (stateError as Error).message }, 'Failed to create initial task state');
-    }
+        const modelName = await resolveModelForTask(correlatedLogger);
 
-    let localRepoPath: string | undefined;
-    let worktreeInfo: WorktreeInfo | undefined;
-    let octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>> | null = null;
-    let startingCommentId: number | undefined;
-    let prInfo: MergeTaskPrInfo | undefined;
-    let prDescription: string | null | undefined;
-    let recentComments: Awaited<ReturnType<typeof fetchAllComments>> = [];
-    let target: PullRequestGitTarget | undefined;
-    let publication: PullRequestPublication | undefined;
-    let jobSucceeded = false;
+        try {
+            await stateManager.createTaskStateIfAbsent(taskId, {
+                number: pullRequestNumber, repoOwner, repoName, modelName,
+                type: 'merge_conflict', pullRequestNumber,
+                // Lets a /merge comment posted through MCP find the task it started.
+                ...(commandCommentId === undefined ? {} : { commandCommentId }),
+            } as unknown as Parameters<typeof stateManager.createTaskState>[1], correlationId, String(job.id ?? taskId));
+        } catch (stateError) {
+            correlatedLogger.warn({ taskId, error: (stateError as Error).message }, 'Failed to create initial task state');
+        }
 
-    try {
-        octokit = await withRetry(() => getAuthenticatedOctokit(), { ...retryConfigs.githubApi, correlationId }, 'get_authenticated_octokit');
-        const githubToken = await octokit.auth({ type: "installation" }) as GitHubToken;
+        let localRepoPath: string | undefined;
+        let worktreeInfo: WorktreeInfo | undefined;
+        let octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>> | null = null;
+        let startingCommentId: number | undefined;
+        let prInfo: MergeTaskPrInfo | undefined;
+        let prDescription: string | null | undefined;
+        let recentComments: Awaited<ReturnType<typeof fetchAllComments>> = [];
+        let target: PullRequestGitTarget | undefined;
+        let publication: PullRequestPublication | undefined;
+        let jobSucceeded = false;
 
-        const startingComment = await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
-            owner: repoOwner, repo: repoName, issue_number: pullRequestNumber,
-            body: `🔀 **Auto-resolving merge conflicts** — merging \`${baseBranch}\` into \`${headBranch}\`\n\nThis is a system-triggered action to keep the PR branch up to date.`,
-        });
-        startingCommentId = (startingComment as { data: { id: number } }).data.id;
+        try {
+            octokit = await withRetry(() => getAuthenticatedOctokit(), { ...retryConfigs.githubApi, correlationId }, 'get_authenticated_octokit');
+            const githubToken = await octokit.auth({ type: "installation" }) as GitHubToken;
 
-        const head = await resolveMergeJobHead({
-            octokit, pullRequestNumber, repoOwner, repoName, headBranch, headSha, correlationId, correlatedLogger,
-        });
-        target = head.target;
-        publication = new PullRequestPublication(octokit, {
-            repoOwner, repoName, pullRequestNumber,
-        }, head.prData);
+            const startingComment = await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
+                owner: repoOwner, repo: repoName, issue_number: pullRequestNumber,
+                body: `🔀 **Auto-resolving merge conflicts** — merging \`${baseBranch}\` into \`${headBranch}\`\n\nThis is a system-triggered action to keep the PR branch up to date.`,
+            });
+            startingCommentId = (startingComment as { data: { id: number } }).data.id;
 
-        ({ prInfo, prDescription, recentComments } = await fetchMergeTitleContextInfo({
-            octokit, pullRequestNumber, repoOwner, repoName, taskId, prData: head.prData, correlatedLogger,
-        }));
-        await updateMergeTaskBeforeLocalMerge({
-            prInfo, stateManager, taskId, pullRequestNumber, repoOwner, repoName, baseBranch,
-            headBranch: target.branchName, correlatedLogger,
-        });
+            const head = await resolveMergeJobHead({
+                octokit, pullRequestNumber, repoOwner, repoName, headBranch, headSha, correlationId, correlatedLogger,
+            });
+            target = head.target;
+            publication = new PullRequestPublication(octokit, {
+                repoOwner, repoName, pullRequestNumber,
+            }, head.prData);
 
-        await stateManager.updateTaskState(taskId, TaskStates.PROCESSING, { reason: 'Starting merge conflict resolution' });
-        await ensureGitRepository(correlatedLogger);
+            ({ prInfo, prDescription, recentComments } = await fetchMergeTitleContextInfo({
+                octokit, pullRequestNumber, repoOwner, repoName, taskId, prData: head.prData, correlatedLogger,
+            }));
+            await updateMergeTaskBeforeLocalMerge({
+                prInfo, stateManager, taskId, pullRequestNumber, repoOwner, repoName, baseBranch,
+                headBranch: target.branchName, correlatedLogger,
+            });
 
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-        ({ localRepoPath, worktreeInfo } = await publication.prepare(`pr-${pullRequestNumber}-merge-${timestamp}`));
-        target = publication.target;
+            await stateManager.updateTaskState(taskId, TaskStates.PROCESSING, { reason: 'Starting merge conflict resolution' });
+            await ensureGitRepository(correlatedLogger);
 
-        // The merge commit replaces the current head, so its validation is obsolete.
-        // Opt-in per repository; a failure there never stops the merge.
-        await suspendObsoleteValidationForImplementation({
-            ref: { repoOwner, repoName, pullRequestNumber }, continuation: publication.continuation, taskId, correlationId,
-        }, { octokit, log: correlatedLogger });
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+            ({ localRepoPath, worktreeInfo } = await publication.prepare(`pr-${pullRequestNumber}-merge-${timestamp}`));
+            target = publication.target;
 
-        correlatedLogger.info({
-            worktreePath: worktreeInfo.worktreePath, branchName: worktreeInfo.branchName,
-            headRepository: `${target.repoOwner}/${target.repoName}`,
-        }, 'Created worktree for merge conflict resolution');
+            // The merge commit replaces the current head, so its validation is obsolete.
+            // Opt-in per repository; a failure there never stops the merge.
+            await suspendObsoleteValidationForImplementation({
+                ref: { repoOwner, repoName, pullRequestNumber }, continuation: publication.continuation, taskId, correlationId,
+            }, { octokit, log: correlatedLogger });
 
-        const mergeTarget = target;
-        const preparedWorktree = worktreeInfo;
-        const result = await handleMergeWithAgent({
-            mergeOptions: buildBaseMergeOptions({ target: mergeTarget, repoOwner, repoName, githubToken }),
-            onMerged: async ({ conflictedFiles, baseCommit }) => {
-                if (conflictedFiles.length === 0 && !prInfo) return;
-                await updateMergeTaskAfterLocalMerge({
-                    mergeResult: { outcome: conflictedFiles.length > 0 ? 'conflicts' : 'clean', baseCommit, conflictedFiles },
-                    mergeTitleInfo: prInfo ?? { prTitle: 'Untitled pull request', linkedIssueNumber: null },
-                    prDescription,
-                    recentComments,
-                    worktreeInfo: preparedWorktree,
-                    githubToken,
-                    stateManager,
-                    taskId,
-                    pullRequestNumber,
-                    repoOwner,
-                    repoName,
-                    baseBranch,
-                    headBranch: mergeTarget.branchName,
-                    correlationId,
-                    correlatedLogger,
-                });
-            },
-            worktreeInfo, publication, baseBranch,
-            pullRequestNumber, repoOwner, repoName,
-            githubToken, octokit, startingCommentId,
-            stateManager, taskId, correlationId, correlatedLogger, redisClient,
-        });
-        jobSucceeded = result.status === 'complete';
-        return result;
+            correlatedLogger.info({
+                worktreePath: worktreeInfo.worktreePath, branchName: worktreeInfo.branchName,
+                headRepository: `${target.repoOwner}/${target.repoName}`,
+            }, 'Created worktree for merge conflict resolution');
 
-    } catch (error) {
-        return await handleMergeJobError(error as Error, {
-            octokit, startingCommentId, stateManager, taskId,
-            repoOwner, repoName, baseBranch, headBranch: publication?.target.branchName ?? target?.branchName ?? headBranch,
-            pullRequestNumber, correlatedLogger,
-        });
+            const mergeTarget = target;
+            const preparedWorktree = worktreeInfo;
+            const result = await handleMergeWithAgent({
+                mergeOptions: buildBaseMergeOptions({ target: mergeTarget, repoOwner, repoName, githubToken }),
+                onMerged: async ({ conflictedFiles, baseCommit }) => {
+                    if (conflictedFiles.length === 0 && !prInfo) return;
+                    await updateMergeTaskAfterLocalMerge({
+                        mergeResult: { outcome: conflictedFiles.length > 0 ? 'conflicts' : 'clean', baseCommit, conflictedFiles },
+                        mergeTitleInfo: prInfo ?? { prTitle: 'Untitled pull request', linkedIssueNumber: null },
+                        prDescription,
+                        recentComments,
+                        worktreeInfo: preparedWorktree,
+                        githubToken,
+                        stateManager,
+                        taskId,
+                        pullRequestNumber,
+                        repoOwner,
+                        repoName,
+                        baseBranch,
+                        headBranch: mergeTarget.branchName,
+                        correlationId,
+                        correlatedLogger,
+                    });
+                },
+                worktreeInfo, publication, baseBranch,
+                pullRequestNumber, repoOwner, repoName,
+                githubToken, octokit, startingCommentId,
+                stateManager, taskId, correlationId, correlatedLogger, redisClient,
+            });
+            jobSucceeded = result.status === 'complete';
+            return result;
+
+        } catch (error) {
+            return await handleMergeJobError(error as Error, {
+                octokit, startingCommentId, stateManager, taskId,
+                repoOwner, repoName, baseBranch, headBranch: publication?.target.branchName ?? target?.branchName ?? headBranch,
+                pullRequestNumber, correlatedLogger,
+            });
+        } finally {
+            // Released before the PR lock so the next job for this PR cannot cancel runs being restored.
+            await releaseFollowupCiSuspensionsForTask({ taskId }, { octokit: octokit ?? undefined, log: correlatedLogger })
+                .catch(error => correlatedLogger.warn({ taskId, error: (error as Error).message }, 'Failed to release follow-up CI suspension; reconciliation will retry it'));
+            await releaseMergeJobResources({ localRepoPath, worktreeInfo, jobSucceeded, correlatedLogger });
+        }
     } finally {
-        // Released before the PR lock so the next job for this PR cannot cancel runs being restored.
-        await releaseFollowupCiSuspensionsForTask({ taskId }, { octokit: octokit ?? undefined, log: correlatedLogger })
-            .catch(error => correlatedLogger.warn({ taskId, error: (error as Error).message }, 'Failed to release follow-up CI suspension; reconciliation will retry it'));
-        await releaseMergeJobResources({ lockKey, correlationId, localRepoPath, worktreeInfo, jobSucceeded, correlatedLogger });
+        await stopHeartbeat();
+        await releasePRProcessingLock(redisClient, lockKey, correlationId);
     }
 }

@@ -32,13 +32,27 @@ export class StorageBusyError extends Error {
   constructor() { super('Storage lifecycle is busy or requires recovery'); }
 }
 
+interface StorageUseOptions {
+  /** Maintenance participates in the barrier without advancing actual-use time. */
+  recordUse?: boolean;
+  waitWarning?: { afterMs: number; warn: () => void };
+}
+
+interface StorageUseScope {
+  active: boolean;
+  users: number;
+  claim: string;
+  recordUse: boolean;
+  waitWarning?: StorageUseOptions['waitWarning'];
+}
+
 /**
  * No TTL stealing: a crashed process is uncertainty, not permission to delete.
  * A claim records its owning process, and only proof that the owner is gone
  * (see claimOwnerGone) releases it; elapsed time never does.
  */
 export class StorageLifecycle {
-  private context = new AsyncLocalStorage<{ active: boolean; users: number; claim: string }>();
+  private context = new AsyncLocalStorage<StorageUseScope>();
   constructor(readonly root: string = repositoryLifecycleRoot(), private readonly ownerProbe?: ClaimOwnerProbe) {}
 
   async initialize(): Promise<void> {
@@ -110,12 +124,18 @@ export class StorageLifecycle {
   }
 
   /** A read claim covers the entire operation, including child Git and filesystem work. */
-  async use<T>(run: () => Promise<T>, admission?: { filesystem: string; reserveBytes: number; taskBytes: number }): Promise<T> {
+  async use<T>(run: () => Promise<T>, admission?: { filesystem: string; reserveBytes: number; taskBytes: number }, options: StorageUseOptions = {}): Promise<T> {
     const existing = this.context.getStore();
     if (existing?.active) {
       existing.users++;
-      try { return await run(); }
-      finally { await this.release(existing); }
+      try {
+        // Actual use nested inside maintenance still advances the durable clock.
+        if (!existing.recordUse && options.recordUse !== false) {
+          existing.recordUse = true;
+          await this.touch();
+        }
+        return await run();
+      } finally { await this.release(existing); }
     }
     const claim = path.join(this.root, 'readers', randomUUID());
     // Publish intent before waiting: cleanup cancels proof, while the gate still
@@ -126,16 +146,23 @@ export class StorageLifecycle {
     await this.initialize();
     await fs.writeFile(claim, JSON.stringify({ ...(admission ? { reservedBytes: admission.taskBytes } : {}), owner: currentClaimOwner() }), { flag: 'wx' });
     try {
-      await this.exclusive(async () => {
+      await this.withWaitWarning(() => this.exclusive(async () => {
         if (admission) await this.admit(admission);
-        await this.touch();
-      }, Infinity);
+        if (options.recordUse !== false) await this.touch();
+      }, Infinity), options.waitWarning);
     } catch (error) { await fs.unlink(claim); throw error; }
-    const scope = { active: true, users: 1, claim };
+    const scope = { active: true, users: 1, claim, recordUse: options.recordUse !== false, waitWarning: options.waitWarning };
     return this.context.run(scope, async () => {
       try { return await run(); }
       finally { await this.release(scope); }
     });
+  }
+
+  private async withWaitWarning<T>(run: () => Promise<T>, warning?: StorageUseOptions['waitWarning']): Promise<T> {
+    const timer = warning ? setTimeout(warning.warn, warning.afterMs) : undefined;
+    timer?.unref();
+    try { return await run(); }
+    finally { if (timer) clearTimeout(timer); }
   }
 
   private async admit(admission: { filesystem: string; reserveBytes: number; taskBytes: number }): Promise<void> {
@@ -175,13 +202,13 @@ export class StorageLifecycle {
     if (stat.bavail * stat.bsize < admission.reserveBytes + reserved) throw new Error('Worktree disk pressure: admission reserve unavailable; data retained');
   }
 
-  private async release(scope: { active: boolean; users: number; claim: string }): Promise<void> {
+  private async release(scope: StorageUseScope): Promise<void> {
     if (--scope.users > 0) return;
     scope.active = false;
-    await this.exclusive(async () => {
-      await this.touch();
+    await this.withWaitWarning(() => this.exclusive(async () => {
+      if (scope.recordUse) await this.touch();
       await fs.unlink(scope.claim);
-    }, Infinity);
+    }, Infinity), scope.waitWarning);
   }
 
 }

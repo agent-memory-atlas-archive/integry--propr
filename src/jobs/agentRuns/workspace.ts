@@ -48,8 +48,8 @@ export interface AgentRunWorkspace {
     /** Paths and repository availability as the prompt builder describes them. */
     promptWorkspace: AgentReportPromptWorkspace;
     attachments: AgentReportPromptAttachment[];
-    /** Removes the worktree or scratch directory; never throws. */
-    cleanup(): Promise<void>;
+    /** Cleans up according to retention; defaults to failure until the caller completes. Never throws. */
+    cleanup(success?: boolean): Promise<void>;
 }
 
 export interface PrepareAgentRunWorkspaceInput {
@@ -194,9 +194,9 @@ async function prepareRepositoryWorkspace(input: PrepareAgentRunWorkspaceInput, 
         { issueId: 'agent-run', issueTitle: runId, owner, repoName: repo },
         { baseBranch: null, octokit: (octokit ?? null) as never },
     );
-    const cleanup = async (): Promise<void> => {
+    const cleanup = async (success = false): Promise<void> => {
         try {
-            await cleanupWorktree(localRepoPath, worktree.worktreePath, worktree.branchName, { deleteBranch: true, success: true });
+            await cleanupWorktree(localRepoPath, worktree.worktreePath, worktree.branchName, { deleteBranch: true, success });
         } catch (error) {
             log.warn({ runId, worktreePath: worktree.worktreePath, error: (error as Error).message }, 'Failed to clean up agent run worktree');
         }

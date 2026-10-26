@@ -136,6 +136,14 @@ export class GeneratedPayloadStorage {
       }
     });
   }
+  /** Drops the records of a worktree that was removed as a whole. */
+  async forget(worktree: string): Promise<void> {
+    for (const payload of GENERATED_PAYLOADS) {
+      await fs.unlink(path.join(this.root, 'generated-payloads', `${this.id(worktree, payload)}.json`)).catch(error => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      });
+    }
+  }
   private async pinned<T>(record: Record, run: (directory: string) => Promise<T>): Promise<T> {
     // Pin every ancestor before using it. This also confines same-device symlink
     // substitutions of the worktree or .propr parent, across proof and removal.

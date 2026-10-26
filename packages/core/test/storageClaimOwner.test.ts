@@ -74,3 +74,40 @@ test('new claims record their owning process', async () => {
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test('maintenance claims warn while waiting for a gate and retain their barrier until released', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'storage-wait-'));
+  const storage = new StorageLifecycle(root);
+  await storage.initialize();
+  await fs.writeFile(path.join(root, 'last-use'), '1000');
+  await fs.mkdir(path.join(root, 'gate'));
+  let warned = false;
+  const completed = storage.use(async () => {
+    assert.equal(await storage.busy(), true);
+  }, undefined, { recordUse: false, waitWarning: { afterMs: 10, warn: () => { warned = true; } } });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 75));
+    assert.equal(warned, true);
+    assert.equal(await storage.busy(), true, 'waiting never steals the gate or drops intent');
+    await fs.rmdir(path.join(root, 'gate'));
+    await completed;
+    assert.equal(await storage.busy(), false);
+    assert.equal(await fs.readFile(path.join(root, 'last-use'), 'utf8'), '1000');
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('actual use nested in maintenance still updates the use clock', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'storage-nested-use-'));
+  const storage = new StorageLifecycle(root);
+  await storage.initialize();
+  await fs.writeFile(path.join(root, 'last-use'), '1000');
+  try {
+    await storage.use(async () => {
+      await storage.use(async () => {
+        assert.ok((await storage.lastUse())! > 1000);
+      });
+    }, undefined, { recordUse: false });
+    assert.ok((await storage.lastUse())! > 1000);
+    assert.equal(await storage.busy(), false);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});

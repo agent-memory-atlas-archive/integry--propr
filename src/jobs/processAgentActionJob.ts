@@ -254,6 +254,7 @@ export function createAgentActionProcessor(overrides: Partial<AgentActionProcess
 
         activeRuns.add(runId);
         let workspace: AgentRunWorkspace | undefined;
+        let actionSucceeded = false;
         let mcpGrant: IssuedAgentRunMcpGrant | null = null;
         try {
             await stateManager.updateTaskState(taskId, TaskStates.PROCESSING, { reason: 'Preparing agent workspace' });
@@ -287,6 +288,7 @@ export function createAgentActionProcessor(overrides: Partial<AgentActionProcess
             const completed = await deps.transitionRun(runId, ['acting'], 'completed', { actionSummary });
             if (!completed) return taskFollowsRun(context);
             await settleTask(context, manager => manager.markTaskCompleted(taskId, { status: 'complete', notificationRecap: agentReportRecap(actionSummary) }));
+            actionSucceeded = true;
             log.info({ runId, taskId, agentAlias: alias, model }, 'Agent run acting step completed');
             return { status: 'complete', runId, taskId, state: 'completed', correlationId };
         } catch (error) {
@@ -298,7 +300,7 @@ export function createAgentActionProcessor(overrides: Partial<AgentActionProcess
             // 7. The grant ends with the phase, whether the agent succeeded or not.
             activeRuns.delete(runId);
             await revokeGrantQuietly(deps.mcpGrants.revoke, runId, mcpGrant, log);
-            await workspace?.cleanup();
+            await workspace?.cleanup(actionSucceeded);
         }
     };
 }

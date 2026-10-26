@@ -1,4 +1,4 @@
-import { preventWithdrawnJob } from '@propr/core';
+import { probeWorktreeReclamationDocker, preventWithdrawnJob } from '@propr/core';
 import { enforceInstanceNetworkPolicyOutsideRuns } from './jobs/networkEgressSafetyNet.js';
 import { startUsageTipsSelectionRunner } from './usageTipsSelectionRunner.js';
 import 'dotenv/config';
@@ -193,6 +193,7 @@ export interface StartedWorker {
 }
 
 async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> {
+    void probeWorktreeReclamationDocker();
     const workerId = `worker:${generateCorrelationId()}`;
     let workerConcurrency = resolveWorkerConcurrency();
     let aiPrimaryTag = 'AI';

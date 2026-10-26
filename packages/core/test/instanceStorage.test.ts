@@ -505,3 +505,22 @@ test('demotion after slow Git proof restores quarantine and prevents deletion', 
   assert.equal(await fs.readFile(path.join(f.clone, 'public'), 'utf8'), 'published sentinel');
   await assert.rejects(f.service.execute(f.instanceId, preview.confirmation, 'admin'));
 });
+
+test('storage inventory surfaces interrupted worktree removals without authorizing cleanup', async t => {
+  const f = await serviceFixture(t);
+  const records = path.join(f.lifecycle.root, 'worktree-removals');
+  await fs.mkdir(records, { recursive: true });
+  await fs.writeFile(path.join(records, `${'a'.repeat(64)}.json`), JSON.stringify({ worktreePath: '/worktrees/owner/repo/partial' }));
+  await fs.writeFile(path.join(records, `${'b'.repeat(64)}.json`), '{truncated');
+  await fs.writeFile(path.join(records, `${'c'.repeat(64)}.json`), 'null');
+  const inventory = await f.service.inventory();
+  for (const id of ['b', 'c']) {
+    const unreadable = inventory.repositories.find(record => record.id === `worktree-removal-${id.repeat(64)}`);
+    assert.match(unreadable!.name!, /Unreadable removal diagnostic/);
+    assert.deepEqual(unreadable!.protectedReasons, ['unknown_git_state']);
+  }
+  const remnant = inventory.repositories.find(record => record.id === `worktree-removal-${'a'.repeat(64)}`);
+  assert.ok(remnant);
+  assert.match(remnant.name!, /partial.*removal interrupted/);
+  assert.deepEqual(remnant.protectedReasons, ['unknown_git_state']);
+});

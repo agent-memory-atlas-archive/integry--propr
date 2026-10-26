@@ -154,7 +154,7 @@ export class PullRequestPublication {
         const { token } = await this.octokit.auth({ type: 'installation' }) as { token: string };
         let prepared: Awaited<ReturnType<typeof createPullRequestHeadWorktree>> | undefined;
         const discard = async () => {
-            if (prepared) await cleanupWorktree(prepared.localRepoPath, prepared.worktreeInfo.worktreePath, prepared.worktreeInfo.branchName);
+            if (prepared) await cleanupWorktree(prepared.localRepoPath, prepared.worktreeInfo.worktreePath, prepared.worktreeInfo.branchName, { success: false });
             prepared = undefined;
         };
         try {

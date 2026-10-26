@@ -121,6 +121,7 @@ export {
     pruneRescueRefs, pruneRescueBundles, createGitRescueRefPruneDependencies, type RescueRefPruneDependencies, type RemoteRescueRef,
 } from './git/rescueRefs.js';
 export { cleanupWorktree, cleanupExpiredWorktrees, safePruneWorktrees, setupWorktreePermissions, addToSafeDirectories, verifyWorktreeCreation, setupWorktreeRemote, getWorktreePath } from './git/worktreeOperations.js';
+export { proveWorktreeDisposable, removeWorktreeIfDisposable, sweepIdleWorktrees, worktreeRemovalDisabled, type WorktreeKeepReason, type WorktreeSweepResult } from './git/worktreeReclaim.js';
 export { isGitCorruptionError, GIT_CORRUPTION_PATTERNS, getCorruptionPatternStrings } from './git/gitCorruption.js';
 export { assertCommitIsAncestor, mergeBaseIntoBranch } from './git/mergeOperations.js';
 export type { MergeOutcome, MergeResult, MergeBaseIntoBranchOptions } from './git/mergeOperations.js';
@@ -660,3 +661,6 @@ export { GeneratedPayloadStorage, generatedPayloadStorage, GENERATED_PAYLOADS } 
 export { generateManagedDependencies } from './storage/managedDependencies.js';
 
 export * from './extensions/extensionProfileStore.js';
+
+export { runningContainerMountSources, probeWorktreeReclamationDocker } from './git/worktreeMounts.js';
+export { resolveRepositoryWorktreeRoot } from './git/repositoryPaths.js';

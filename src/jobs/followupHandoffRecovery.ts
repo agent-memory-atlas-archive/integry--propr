@@ -349,16 +349,18 @@ export async function settleFollowupHandoffAfterFailure(
     const git = deps.git ?? createFollowupHandoffGitOps(async () => {
         throw new Error('Publication evidence inspection needs no push token');
     });
+    const publicationPending = ['committed', 'pushed'].includes(record.phase);
     let unpublished: boolean;
     let branchHeld = true;
     try {
         const attachment = await git.worktreeAttachment(record.worktree_path, record.branch_name);
         if (attachment === 'missing') {
-            unpublished = false;
+            // Checkout removal cannot discharge an owed push or completion comment.
+            unpublished = publicationPending;
             // A missing directory does not free the branch: Git keeps the
             // worktree registration (and its claim) until it is removed.
             branchHeld = (await git.branchWorktreeRegistrations(record.local_repo_path, record.branch_name)).length > 0;
-        } else if (attachment === 'not_on_branch' || record.phase === 'committed' || record.phase === 'pushed') {
+        } else if (attachment === 'not_on_branch' || publicationPending) {
             unpublished = true;
         } else {
             unpublished = await git.hasUncommittedChanges(record.worktree_path)

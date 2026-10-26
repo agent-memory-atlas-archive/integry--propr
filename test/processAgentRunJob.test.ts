@@ -215,6 +215,7 @@ describe('processAgentRunJob', () => {
     assert.equal(options.worktreePath, '/tmp/worktree');
     assert.deepEqual(options.toolPolicy, { allowWeb: false });
     assert.equal(h.cleanup.mock.callCount(), 1);
+    assert.equal(h.cleanup.mock.calls[0].arguments[0], true);
   });
 
   test('previous reports are loaded for the definition and passed to the prompt builder', async () => {
@@ -380,6 +381,7 @@ describe('processAgentRunJob', () => {
     assert.equal(h.run().failureReason, 'Agent execution failed: container exited');
     assert.ok(h.stateCalls.some(call => call[0] === 'failed'));
     assert.equal(h.cleanup.mock.callCount(), 1);
+    assert.equal(h.cleanup.mock.calls[0].arguments[0], false);
   });
 
   test('an empty report fails the run', async () => {
