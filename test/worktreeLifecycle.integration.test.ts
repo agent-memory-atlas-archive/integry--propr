@@ -11,8 +11,10 @@ const root = await fs.mkdtemp(path.join(os.tmpdir(), 'propr-worktree-lifecycle-'
 process.env.GIT_CLONES_BASE_PATH = path.join(root, 'clones');
 process.env.GIT_WORKTREES_BASE_PATH = path.join(root, 'worktrees');
 process.env.GIT_CONFIG_GLOBAL = path.join(root, 'gitconfig');
+process.env.PUSH_RESCUE_WORKTREE_RECORD_DIR = path.join(root, 'salvage-records');
 const bin = path.join(root, 'bin');
 await fs.ensureDir(bin);
+await fs.writeFile(path.join(bin, 'docker'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
 await fs.writeFile(path.join(bin, 'sudo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
 process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
 const { cleanupExistingBranch, addWorktreeWithoutTracking, removeStaleWorktreeRegistration } =
@@ -447,4 +449,130 @@ test('cleanup warns for unavailable Git state instead of claiming the checkout h
         assert.match(unavailable.message, /needs inspection/);
         assert.doesNotMatch(unavailable.message, /work not stored elsewhere/);
     } finally { warn.mock.restore(); }
+});
+
+for (const invalid of ['malformed', 'unreadable', 'wrong-path', 'bad-deadline', 'dangling-record']) {
+    test(`cleanup and sweep retain a finished checkout with ${invalid} salvage authority`, async () => {
+        await finishedTask();
+        const { writeSalvageRetentionMarker, readSalvageRetentionRecord } = await import('../packages/core/src/git/pushSalvage.js');
+        await writeSalvageRetentionMarker(worktree, { taskId: 'salvage-task', branchName: 'task' });
+        const saved = await readSalvageRetentionRecord(worktree);
+        assert.ok(saved);
+        // The informational marker is untracked and is not the reason to keep it.
+        await fs.remove(path.join(worktree, '.retention-info.json'));
+        if (invalid === 'dangling-record') {
+            await fs.remove(saved.recordPath);
+            await fs.symlink(path.join(root, 'missing-record-target'), saved.recordPath);
+        } else if (invalid === 'unreadable') {
+            // EISDIR is deterministic even when the test runs as root.
+            await fs.remove(saved.recordPath);
+            await fs.mkdir(saved.recordPath);
+        } else {
+            await fs.writeFile(saved.recordPath, invalid === 'malformed' ? '{' : JSON.stringify({
+                ...saved.record, ...(invalid === 'wrong-path' ? { worktreePath: '/another-checkout' } : { scheduledCleanup: 'invalid' }),
+            }));
+        }
+        assert.deepEqual(await proveWorktreeDisposable(worktree), { disposable: false, reason: 'salvage_retained' });
+        await cleanupWorktree(repo, worktree, 'task');
+        const swept = await sweepIdleWorktrees({ minIdleHours: 1, now: Date.now() + 48 * 3_600_000,
+            protectedPaths: async () => [], mountedPaths: async () => [] });
+        assert.ok(!swept.removed.includes(worktree));
+        assert.equal(await fs.pathExists(worktree), true);
+        assert.equal(await registered(), true);
+    });
+}
+
+test('salvage authority is refreshed after the awaited liveness check', async () => {
+    await finishedTask();
+    const outcome = await removeWorktreeIfDisposable(worktree, undefined, async afterDetach => {
+        if (afterDetach) {
+            const { writeSalvageRetentionMarker, readSalvageRetentionRecord } = await import('../packages/core/src/git/pushSalvage.js');
+            await writeSalvageRetentionMarker(worktree, { taskId: 'salvage-task', branchName: 'task' });
+            const saved = await readSalvageRetentionRecord(worktree);
+            await fs.writeFile(saved!.recordPath, '{');
+            await fs.remove(path.join(worktree, '.retention-info.json'));
+        }
+        return true;
+    });
+    assert.deepEqual(outcome, { removed: false, reason: 'salvage_retained' });
+    assert.equal(await fs.pathExists(worktree), true);
+});
+
+for (const late of [false, true]) {
+    test(`ancestor mounts protect idle checkouts (arrives after detach=${late})`, async () => {
+        await finishedTask();
+        let reads = 0;
+        const swept = await sweepIdleWorktrees({ minIdleHours: 1, now: Date.now() + 48 * 3_600_000,
+            protectedPaths: async () => [], mountedPaths: async () => {
+                reads++;
+                return !late || reads >= 3 ? [path.dirname(worktree)] : [];
+            } });
+        assert.ok(!swept.removed.includes(worktree));
+        assert.equal(await fs.pathExists(worktree), true);
+    });
+}
+
+test('failed post-detach liveness refresh leaves no interrupted-removal diagnostic', async () => {
+    await finishedTask();
+    const outcome = await removeWorktreeIfDisposable(worktree, undefined, async afterDetach => {
+        if (afterDetach) throw new Error('Docker unavailable');
+        return true;
+    });
+    assert.deepEqual(outcome, { removed: false, reason: 'remove_failed' });
+    assert.equal(await fs.readFile(path.join(worktree, 'tracked'), 'utf8'), 'published');
+    assert.ok(!(await interruptedWorktreeRemovals()).some(record => record.worktreePath === worktree));
+});
+
+for (const mode of ['mounted', 'unavailable', 'late-mounted']) {
+    test(`job-end cleanup retains checkout when Docker is ${mode}`, async () => {
+        await finishedTask();
+        const docker = path.join(bin, 'docker');
+        const count = path.join(root, `docker-count-${serial}`);
+        await fs.writeFile(docker, `#!/bin/sh
+if [ "$1" = ps ]; then
+  ${mode === 'unavailable' ? 'exit 1' : 'echo container'}
+else
+  ${mode === 'late-mounted' ? `if [ -f '${count}' ]; then echo '${path.dirname(worktree)}'; else touch '${count}'; fi` : `echo '${path.dirname(worktree)}'`}
+fi
+`, { mode: 0o755 });
+        try {
+            await cleanupWorktree(repo, worktree, 'task');
+            assert.equal(await fs.pathExists(worktree), true);
+            assert.equal(await registered(), true);
+        } finally { await fs.writeFile(docker, '#!/bin/sh\nexit 0\n', { mode: 0o755 }); }
+    });
+}
+
+test('idle maintenance claims do not advance durable storage last-use', async () => {
+    await finishedTask();
+    const { repositoryStorageLifecycle } = await import('../packages/core/src/storage/lifecycle.js');
+    await repositoryStorageLifecycle.initialize();
+    const clock = path.join(repositoryStorageLifecycle.root, 'last-use');
+    await fs.writeFile(clock, '1000');
+    await fs.writeFile(path.join(worktree, 'untracked'), 'keep');
+    await removeWorktreeIfDisposable(worktree);
+    assert.equal(await fs.readFile(clock, 'utf8'), '1000', 'kept candidates do not record use');
+    await fs.unlink(path.join(worktree, 'untracked'));
+    await removeWorktreeIfDisposable(worktree);
+    assert.equal(await fs.pathExists(worktree), false);
+    assert.equal(await fs.readFile(clock, 'utf8'), '1000', 'successful removal does not record use');
+});
+
+test('sweep uses two fresh liveness snapshots per disposable candidate, with no redundant pre-claim query', async () => {
+    await finishedTask();
+    const base = path.join(root, 'counted-worktrees');
+    const relocated = path.join(base, 'owner', repoName, 'checkout');
+    await fs.ensureDir(path.dirname(relocated));
+    await git.raw(['worktree', 'move', worktree, relocated]);
+    worktree = relocated;
+    let references = 0;
+    let mounts = 0;
+    const swept = await sweepIdleWorktrees({ minIdleHours: 1, now: Date.now() + 48 * 3_600_000,
+        worktreesBasePath: base,
+        protectedPaths: async () => { references++; return []; },
+        mountedPaths: async () => { mounts++; return []; },
+    });
+    assert.ok(swept.removed.includes(worktree));
+    assert.equal(references, 3, 'startup authority check plus two fresh candidate snapshots');
+    assert.equal(mounts, 3);
 });

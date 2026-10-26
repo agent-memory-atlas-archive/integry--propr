@@ -368,27 +368,32 @@ export function isActiveSalvageRetention(info: unknown): boolean {
     return scheduledCleanup === null || Date.parse(scheduledCleanup ?? '') > Date.now();
 }
 
-/** The worker-written retention record for this worktree, if any. */
+/** The worker-written retention record, or undefined only when absent. Unreadable or invalid authority throws. */
 export async function readSalvageRetentionRecord(worktreePath: string): Promise<{ record: SalvageRetentionRecord; recordPath: string } | undefined> {
-    let resolvedPath: string;
     try {
-        resolvedPath = await resolveWorktreePath(worktreePath);
-    } catch {
-        return undefined;
+        const resolvedPath = await resolveWorktreePath(worktreePath);
+        const recordPath = salvageRetentionRecordPath(resolvedPath);
+        if (!(await fs.lstat(recordPath)).isFile()) throw new Error('Invalid salvage retention record file');
+        const record: Partial<SalvageRetentionRecord> = await fs.readJson(recordPath);
+        if (record?.worktreePath !== resolvedPath || record.reason !== SALVAGE_RETENTION_REASON
+            || (record.scheduledCleanup !== null && !Number.isFinite(Date.parse(record.scheduledCleanup ?? '')))) {
+            throw new Error('Invalid salvage retention record');
+        }
+        return { record: record as SalvageRetentionRecord, recordPath };
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error;
     }
-    const recordPath = salvageRetentionRecordPath(resolvedPath);
-    let record: Partial<SalvageRetentionRecord>;
-    try {
-        record = await fs.readJson(recordPath);
-    } catch {
-        return undefined;
-    }
-    if (record?.worktreePath !== resolvedPath) return undefined;
-    return { record: record as SalvageRetentionRecord, recordPath };
 }
 
+/** Unknown authority protects the checkout and its generated payloads. */
 export async function isSalvageRetainedWorktree(worktreePath: string): Promise<boolean> {
-    return isActiveSalvageRetention((await readSalvageRetentionRecord(worktreePath))?.record);
+    try {
+        return isActiveSalvageRetention((await readSalvageRetentionRecord(worktreePath))?.record);
+    } catch (error) {
+        logger.warn({ worktreePath, error: errorMessage(error) }, 'Salvage retention authority unavailable; keeping worktree and payloads');
+        return true;
+    }
 }
 
 /** Drops the record once its worktree is gone, so the path can be reused. */

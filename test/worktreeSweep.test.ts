@@ -18,11 +18,15 @@ let sweeps = 0;
 const warnings: string[] = [];
 const dockerCalls: string[][] = [];
 let dockerResponse = { exitCode: 0, stdout: '', stderr: '' };
+const { runningContainerMountSources: inspectMounts } = await import('../packages/core/src/git/worktreeMounts.js');
+const { resolveRepositoryWorktreeRoot } = await import('../packages/core/src/git/repositoryPaths.js');
 await mock.module('@propr/core', { namedExports: {
     db: database,
     logger: { warn: (_context: unknown, message: string) => { warnings.push(message); } },
     sweepIdleWorktrees: async () => { sweeps++; return { removed: [], kept: 0, skipped: 0 }; },
-    executeDockerCommand: async (_command: string, args: string[]) => { dockerCalls.push(args); return dockerResponse; },
+    runningContainerMountSources: () => inspectMounts(async (_command, args) => {
+        dockerCalls.push(args); return dockerResponse;
+    }), resolveRepositoryWorktreeRoot,
 } });
 const { referencedWorktreePaths, scheduleWorktreeSweep, sweepWorktrees, runningContainerMountSources } = await import('../src/daemon/worktreeSweep.js');
 const previousHours = process.env.WORKTREE_RETENTION_HOURS;
@@ -111,4 +115,17 @@ test('unknown task authority and Docker errors fail closed', async () => {
     await assert.rejects(referencedWorktreePaths(), /Invalid active task repository/);
     dockerResponse = { exitCode: 1, stdout: '', stderr: 'permission denied' };
     await assert.rejects(runningContainerMountSources(), /docker ps failed/);
+});
+
+test('null task repositories do not disable sweeping and all canonical terminal states release roots', async () => {
+    await database('tasks').insert({ task_id: 'no-repository', repository: null });
+    for (const state of ['completed', 'failed', 'cancelled']) {
+        await database('tasks').insert({ task_id: state, repository: `owner/${state}` });
+        await database('task_history').insert({ task_id: state, state });
+    }
+    await database('tasks').insert({ task_id: 'mixed-case', repository: 'MixedOwner/Mixed.Repo' });
+    assert.deepEqual(await referencedWorktreePaths(), [resolveRepositoryWorktreeRoot(
+        process.env.GIT_WORKTREES_BASE_PATH || '/tmp/git-processor/worktrees', 'MixedOwner', 'Mixed.Repo')]);
+    await database('tasks').insert({ task_id: 'legacy-invalid-42', repository: 'invalid' });
+    await assert.rejects(referencedWorktreePaths(), /Invalid active task repository for task legacy-invalid-42: invalid/);
 });

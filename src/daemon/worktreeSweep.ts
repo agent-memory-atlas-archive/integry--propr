@@ -1,5 +1,4 @@
-import path from 'node:path';
-import { db, executeDockerCommand, logger, sweepIdleWorktrees, type WorktreeSweepResult } from '@propr/core';
+import { db, logger, sweepIdleWorktrees, runningContainerMountSources, resolveRepositoryWorktreeRoot, type WorktreeSweepResult } from '@propr/core';
 import { HANDOFF_RELEASED, PR_FOLLOWUP_HANDOFFS_TABLE } from '../jobs/followupHandoffStore.js';
 
 /** Terminal goals cannot resume: both goal routes and recovery fence continuation
@@ -19,32 +18,22 @@ export async function referencedWorktreePaths(database = db): Promise<string[]> 
                 '(select max(history_id) from task_history where task_id = task.task_id)',
             ));
         })
+        .whereNotNull('task.repository')
         .where(query => query.whereNull('latest.state').orWhereNotIn('latest.state', ['completed', 'failed', 'cancelled']))
-        .distinct('task.repository') as Array<{ repository: string }>;
-    const taskRoots = tasks.map(({ repository }) => {
-        // Unknown task authority must fail closed, including malformed paths.
-        if (!/^[A-Za-z0-9_-]+\/[A-Za-z0-9._-]+$/.test(repository)
-            || ['.', '..'].includes(repository.split('/')[1])) throw new Error('Invalid active task repository');
-        return path.resolve(process.env.GIT_WORKTREES_BASE_PATH || '/tmp/git-processor/worktrees', repository);
+        .select('task.task_id', 'task.repository') as Array<{ task_id: string; repository: string }>;
+    const taskRoots = tasks.map(({ task_id, repository }) => {
+        try {
+            const parts = repository.split('/');
+            if (parts.length !== 2) throw new Error('Expected owner/repo');
+            return resolveRepositoryWorktreeRoot(process.env.GIT_WORKTREES_BASE_PATH || '/tmp/git-processor/worktrees', parts[0], parts[1]);
+        } catch {
+            throw new Error(`Invalid active task repository for task ${task_id}: ${repository}`);
+        }
     });
     return [...goals, ...handoffs, ...taskRoots].filter(Boolean);
 }
 
-/** Host paths mounted into running containers. Throws when Docker can't be read. */
-export async function runningContainerMountSources(): Promise<string[]> {
-    const listed = await executeDockerCommand('docker', ['ps', '-q', '--no-trunc'], { timeout: 15_000 });
-    if (listed.exitCode !== 0) throw new Error(`docker ps failed: ${listed.stderr.trim()}`);
-    const ids = listed.stdout.split('\n').map(id => id.trim()).filter(Boolean);
-    if (ids.length === 0) return [];
-    const inspected = await executeDockerCommand('docker', [
-        'inspect', '--format', '{{range .Mounts}}{{.Source}}{{"\\n"}}{{end}}', ...ids,
-    ], { timeout: 30_000 });
-    // A container can exit between ps and inspect; any other failure is unknown liveness.
-    if (inspected.exitCode !== 0 && !/No such (object|container)/i.test(inspected.stderr)) {
-        throw new Error(`docker inspect failed: ${inspected.stderr.trim()}`);
-    }
-    return inspected.stdout.split('\n').map(line => line.trim()).filter(Boolean);
-}
+export { runningContainerMountSources };
 
 export async function sweepWorktrees(): Promise<WorktreeSweepResult | null> {
     try {

@@ -661,3 +661,6 @@ export { GeneratedPayloadStorage, generatedPayloadStorage, GENERATED_PAYLOADS } 
 export { generateManagedDependencies } from './storage/managedDependencies.js';
 
 export * from './extensions/extensionProfileStore.js';
+
+export { runningContainerMountSources } from './git/worktreeMounts.js';
+export { resolveRepositoryWorktreeRoot } from './git/repositoryPaths.js';

@@ -53,7 +53,7 @@ const {
 } = await import('../src/jobs/followupHandoffStore.js');
 const {
     adoptPredecessorFollowupHandoff, authorizeCancelledFollowupHandoff, inspectFollowupHandoffs,
-    recoverInterruptedFollowupHandoffs, releaseFollowupHandoffRecord,
+    recoverInterruptedFollowupHandoffs, releaseFollowupHandoffRecord, settleFollowupHandoffAfterFailure,
 } = await import('../src/jobs/followupHandoffRecovery.js');
 const { adoptPRProcessingLock } = await import('../src/jobs/prProcessingLock.js');
 
@@ -613,5 +613,35 @@ for (const phase of ['comment_published', 'cleanup_pending'] as const) {
         assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
         assert.equal(h.counters.commits + h.counters.pushes + h.counters.released, 0);
         assert.equal(h.octokit.comments.length, 0);
+    });
+}
+
+for (const phase of ['committed', 'pushed'] as const) {
+    test(`${phase} obligation survives missing checkout and failure settlement`, async () => {
+        const h = await createHarness();
+        const record = await seedHandoff(h);
+        await agentEdit(h);
+        git(h.fx.wt, 'add', '-A');
+        git(h.fx.wt, 'commit', '-m', 'agent commit');
+        const head = git(h.fx.wt, 'rev-parse', 'HEAD');
+        if (phase === 'pushed') git(h.fx.wt, 'push', 'origin', `HEAD:refs/heads/${BRANCH}`);
+        await advanceFollowupHandoff({ database }, record, { phase, commit_hash: head });
+        git(h.fx.local, 'worktree', 'remove', h.fx.wt);
+        await settleFollowupHandoffAfterFailure(
+            { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, taskId: 'task-1', cancelled: false },
+            { store: { database }, git: h.deps.git, log: silentLog },
+        );
+        assert.equal((await loadFollowupHandoff({ database }, KEY))?.phase, phase);
+        const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+        assert.equal(summary.errors, 0);
+        if (phase === 'pushed') {
+            assert.equal(summary.published, 1);
+            assert.equal(publishedComments(h).length, 1);
+            assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+        } else {
+            assert.equal(summary.awaitingOperator, 1);
+            assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, 'worktree_missing');
+            assert.equal(h.octokit.comments.length, 0);
+        }
     });
 }

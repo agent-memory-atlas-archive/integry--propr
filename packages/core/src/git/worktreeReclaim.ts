@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import logger from '../utils/logger.js';
 import { isSalvageRetainedWorktree } from './pushSalvage.js';
+import { resolveRepositoryWorktreeRoot } from './repositoryPaths.js';
 import { generatedPayloadStorage } from '../storage/generatedPayloads.js';
 import { repositoryStorageLifecycle } from '../storage/lifecycle.js';
 
@@ -148,6 +149,8 @@ export async function removeWorktreeIfDisposable(
         if (stillUnused && !await stillUnused(false)) return { removed: false, reason: 'in_use' };
         const recordRoot = worktreeRemovalRecordsRoot();
         const recordFile = path.join(recordRoot, `${createHash('sha256').update(path.resolve(worktreePath)).digest('hex')}.json`);
+        let removalStarted = false;
+        let recordWritten = false;
         try {
             // Free the task branch before potentially slow recursive deletion.
             // Never force checkout, and refresh all Git evidence after detaching.
@@ -156,6 +159,7 @@ export async function removeWorktreeIfDisposable(
             const temporaryRecord = path.join(recordRoot, `pending-${randomUUID()}`);
             await fs.writeFile(temporaryRecord, JSON.stringify({ worktreePath: path.resolve(worktreePath), startedAt: new Date().toISOString() }));
             await fs.rename(temporaryRecord, recordFile);
+            recordWritten = true;
             // Earlier candidates can take minutes. Liveness snapshots from the
             // start of the sweep cannot authorize removal of a later candidate.
             if (stillUnused && !await stillUnused(true)) {
@@ -169,10 +173,12 @@ export async function removeWorktreeIfDisposable(
                 await fs.unlink(recordFile);
                 return { removed: false, reason: proof.reason };
             }
+            removalStarted = true;
             await git(proof.commonDir, ['worktree', 'remove', path.resolve(worktreePath)], 15 * 60_000);
         } catch (error) {
+            if (recordWritten && !removalStarted) await fs.unlink(recordFile).catch(() => undefined);
             logger.warn({ worktreePath, recordFile, error: (error as Error).message },
-                'Worktree removal failed or was interrupted; inspect the remnant and permissions before operator recovery (no forced retry)');
+                removalStarted ? 'Worktree removal failed or was interrupted; inspect the remnant and permissions before operator recovery (no forced retry)' : 'Worktree removal preparation failed; checkout retained');
             return { removed: false, reason: 'remove_failed' };
         }
         await generatedPayloadStorage().forget(worktreePath).catch(error => {
@@ -182,7 +188,10 @@ export async function removeWorktreeIfDisposable(
             logger.warn({ worktreePath, error: (error as Error).message }, 'Could not retire worktree removal diagnostic');
         });
         return { removed: true };
-    });
+    }, undefined, { recordUse: false, waitWarning: {
+        afterMs: Number(process.env.WORKTREE_SWEEP_INTERVAL_MS) || 3_600_000,
+        warn: () => logger.warn({ worktreePath }, 'Worktree removal is waiting for the storage lifecycle gate; inspect lifecycle ownership'),
+    } });
 }
 
 export interface WorktreeSweepOptions {
@@ -210,11 +219,18 @@ async function lastActivity(worktreePath: string, gitDir: string): Promise<numbe
     return latest;
 }
 
-/** An agent container mounts the worktree itself (or a path in it). Service
- * containers mount the whole worktree root, which says nothing about one task. */
-function mountUsesWorktree(mount: string, worktreePath: string): boolean {
-    const relative = path.relative(worktreePath, mount);
-    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+function pathsOverlap(first: string, second: string): boolean {
+    const contains = (parent: string, child: string) => {
+        const relative = path.relative(parent, child);
+        return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+    };
+    return contains(first, second) || contains(second, first);
+}
+
+/** Overlapping mounts expose checkout files. Only the configured whole-root
+ * service mount is exempt; repository/owner ancestor mounts still protect it. */
+export function mountUsesWorktree(mount: string, worktreePath: string, root = worktreesRoot()): boolean {
+    return path.resolve(mount) !== path.resolve(root) && pathsOverlap(mount, worktreePath);
 }
 
 /** Worktree directories at <root>/<owner>/<repo>/<task>. */
@@ -228,6 +244,9 @@ async function listWorktreeDirectories(root: string): Promise<string[]> {
         .filter(entry => entry.isDirectory() && !entry.isSymbolicLink()).map(entry => path.join(dir, entry.name));
     for (const owner of await children(root)) {
         for (const repo of await children(owner)) {
+            // Validate the same repository layout used by worktree creation.
+            try { resolveRepositoryWorktreeRoot(root, path.basename(owner), path.basename(repo)); }
+            catch { continue; }
             directories.push(...await children(repo));
         }
     }
@@ -255,9 +274,10 @@ export async function sweepIdleWorktrees(options: WorktreeSweepOptions): Promise
         const root = path.resolve(options.worktreesBasePath ?? worktreesRoot());
         const minIdleMs = options.minIdleHours * 3_600_000;
         const unused = async (worktreePath: string): Promise<boolean> => {
-            const protectedPaths = [...await options.protectedPaths()].map(p => path.resolve(p));
-            const mounts = [...await options.mountedPaths()].map(p => path.resolve(p));
-            if (protectedPaths.some(p => mountUsesWorktree(worktreePath, p)) || mounts.some(m => mountUsesWorktree(m, worktreePath))) return false;
+            const [protectedSnapshot, mountSnapshot] = await Promise.all([options.protectedPaths(), options.mountedPaths()]);
+            const protectedPaths = [...protectedSnapshot].map(p => path.resolve(p));
+            const mounts = [...mountSnapshot].map(p => path.resolve(p));
+            if (protectedPaths.some(p => pathsOverlap(worktreePath, p)) || mounts.some(m => mountUsesWorktree(m, worktreePath, root))) return false;
             const gitDir = await worktreeGitDir(worktreePath);
             return !!gitDir && (options.now ?? Date.now()) - await lastActivity(worktreePath, gitDir) >= minIdleMs;
         };
@@ -265,15 +285,19 @@ export async function sweepIdleWorktrees(options: WorktreeSweepOptions): Promise
         await options.protectedPaths();
         await options.mountedPaths();
         for (const worktreePath of await listWorktreeDirectories(root)) {
-            if (!await unused(worktreePath)) { result.skipped++; continue; }
             const gitDir = await worktreeGitDir(worktreePath);
             if (!gitDir) { result.kept++; continue; }
+            if ((options.now ?? Date.now()) - await lastActivity(worktreePath, gitDir) < minIdleMs) { result.skipped++; continue; }
+            // Query liveness only inside the claim, rather than also querying
+            // each candidate before waiting on the gate. Keep the second fresh
+            // snapshot after detach: caching across those awaits weakens authority.
             // Detaching refreshes HEAD/index mtimes; idle age was checked above.
             const outcome = await removeWorktreeIfDisposable(worktreePath, root, async afterDetach => {
                 if (!afterDetach) return unused(worktreePath);
-                const protectedPaths = [...await options.protectedPaths()].map(p => path.resolve(p));
-                const mounts = [...await options.mountedPaths()].map(p => path.resolve(p));
-                return !protectedPaths.some(p => mountUsesWorktree(worktreePath, p)) && !mounts.some(m => mountUsesWorktree(m, worktreePath));
+                const [protectedSnapshot, mountSnapshot] = await Promise.all([options.protectedPaths(), options.mountedPaths()]);
+                const protectedPaths = [...protectedSnapshot].map(p => path.resolve(p));
+                const mounts = [...mountSnapshot].map(p => path.resolve(p));
+                return !protectedPaths.some(p => pathsOverlap(worktreePath, p)) && !mounts.some(m => mountUsesWorktree(m, worktreePath, root));
             });
             if (outcome.removed) result.removed.push(worktreePath);
             else result.kept++;

@@ -7,7 +7,8 @@ import { createHooklessGit } from './hooklessGit.js';
 import { resolveRepositoryWorktreePath } from './repositoryPaths.js';
 import { redactAuthenticatedGitUrl } from './repoBranching.js';
 import { isSalvageRetainedWorktree } from './pushSalvage.js';
-import { removeWorktreeIfDisposable, worktreeRemovalDisabled } from './worktreeReclaim.js';
+import { mountUsesWorktree, removeWorktreeIfDisposable, worktreeRemovalDisabled } from './worktreeReclaim.js';
+import { runningContainerMountSources } from './worktreeMounts.js';
 
 const WORKTREES_BASE_PATH = process.env.GIT_WORKTREES_BASE_PATH || "/tmp/git-processor/worktrees";
 
@@ -70,7 +71,14 @@ export async function cleanupWorktree(localRepoPath: string, worktreePath: strin
     // own node_modules and build output, and keeping them all fills the disk.
     // Anything else is kept. Branches are never deleted here.
     if (!worktreeRemovalDisabled(retentionStrategy)) {
-        const outcome = await removeWorktreeIfDisposable(worktreePath);
+        const outcome = await removeWorktreeIfDisposable(worktreePath, undefined, async () => {
+            try {
+                return !(await runningContainerMountSources()).some(mount => mountUsesWorktree(mount, worktreePath));
+            } catch (error) {
+                logger.warn({ worktreePath, error: (error as Error).message }, 'Container mount authority unavailable; keeping worktree');
+                return false;
+            }
+        });
         if (outcome.removed) {
             logger.info({ worktreePath, branchName }, 'Removed finished worktree; its work is stored in Git');
             return;
@@ -88,7 +96,11 @@ export async function cleanupWorktree(localRepoPath: string, worktreePath: strin
     }
 }
 
-/** Age is never a recoverability proof; legacy timers must not bypass storage policy. */
+/**
+ * @deprecated Use sweepIdleWorktrees with durable-reference and container liveness
+ * providers (the daemon's sweepWorktrees supplies these). This compatibility
+ * export performs no removal: age alone cannot establish disposability.
+ */
 export async function cleanupExpiredWorktrees(worktreesBasePath: string = WORKTREES_BASE_PATH): Promise<CleanupResult> {
     const exists = await fs.pathExists(worktreesBasePath);
     return { cleaned: 0, retained: exists ? 1 : 0 };
