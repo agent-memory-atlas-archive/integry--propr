@@ -101,6 +101,11 @@ export interface CancellationMetadata {
 export interface UpdateMetadata {
     terminalReason?: TaskTerminalReason;
     isRetry?: boolean;
+    /**
+     * An operator continued the terminal goal this task backs. The task leaves
+     * any terminal state, cancelled and completed included, for PROCESSING.
+     */
+    reopenTerminal?: boolean;
     /** The failed attempt's queued retry was removed, so its withdrawal must be recorded. */
     withdrawnQueuedRetry?: boolean;
     error?: {

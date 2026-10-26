@@ -29,9 +29,9 @@ info:
     name: Apache-2.0
     identifier: Apache-2.0
   x-route-coverage:
-    total: 305
+    total: 306
     documented: 69
-    undocumented: 236
+    undocumented: 237
 servers:
   - url: "{origin}"
     description: Your ProPR API origin, for example the value of `API_PUBLIC_URL`.
@@ -3885,6 +3885,32 @@ paths:
     post:
       operationId: postApiGoalsGoalIdCancel
       summary: POST /api/goals/{goalId}/cancel
+      description: This route is registered but not documented yet.
+      tags:
+        - Goals
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: goalId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success. The response body is not documented yet.
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-undocumented: true
+      x-legacy-error: true
+  /api/goals/{goalId}/continue:
+    post:
+      operationId: postApiGoalsGoalIdContinue
+      summary: POST /api/goals/{goalId}/continue
       description: This route is registered but not documented yet.
       tags:
         - Goals

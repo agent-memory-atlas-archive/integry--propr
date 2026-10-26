@@ -307,7 +307,11 @@ describe('Inbox triage console', () => {
 
   test('j/k and the arrows step through the queue, Esc closes the pane, and fields keep their keys', async () => {
     mockViewport(true);
-    renderInbox();
+    // Flush the loaded queue's effects before sending keys: a row can appear
+    // before the effect that registers the window keydown listener has run.
+    await act(async () => {
+      renderInbox();
+    });
     await screen.findByRole('article', { name: review.title });
     fireEvent.keyDown(window, { key: 'ArrowDown' });
     expect(pane()).not.toBeInTheDocument();

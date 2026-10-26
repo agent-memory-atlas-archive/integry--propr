@@ -91,11 +91,13 @@ propr goal pause GOAL_ID
 propr goal resume GOAL_ID
 propr goal model GOAL_ID MODEL
 propr goal cancel GOAL_ID
+propr goal continue GOAL_ID --file next-steps.md
 ```
 
 - `goal create` starts autonomous work immediately; only run it when starting work is authorized. Keep the returned goal ID.
 - Supply your own `--idempotency-key` for every mutation and reuse it when retrying the same request. On `outcome_uncertain`, re-run with the same key rather than creating another goal; `idempotency_conflict` means the key was used for a different request.
 - Inputs, pause, resume, cancel and model changes are accepted requests, not confirmations. Compare `lifecycle.requestedState` with `lifecycle.observedState` and `model.requested` with `model.effective`. A `delivered` input still does not prove the agent acted on it; check `goal inputs` before sending the same correction again.
+- `goal continue` reopens a failed, completed or cancelled goal on its branch, PR and agent session; the message is optional. Use it instead of creating a new goal to retry or extend one that finished.
 - `lifecycle.goalCompleted` is the goal result; `currentTask.taskCompleted` is not. Judge completion from the goal result and its final PR (`goal.finalPr`, `goal.pullRequests`), then review that PR like any other.
 
 ## Receipts and errors

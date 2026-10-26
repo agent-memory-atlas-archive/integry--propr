@@ -10,6 +10,7 @@ import { LiveAgentOutput } from './utils/liveAgentOutput.js';
 
 const MAX_LIVE_OUTPUT_BYTES = MAX_PROVIDER_OUTPUT_BYTES;
 const MAX_SUMMARY_PARTS = 100;
+const MAX_TRACKED_TURNS = 200;
 
 export function boundedCodexJsonlTail(value: string, maximum = MAX_LIVE_OUTPUT_BYTES): string {
     return boundedProviderOutput(value, maximum);
@@ -54,6 +55,9 @@ export class AppServerConnection {
     private turnWaiters = new Map<string, (message: RpcMessage) => void>();
     private completedTurns = new Map<string, RpcMessage>();
     private startedTurns: Array<{ threadId: string; turnId: string }> = [];
+    /** Turns that started and have not completed, oldest first. */
+    private runningTurns: Array<{ threadId: string; turnId: string }> = [];
+    private finishedTurnIds: string[] = [];
     private serverRequests: RpcMessage[] = [];
     private resolvedServerRequests: Array<number | string> = [];
     private output: LiveAgentOutput;
@@ -61,7 +65,7 @@ export class AppServerConnection {
     private closedError: Error | null = null;
     summaryParts: string[] = [];
     private summarySequence = 0;
-    private summaryRecords: Array<{ sequence: number; text: string }> = [];
+    private summaryRecords: Array<{ sequence: number; text: string; turnId?: string }> = [];
     tokenUsage?: TokenUsage;
     effectiveModel?: string;
 
@@ -93,6 +97,25 @@ export class AppServerConnection {
     agentMessagesAfter(cursor: number): string[] {
         return this.summaryRecords.filter(record => record.sequence > cursor).map(record => record.text);
     }
+    /**
+     * Agent messages of one turn. A turn can run before ProPR starts observing
+     * it (App Server continues an active goal on its own), so a read cursor
+     * alone would miss them. Messages without a turn id fall back to the cursor.
+     */
+    agentMessagesForTurn(turnId: string, cursor: number): string[] {
+        return this.summaryRecords
+            .filter(record => record.turnId === turnId || (record.turnId === undefined && record.sequence > cursor))
+            .map(record => record.text);
+    }
+    /** Whether App Server has reported this turn completed. */
+    isTurnFinished(turnId: string): boolean {
+        return this.finishedTurnIds.includes(turnId);
+    }
+    /** The newest turn of the thread that started and has not completed. */
+    runningTurn(threadId: string): string | null {
+        const running = this.runningTurns.filter(turn => turn.threadId === threadId);
+        return running.length ? running[running.length - 1].turnId : null;
+    }
 
     private onLine(line: string): void {
         this.output.append(`${line}\n`);
@@ -121,25 +144,7 @@ export class AppServerConnection {
 
     private observeNotification(message: RpcMessage): void {
         const params = message.params ?? {};
-        if (message.method === 'turn/started') {
-            const turn = asRecord(params.turn);
-            if (typeof params.threadId === 'string' && typeof turn.id === 'string') {
-                this.startedTurns.push({ threadId: params.threadId, turnId: turn.id });
-            }
-        }
-        if (message.method === 'turn/completed') {
-            const turn = asRecord(params.turn);
-            if (typeof turn.model === 'string') this.effectiveModel = turn.model;
-            if (typeof turn.id === 'string') {
-                const waiter = this.turnWaiters.get(turn.id);
-                if (waiter) {
-                    this.turnWaiters.delete(turn.id);
-                    waiter(message);
-                } else {
-                    this.completedTurns.set(turn.id, message);
-                }
-            }
-        }
+        this.observeTurnNotification(message, params);
         if (message.method === 'item/completed') {
             const item = asRecord(params.item);
             if (typeof item.model === 'string') this.effectiveModel = item.model;
@@ -147,13 +152,47 @@ export class AppServerConnection {
                 this.summaryParts.push(item.text);
                 if (this.summaryParts.length > MAX_SUMMARY_PARTS) this.summaryParts.shift();
                 this.summarySequence += 1;
-                this.summaryRecords.push({ sequence: this.summarySequence, text: item.text });
+                this.summaryRecords.push({
+                    sequence: this.summarySequence,
+                    text: item.text,
+                    ...(typeof params.turnId === 'string' ? { turnId: params.turnId } : {}),
+                });
                 if (this.summaryRecords.length > MAX_SUMMARY_PARTS) this.summaryRecords.shift();
             }
         }
         if (message.method === 'serverRequest/resolved') this.observeResolvedServerRequest(params);
         if (message.method === 'thread/tokenUsage/updated') this.tokenUsage = extractTokenUsage(params) ?? this.tokenUsage;
         if (message.method === 'model/rerouted' && typeof params.toModel === 'string') this.effectiveModel = params.toModel;
+    }
+
+    private observeTurnNotification(message: RpcMessage, params: Record<string, unknown>): void {
+        const turn = asRecord(params.turn);
+        if (message.method === 'turn/started') {
+            if (typeof params.threadId === 'string' && typeof turn.id === 'string') {
+                this.startedTurns.push({ threadId: params.threadId, turnId: turn.id });
+                if (!this.finishedTurnIds.includes(turn.id)) {
+                    this.runningTurns.push({ threadId: params.threadId, turnId: turn.id });
+                }
+            }
+            return;
+        }
+        if (message.method !== 'turn/completed') return;
+        if (typeof turn.model === 'string') this.effectiveModel = turn.model;
+        if (typeof turn.id !== 'string') return;
+        this.markTurnFinished(turn.id);
+        const waiter = this.turnWaiters.get(turn.id);
+        if (waiter) {
+            this.turnWaiters.delete(turn.id);
+            waiter(message);
+        } else {
+            this.completedTurns.set(turn.id, message);
+        }
+    }
+
+    private markTurnFinished(turnId: string): void {
+        this.runningTurns = this.runningTurns.filter(turn => turn.turnId !== turnId);
+        this.finishedTurnIds.push(turnId);
+        if (this.finishedTurnIds.length > MAX_TRACKED_TURNS) this.finishedTurnIds.shift();
     }
 
     private observeResolvedServerRequest(params: Record<string, unknown>): void {

@@ -447,6 +447,17 @@ export function sendGoalInput(
   return goalMutation(goalId, { method: "POST", suffix: "/input", body: input }, idempotencyKey, options);
 }
 
+/** Reopen a failed, completed or cancelled goal, optionally with more instructions. */
+export function continueGoal(
+  goalId: string,
+  message: string | undefined,
+  idempotencyKey: string,
+  options: GoalApiOptions = {},
+  model?: string,
+): Promise<GoalMutationResult> {
+  return goalMutation(goalId, { method: "POST", suffix: "/continue", body: { ...(message ? { message } : {}), ...(model ? { model } : {}) } }, idempotencyKey, options);
+}
+
 export function pauseGoal(goalId: string, idempotencyKey: string, options: GoalApiOptions = {}): Promise<GoalMutationResult> {
   return goalMutation(goalId, { method: "POST", suffix: "/pause" }, idempotencyKey, options);
 }

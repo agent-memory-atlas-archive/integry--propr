@@ -23,9 +23,9 @@ const TERMINAL_TASK_STATES = new Set<TaskState>([
 
 const hasPullRequestResult = (task: TaskStateData): boolean => Boolean(task.prResult?.prNumber || task.prResult?.prCreated === true);
 
-/** A failed task may only be retried, or record withdrawal of its removed queued retry. */
-const isFailedTaskContinuation = (current: TaskStateData, newState: TaskState, metadata: UpdateMetadata): boolean => current.state === TaskStates.FAILED
-    && (newState === TaskStates.PROCESSING && metadata.isRetry === true || newState === TaskStates.CANCELLED && metadata.withdrawnQueuedRetry === true);
+/** A failed task may only be retried, or record withdrawal of its removed queued retry; a continued goal reopens its task from any terminal state. */
+const isTerminalTaskContinuation = (current: TaskStateData, newState: TaskState, metadata: UpdateMetadata): boolean => (newState === TaskStates.PROCESSING && metadata.reopenTerminal === true) || (current.state === TaskStates.FAILED
+    && (newState === TaskStates.PROCESSING && metadata.isRetry === true || newState === TaskStates.CANCELLED && metadata.withdrawnQueuedRetry === true));
 
 async function waitForAtomicUpdateRetry(attempt: number): Promise<void> {
     const delayMs = Math.min(5 * (2 ** attempt), 100);
@@ -181,10 +181,10 @@ export class WorkerStateManager {
             // cancellation caller's task scan, while it awaits GitHub/queue IO.
             if (newState === TaskStates.CANCELLED && hasPullRequestResult(current)
                 && (metadata.terminalReason ?? metadata.historyMetadata?.cancellationReason) === 'cancelled_issue_closed') return current;
-            if (current.state === TaskStates.CANCELLED && !isHandoff) return current;
+            if (current.state === TaskStates.CANCELLED && !isHandoff && !isTerminalTaskContinuation(current, newState, metadata)) return current;
             if (TERMINAL_TASK_STATES.has(current.state)
                 && current.state !== newState
-                && !isFailedTaskContinuation(current, newState, metadata) && !isHandoff) {
+                && !isTerminalTaskContinuation(current, newState, metadata) && !isHandoff) {
                 logger.warn({ taskId, currentState: current.state, requestedState: newState },
                     'Ignored state transition from a terminal task');
                 return current;

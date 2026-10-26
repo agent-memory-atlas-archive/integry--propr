@@ -77,7 +77,7 @@ test('the goal projection is built from one goal row, so its completion fields a
 });
 
 for (const terminalState of ['completed', 'failed', 'cancelled'] as const) {
-  test(`resuming past a consumed ${terminalState} event is unreachable at once instead of waiting out the timeout`, async () => {
+  test(`resuming past a consumed ${terminalState} event can wait for a later continuation`, async () => {
     await update({ claimed_at: '2026-10-04 10:00:00', started_at: '2026-10-04 10:00:00' });
     const start = (await wait({ timeoutSeconds: 0 })).cursor;
     await update({ result_state: terminalState, completed_at: '2026-10-04 10:05:00' });
@@ -102,8 +102,8 @@ for (const terminalState of ['completed', 'failed', 'cancelled'] as const) {
       for (const until of [terminalState, 'terminal', 'checkpoint', 'paused', undefined] as const) {
         const startedAt = Date.now();
         // A fallback poll far beyond the test proves the wait never sleeps.
-        const result = await wait({ until, afterCursor, timeoutSeconds: 30, pollIntervalMs: 60_000 });
-        assert.equal(result.outcome, 'unreachable', `until ${until ?? 'any event'}`);
+        const result = await wait({ until, afterCursor, timeoutSeconds: 0, pollIntervalMs: 60_000 });
+        assert.equal(result.outcome, 'timed_out', `until ${until ?? 'any event'}`);
         assert.equal(result.event, null);
         assert.equal(result.matchedImmediately, false);
         assert.equal(result.cursor, afterCursor, 'the cursor does not move');
@@ -129,3 +129,15 @@ test('journal timestamps use the same format as goal and checkpoint timestamps',
   const created = await db('goal_events').where({ goal_id: goalId }).orderBy('sequence').first('created_at');
   assert.match(created!.created_at, sqliteTimestamp, 'the goal\'s first event uses it too');
 });
+
+for (const result_state of ['failed', 'completed', 'cancelled']) {
+  test(`wait replays continuation after a consumed ${result_state} event`, async () => {
+    await update({ result_state, completed_at: '2026-10-04 10:05:00' });
+    const stopped = await wait({ until: 'terminal' });
+    const waiting = wait({ afterCursor: stopped.cursor, timeoutSeconds: 1 });
+    await update({ result_state: null, completed_at: null, desired_state: 'running', claimed_at: '2026-10-04 10:06:00' });
+    const reopened = await waiting;
+    assert.equal(reopened.outcome, 'matched');
+    assert.equal(reopened.event?.state, 'running');
+  });
+}

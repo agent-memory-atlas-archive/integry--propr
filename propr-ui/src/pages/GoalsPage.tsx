@@ -6,13 +6,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   Activity, AlertTriangle, Check, CheckCircle2, CircleDot, CirclePause, CirclePlay, CircleSlash, CircleStop,
-  Copy, ExternalLink, FileText, Filter, GitPullRequest, LoaderCircle, Send,
+  Copy, ExternalLink, FileText, Filter, GitPullRequest, LoaderCircle, RotateCcw, Send,
   MoreHorizontal, Target, Terminal, Trash2,
 } from 'lucide-react';
 import { getInstanceCatalog } from '../api/proprApi';
 import type { InstanceCatalogRepository } from '../api/proprTypes';
 import {
-  cancelGoal, createGoal, deleteGoal, getGoal, getGoalCapabilities, getGoalVisualPreviews, listGoals, pauseGoal,
+  cancelGoal, continueGoal, createGoal, deleteGoal, getGoal, getGoalCapabilities, getGoalVisualPreviews, listGoals, pauseGoal,
   requestGoalModel, resumeGoal, sendGoalInput,
   getGoalAttachmentUrl,
   type Goal, type GoalCapability, type GoalLaunchStrategy, type GoalVisualPreview,
@@ -799,6 +799,7 @@ function GoalDetails({ goalId }: { goalId: string }) {
   const { isDemoMode } = useDemoMode();
   const [goal, setGoal] = useState<Goal | null>(null);
   const [message, setMessage] = useState('');
+  const [continuationModel, setContinuationModel] = useState<{ goalId: string; model: string } | undefined>();
   const correctionRef = useRef<HTMLTextAreaElement>(null);
   const [files, setFiles] = useState<File[]>([]);
   const [models, setModels] = useState<string[]>([]);
@@ -892,6 +893,15 @@ function GoalDetails({ goalId }: { goalId: string }) {
       setGoal(result.goal); setMessage(''); setFiles([]);
     } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   };
+  const reopen = async () => {
+    if (!goal || isDemoMode) return;
+    setBusy(true); setError(null);
+    try {
+      const body = { ...(message.trim() ? { message: message.trim() } : {}), ...(continuationModel?.goalId === goal.id ? { model: continuationModel.model } : {}) };
+      const result = files.length > 0 ? await continueGoal(goal.id, body, files) : await continueGoal(goal.id, body);
+      setGoal(result.goal); setMessage(''); setFiles([]);
+    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+  };
   const remove = async () => {
     if (!goal || isDemoMode || !window.confirm('Delete this goal? If it is running, it will be stopped first. This action cannot be undone.')) return;
     setBusy(true); setError(null);
@@ -914,16 +924,22 @@ function GoalDetails({ goalId }: { goalId: string }) {
   const cancelling = !terminal && goal.desiredState === 'cancelled';
   const mutable = !terminal && !cancelling;
   const canMutate = mutable && !isDemoMode;
+  // A finished goal (failed, completed or cancelled) can be continued with optional instructions.
+  const canContinue = terminal && !isDemoMode;
   const strategyLabel = goal.launchStrategy === 'direct' ? 'Direct' : 'ProPR orchestrated';
   const currentModel = getModelDisplayName(goal.effectiveModel || goal.requestedModel);
   // The locked-console state is a header note, not a sticky footer bar: it needs no screen real estate of its own.
   const correctionsNote = canMutate
     ? null
-    : isDemoMode && mutable
+    : isDemoMode
       ? 'Demo mode is read-only. Corrections disabled.'
       : goal.resultState === 'completed'
-        ? 'Goal completed. Corrections disabled.'
-        : 'Goal closed. Corrections disabled.';
+        ? 'Goal completed. Continue it to add more work.'
+        : goal.resultState === 'failed'
+          ? 'Goal failed. Continue it to try again.'
+          : goal.resultState === 'cancelled'
+            ? 'Goal cancelled. Continue it to pick the work back up.'
+            : 'Goal closed. Corrections disabled.';
   const artifactLinks = goal.artifacts
     .map(artifact => artifact as { type?: string; number?: number; url?: string })
     .filter(artifact => Boolean(artifact.url));
@@ -965,6 +981,7 @@ function GoalDetails({ goalId }: { goalId: string }) {
           <div className="flex flex-wrap items-center justify-end gap-2">
             {goal.desiredState === 'running' && canMutate && <button disabled={busy} onClick={() => act(() => pauseGoal(goal.id))} className={`${buttonClass} border border-amber-300 text-amber-800 hover:bg-amber-50`}><CirclePause className="h-4 w-4" />Pause</button>}
             {goal.desiredState === 'paused' && canMutate && <button disabled={busy} onClick={() => act(() => resumeGoal(goal.id))} className={`${buttonClass} border border-green-300 text-green-800 hover:bg-green-50`}><CirclePlay className="h-4 w-4" />{goal.pausePending ? 'Resume after safe boundary' : 'Resume'}</button>}
+            {canContinue && <button disabled={busy} onClick={() => void reopen()} className={`${buttonClass} border border-green-300 text-green-800 hover:bg-green-50`}><RotateCcw className="h-4 w-4" />Continue goal</button>}
             {canMutate && <button disabled={busy} onClick={() => act(() => cancelGoal(goal.id))} className={`${buttonClass} border border-red-300 text-red-700 hover:bg-red-50`}><CircleStop className="h-4 w-4" />Cancel</button>}
             {goal.finalPr && <a href={goal.finalPr.url} target="_blank" rel="noreferrer" className={`${buttonClass} bg-primary-600 text-white shadow-sm hover:bg-primary-700`}><GitPullRequest className="h-4 w-4" />{goal.launchStrategy === 'direct' ? 'Open draft PR' : 'Review final PR'} <ExternalLink className="h-3.5 w-3.5" /></a>}
             <details className="group relative">
@@ -1130,22 +1147,25 @@ function GoalDetails({ goalId }: { goalId: string }) {
           <div className="mt-3 flex flex-wrap gap-2"><button disabled={busy} onClick={() => continueWith({ canned: 'done' })} className={`${buttonClass} border border-slate-300 text-slate-700 hover:bg-slate-100`}>What's done?</button><button disabled={busy} onClick={() => continueWith({ canned: 'left' })} className={`${buttonClass} border border-slate-300 text-slate-700 hover:bg-slate-100`}>What's left?</button></div>
         </section>}
 
-        {/* A closed goal gets no footer bar: the locked state is already stated beside the status badge. */}
-        {canMutate && <section aria-labelledby="correction-heading" className={`${railInset} sticky bottom-0 mt-auto bg-slate-50 pb-1 pt-10`}>
-          <div className="mb-2 flex flex-col items-end gap-1">
+        {/* A cancelling goal gets no footer bar: the locked state is already stated beside the status badge.
+            A finished goal keeps the composer, which then continues the goal instead of correcting it. */}
+        {(canMutate || canContinue) && <section aria-labelledby="correction-heading" className={`${railInset} sticky bottom-0 mt-auto bg-slate-50 pb-1 pt-10`}>
+          {(canMutate || canContinue) && <div className="mb-2 flex flex-col items-end gap-1">
             <label htmlFor="goal-continuation-model" className="text-xs text-slate-500">Model for next continuation</label>
-            <select id="goal-continuation-model" value={goal.requestedModel} onChange={event => act(() => requestGoalModel(goal.id, event.target.value))} className="max-w-48 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-700 shadow-sm">{models.map(item => <option key={item} value={item}>{getModelDisplayName(item)}</option>)}</select>
-          </div>
+            <select id="goal-continuation-model" value={canContinue && continuationModel?.goalId === goal.id ? continuationModel.model : goal.requestedModel} onChange={event => canContinue ? setContinuationModel({ goalId: goal.id, model: event.target.value }) : act(() => requestGoalModel(goal.id, event.target.value))} className="max-w-48 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-700 shadow-sm">{models.map(item => <option key={item} value={item}>{getModelDisplayName(item)}</option>)}</select>
+          </div>}
           <div className="bg-white p-2 shadow-md ring-1 ring-slate-200/70">
-            <h2 id="correction-heading" className="sr-only">Send a correction</h2>
-            <textarea ref={correctionRef} aria-label="Correction or follow-up" value={message} onChange={event => setMessage(event.target.value)} onPaste={event => {
+            <h2 id="correction-heading" className="sr-only">{canContinue ? 'Continue this goal' : 'Send a correction'}</h2>
+            <textarea ref={correctionRef} aria-label={canContinue ? 'Instructions for the continued goal' : 'Correction or follow-up'} value={message} onChange={event => setMessage(event.target.value)} onPaste={event => {
               const pasted = clipboardImageFiles(event);
               if (!pasted.length) return;
               event.preventDefault();
               void addGoalFiles(files, pasted, setFiles, setError);
-            }} rows={3} className="w-full resize-none border-0 p-2 text-sm text-slate-800 outline-none placeholder:text-slate-400 focus:ring-0" placeholder="Send a correction to the same coding-agent session…" />
+            }} rows={3} className="w-full resize-none border-0 p-2 text-sm text-slate-800 outline-none placeholder:text-slate-400 focus:ring-0" placeholder={canContinue ? 'Optional: add instructions for the next run on the same branch and PR…' : 'Send a correction to the same coding-agent session…'} />
             <GoalAttachmentInput files={files} onChange={setFiles} onError={setError} disabled={busy} compact />
-            <div className="mt-2 flex justify-end"><button disabled={busy || !message.trim()} onClick={() => continueWith({ message }, files)} className={`${buttonClass} bg-primary-600 text-white hover:bg-primary-700`}><Send className="h-4 w-4" />Send</button></div>
+            <div className="mt-2 flex justify-end">{canContinue
+              ? <button disabled={busy} onClick={() => void reopen()} className={`${buttonClass} bg-primary-600 text-white hover:bg-primary-700`}><RotateCcw className="h-4 w-4" />Continue</button>
+              : <button disabled={busy || !message.trim()} onClick={() => continueWith({ message }, files)} className={`${buttonClass} bg-primary-600 text-white hover:bg-primary-700`}><Send className="h-4 w-4" />Send</button>}</div>
           </div>
         </section>}
       </aside>

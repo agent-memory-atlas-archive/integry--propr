@@ -178,6 +178,8 @@ export const resumeGoal = async (id: string) => request<{ goal: Goal }>(`/api/go
 export const cancelGoal = async (id: string) => request<{ goal: Goal }>(`/api/goals/${encodeURIComponent(id)}/cancel`, idempotentMutation('POST'));
 export const requestGoalModel = async (id: string, model: string) => request<{ goal: Goal }>(`/api/goals/${encodeURIComponent(id)}/model`, idempotentMutation('PATCH', { model }));
 export const sendGoalInput = async (id: string, body: { message?: string; canned?: 'done' | 'left' }, files: readonly File[] = []) => request<{ goal: Goal }>(`/api/goals/${encodeURIComponent(id)}/input`, files.length > 0 ? multipartMutation(body, files) : idempotentMutation('POST', body));
+/** Reopens a failed, completed or cancelled goal; the message and attachments are optional. */
+export const continueGoal = async (id: string, body: { message?: string; model?: string } = {}, files: readonly File[] = []) => request<{ goal: Goal }>(`/api/goals/${encodeURIComponent(id)}/continue`, files.length > 0 ? multipartMutation(body, files) : idempotentMutation('POST', body));
 export const getGoalAttachmentUrl = (goalId: string, attachmentId: string) => {
   const attachmentPath = `/api/goals/${encodeURIComponent(goalId)}/attachments/${encodeURIComponent(attachmentId)}`;
   const trimmedBase = API_BASE_URL.trim();

@@ -231,6 +231,7 @@ export function createOperationalRouteEntries(deps: OperationalRouteDeps): Route
     ['post', '/api/goals/:goalId/cancel', goalRoutes.cancel],
     ['patch', '/api/goals/:goalId/model', goalRoutes.requestModel],
     ['post', '/api/goals/:goalId/input', goalAttachmentUpload, goalRoutes.input],
+    ['post', '/api/goals/:goalId/continue', goalAttachmentUpload, goalRoutes.continueGoal],
     ['get', '/api/goals/:goalId/attachments/:attachmentId', goalRoutes.attachment],
     ['get', '/api/automation-definitions', automationDefinitionRoutes.list],
     // Deprecated compatibility alias.

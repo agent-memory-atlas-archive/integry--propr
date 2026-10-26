@@ -44,6 +44,7 @@ import {
     type GoalRow,
 } from './goalAttemptState.js';
 import { enqueueNextGoalAttempt } from './goalAttemptScheduling.js';
+import { continuedGoalBootstrapId, prepareContinuedGoal } from './goalContinuation.js';
 import {
     publishDirectGoalCheckpoint,
     rejectDirectGoalCheckpoint,
@@ -66,7 +67,7 @@ function goalNotificationSummary(result: AgentExecutionResult): string | undefin
     return result.summary;
 }
 
-async function ensureGoalWorktree(
+export async function ensureGoalWorktree(
     goal: GoalRow,
     job: GoalJobData,
     token: string,
@@ -149,6 +150,7 @@ async function initializeGoalTask(goal: GoalRow): Promise<void> {
     }
     await stateManager.updateTaskState(goal.current_task_id, TaskStates.PROCESSING, {
         ...(state.state === TaskStates.FAILED ? { isRetry: true } : {}),
+        ...(goal.continue_requested ? { reopenTerminal: true } : {}),
         reason: goal.session_id ? 'Resuming native goal session' : 'Preparing native goal session',
         historyMetadata: { executionMode: 'goal', generation: goal.run_generation },
     });
@@ -213,6 +215,17 @@ export async function finalizeGoal(
         });
     }
     return finalized;
+}
+
+/** A continued goal whose branch or PR cannot be prepared fails with the reason, so it can be continued again. */
+async function failContinuedGoal(data: GoalJobData, goal: GoalRow, error: Error): Promise<{ status: string; goalId?: string; reason?: string }> {
+    const reason = `Could not prepare the continued goal: ${error.message}`;
+    logger.warn({ goalId: goal.goal_id, error: error.message }, 'Continued goal preparation failed');
+    await fencedGoalUpdate(data, { continue_requested: false });
+    if (!await finalizeGoal(data, 'failed', reason)) return { status: 'skipped', reason: 'goal_finalize_fence' };
+    const task = await getStateManager().markTaskFailed(goal.current_task_id, new Error(reason));
+    if (task.state === TaskStates.FAILED) await markGoalTaskReconciled(data, 'failed');
+    return { status: 'failed', goalId: goal.goal_id };
 }
 
 async function markGoalTaskReconciled(job: GoalJobData, resultState: string): Promise<void> {
@@ -309,7 +322,13 @@ async function prepareClaimedGoalAttempt(data: GoalJobData, claimed: GoalRow): P
 
     const octokit = await getAuthenticatedOctokit();
     const githubToken = await octokit.auth({ type: 'installation' }) as { token: string };
-    const worktree = await ensureGoalWorktree(claimed, data, githubToken.token);
+    let continued: GoalRow;
+    try {
+        continued = await prepareContinuedGoal(data, claimed);
+    } catch (error) {
+        return { ready: false, result: await failContinuedGoal(data, claimed, error as Error) };
+    }
+    const worktree = await ensureGoalWorktree(continued, data, githubToken.token);
     let boundaryGoal = await fencedGoal(data);
     if (!boundaryGoal) return { ready: false, result: { status: 'skipped', reason: 'goal_boundary_fence' } };
     if (boundaryGoal.desired_state === 'paused') {
@@ -320,7 +339,12 @@ async function prepareClaimedGoalAttempt(data: GoalJobData, claimed: GoalRow): P
     }
     if (boundaryGoal.desired_state !== 'running') return { ready: false, result: { status: 'skipped', reason: 'goal_boundary_fence' } };
     if (boundaryGoal.launch_strategy === 'direct' && !boundaryGoal.final_pr_url) {
-        await publishDirectGoalCheckpoint(data, { kind: 'bootstrap' });
+        // The goal's fixed bootstrap key may already hold the PR a continued
+        // goal lost, so its new draft PR is published under a fresh checkpoint.
+        await publishDirectGoalCheckpoint(data, {
+            kind: 'bootstrap',
+            ...(boundaryGoal.continue_requested ? { checkpointId: await continuedGoalBootstrapId(boundaryGoal) } : {}),
+        });
         boundaryGoal = await fencedGoal(data);
         if (!boundaryGoal) return { ready: false, result: { status: 'skipped', reason: 'goal_bootstrap_fence' } };
     }
@@ -370,8 +394,14 @@ async function runPreparedGoal(data: GoalJobData, prepared: PreparedGoalAttempt)
             initialControlInputId: liveControl ? pendingInput?.input_id : undefined,
             initialControlInputMessage: liveControl ? pendingInput?.message : undefined,
             initialGoalFeedback: liveControl ? checkpointFeedback : undefined,
+            continueTerminalGoal: Boolean(goal.continue_requested),
             goalControl: control,
             environment: buildGoalPolicyEnvironment(goal.launch_strategy),
+            onGoalRearmed: async () => {
+                if (goal.continue_requested && !await fencedGoalUpdate(data, { continue_requested: false })) {
+                    throw new Error('Continued goal re-arm lost its attempt claim');
+                }
+            },
             onSessionId: async (sessionId, conversationId) => {
                 await saveSessionAndTaskState({
                     job: data, goal, sessionId, conversationId,

@@ -233,18 +233,18 @@ test('wait_goal and GET /api/goals/:goalId/wait expose the bounded wait contract
     assert.equal(completed.body.goal.goalCompleted, true);
     assert.deepEqual([completed.body.goal.lifecycleState, completed.body.goal.resultState, completed.body.goal.terminal], ['completed', 'completed', true]);
 
-    // Resuming past the consumed completion returns unreachable at once on both
+    // Resuming past completion remains waitable on both
     // surfaces, even though the terminal state itself satisfies the condition.
     for (const until of ['completed', 'terminal']) {
       const startedAt = Date.now();
-      const restAgain = await respond(ownerId, { goalId }, { until, afterCursor: completed.body.cursor, timeoutSeconds: '30' });
+      const restAgain = await respond(ownerId, { goalId }, { until, afterCursor: completed.body.cursor, timeoutSeconds: '0' });
       assert.equal(restAgain.status, 200);
-      assert.equal(restAgain.body.outcome, 'unreachable');
+      assert.equal(restAgain.body.outcome, 'timed_out');
       assert.equal(restAgain.body.cursor, completed.body.cursor);
-      const mcpAgain = await call('wait_goal', { repository, goalId, until, afterCursor: completed.body.cursor, timeoutSeconds: 30 });
-      assert.equal(mcpAgain.data.outcome, 'unreachable');
+      const mcpAgain = await call('wait_goal', { repository, goalId, until, afterCursor: completed.body.cursor, timeoutSeconds: 0 });
+      assert.equal(mcpAgain.data.outcome, 'timed_out');
       assert.equal(mcpAgain.data.goal.goalCompleted, true);
-      assert.match(mcpAgain.summary, /can no longer match: the goal is completed and records no further events/);
+      assert.match(mcpAgain.summary, /timed out/i);
       assert.ok(Date.now() - startedAt < 5_000, 'neither surface waited for the timeout');
     }
     // Without a cursor the completed state still matches immediately.

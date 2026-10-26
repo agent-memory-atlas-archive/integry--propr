@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import readline from 'node:readline';
+import { PassThrough } from 'node:stream';
 import { after, describe, test } from 'node:test';
 import {
   CODEX_APP_SERVER_INITIALIZE_TIMEOUT_MS,
@@ -65,10 +68,21 @@ class FakeConnection {
       this.turnResolver?.({ params: { turn: { status: 'interrupted' } } });
       return {};
     }
-    if (method === 'turn/steer') return {};
+    if (method === 'turn/steer') {
+      const rejection = this.steerRejections.shift();
+      if (rejection) throw new Error(rejection);
+      return {};
+    }
     throw new Error(`Unexpected request ${method}`);
   }
 
+  /** Errors the next turn/steer calls fail with, in order. */
+  steerRejections: string[] = [];
+  finishedTurns = new Set<string>();
+  running: string | null = null;
+  isTurnFinished(turnId: string): boolean { return this.finishedTurns.has(turnId); }
+  runningTurn(): string | null { return this.running; }
+  agentMessagesForTurn(_turnId: string, cursor: number): string[] { return this.agentMessagesAfter(cursor); }
   serverRequests: Array<Record<string, unknown>> = [];
   resolvedServerRequests: Array<number | string> = [];
   responses: Array<{ id: number | string; result: Record<string, unknown> }> = [];
@@ -186,6 +200,61 @@ describe('pinned Codex 0.146 native external-goal activation', () => {
     assert.deepEqual(state.delivered, []);
     assert.deepEqual(state.undeliverable, ['input-1']);
     assert.equal(connection.requests.some(request => request.method === 'turn/start' || request.method === 'turn/steer'), false);
+  });
+
+  for (const status of ['complete', 'cleared', 'budgetLimited', 'active']) {
+    test(`continuing a goal whose Codex thread is ${status} re-arms it and delivers the continuation`, async () => {
+      const state = controls();
+      const connection = new FakeConnection(true, 'before', false, status);
+      const result = await runGoalProtocol(
+        connection as never,
+        { ...options(state.control, true, true), continueTerminalGoal: true },
+        'gpt-5.6',
+      );
+
+      assert.equal(result.completion?.status, 'completed');
+      assert.deepEqual(state.undeliverable, []);
+      assert.deepEqual(state.delivered, ['input-1']);
+      const activation = connection.requests.find(request => request.method === 'thread/goal/set');
+      assert.deepEqual(activation?.params, { threadId: 'thread-1', objective: '/goal Ship it', status: 'active' });
+    });
+  }
+
+  test('continuing an active but idle thread starts and observes a turn', async () => {
+    const state = controls();
+    const connection = new FakeConnection(true, 'before', false, 'active');
+    const request = connection.request.bind(connection);
+    connection.request = async (method, params, timeout) => {
+      const result = await request(method, params, timeout);
+      if (method === 'thread/resume') connection.started = [];
+      return result;
+    };
+    const result = await runGoalProtocol(connection as never, { ...options(state.control, true, true), continueTerminalGoal: true }, 'gpt-5.6');
+    assert.equal(result.completion?.status, 'completed');
+    assert.deepEqual(state.delivered, ['input-1']);
+  });
+
+  for (const checkpoint of [false, true]) {
+    test(`completion with undelivered continuation fails visibly (checkpoint: ${checkpoint})`, async () => {
+      const state = controls();
+      const connection = new FakeConnection(true, 'before', false, 'complete');
+      connection.steerRejections.push(new Error('no active turn to steer').message);
+      if (checkpoint) connection.declareCheckpoint({ kind: 'checkpoint', commitMessage: 'checkpoint', include: ['.'] });
+      const result = await runGoalProtocol(connection as never, { ...options(state.control, true, true), continueTerminalGoal: true }, 'gpt-5.6');
+      assert.equal(result.completion?.status, 'failed');
+      assert.match(result.completion?.error ?? '', /before the continuation input could be delivered/);
+      assert.deepEqual(state.delivered, []);
+    });
+  }
+
+  test('continuing refuses a thread whose native goal has a different objective', async () => {
+    const state = controls();
+    const connection = new FakeConnection(true, 'before', false, 'complete');
+    await connection.request('thread/goal/set', { objective: '/goal Something else', status: 'complete' });
+    await assert.rejects(
+      runGoalProtocol(connection as never, { ...options(state.control, true, true), continueTerminalGoal: true }, 'gpt-5.6'),
+      /different native goal objective/,
+    );
   });
 
   test('fresh pause/crash then process restart resumes the native goal with a different FIFO input and immutable identity', async () => {
@@ -455,3 +524,160 @@ test('a correction queued before a Codex question is steered, not sent as its an
   connection.finishTurn();
   await run;
 });
+
+describe('steering a native goal whose App Server already moved to a newer turn', () => {
+  test('retries a steer that App Server rejected for a newer running turn', async () => {
+    const state = controls();
+    const connection = new FakeConnection(false, 'before');
+    connection.declareCheckpoint({ checkpointReady: true, message: 'feat: stable slice' });
+    connection.steerRejections.push('Codex expected active turn id `turn-native` but found `turn-later` (-32600)');
+
+    const result = await runGoalProtocol(connection as never, options(state.control), 'gpt-5.6');
+
+    assert.equal(result.completion?.status, 'completed');
+    assert.deepEqual(
+      connection.requests.filter(request => request.method === 'turn/steer').map(request => request.params.expectedTurnId),
+      ['turn-native', 'turn-later'],
+    );
+  });
+
+  test('keeps checkpoint feedback pending instead of failing when no turn is running', async () => {
+    const state = controls();
+    const connection = new FakeConnection(false, 'before');
+    connection.declareCheckpoint({ checkpointReady: true, message: 'feat: stable slice' });
+    connection.steerRejections.push('Codex no active turn to steer (-32600)');
+
+    const result = await runGoalProtocol(connection as never, options(state.control), 'gpt-5.6');
+
+    assert.equal(result.completion?.status, 'completed');
+    assert.deepEqual(state.checkpoints, ['agent:turn-native']);
+  });
+
+  test('still fails on a steer error that is not about the running turn', async () => {
+    const state = controls();
+    const connection = new FakeConnection(false, 'before');
+    connection.declareCheckpoint({ checkpointReady: true, message: 'feat: stable slice' });
+    connection.steerRejections.push('Codex input must not be empty (-32600)');
+
+    await assert.rejects(
+      runGoalProtocol(connection as never, options(state.control), 'gpt-5.6'),
+      /input must not be empty/,
+    );
+  });
+
+  test('replays the checkpoint race: Codex ran a turn while ProPR published, then started another', async () => {
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(),
+      exitCode: null as number | null, signalCode: null, kill: () => true,
+    });
+    const send = (message: Record<string, unknown>) => child.stdout.write(`${JSON.stringify(message)}\n`);
+    const started = (id: string) => send({ method: 'turn/started', params: { threadId: 'thread-1', turn: { id, status: 'inProgress' } } });
+    const said = (turnId: string, text: string) => send({
+      method: 'item/completed',
+      params: { threadId: 'thread-1', turnId, completedAtMs: 0, item: { type: 'agentMessage', id: `m-${turnId}`, text } },
+    });
+    const completed = (id: string) => send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id, status: 'completed' } } });
+    let goalStatus = 'paused';
+    let activations = 0;
+    let runningTurn: string | null = null;
+    const steers: unknown[] = [];
+    readline.createInterface({ input: child.stdin }).on('line', line => {
+      const request = JSON.parse(line) as { id?: number; method: string; params: Record<string, unknown> };
+      if (request.id === undefined) return;
+      const reply = (result: Record<string, unknown>) => send({ id: request.id, result });
+      if (request.method === 'initialize') return reply({});
+      if (request.method === 'thread/start') return reply({ thread: { id: 'thread-1', sessionId: 'conversation-1', model: 'gpt-5.6' } });
+      if (request.method === 'thread/goal/get') return reply({ goal: { status: goalStatus, objective: '/goal Ship it' } });
+      if (request.method === 'thread/goal/set') {
+        goalStatus = String(request.params.status);
+        reply({ goal: { status: goalStatus, objective: '/goal Ship it' } });
+        if (goalStatus !== 'active') return;
+        activations += 1;
+        setImmediate(() => {
+          if (activations === 1) {
+            // The checkpoint turn, then App Server continues the still-active
+            // goal on its own before ProPR pauses it to publish.
+            started('turn-a');
+            said('turn-a', JSON.stringify({ checkpointReady: true, message: 'feat: stable slice' }));
+            completed('turn-a');
+            started('turn-b');
+            said('turn-b', 'Waiting for ProPR to acknowledge the checkpoint.');
+            completed('turn-b');
+          } else {
+            runningTurn = 'turn-c';
+            started('turn-c');
+          }
+        });
+        return;
+      }
+      if (request.method === 'turn/steer') {
+        steers.push(request.params.expectedTurnId);
+        if (request.params.expectedTurnId !== runningTurn) {
+          return send({
+            id: request.id,
+            error: runningTurn
+              ? { code: -32600, message: `expected active turn id \`${String(request.params.expectedTurnId)}\` but found \`${runningTurn}\`` }
+              : { code: -32600, message: 'no active turn to steer' },
+          });
+        }
+        reply({});
+        goalStatus = 'complete';
+        runningTurn = null;
+        setImmediate(() => completed('turn-c'));
+        return;
+      }
+      send({ id: request.id, error: { code: -32601, message: `unexpected ${request.method}` } });
+    });
+    const connection = new AppServerConnection(child as never, undefined);
+    const state = controls();
+
+    const result = await runGoalProtocol(connection, options(state.control), 'gpt-5.6');
+
+    assert.equal(result.completion?.status, 'completed');
+    assert.deepEqual(state.checkpoints, ['agent:turn-a']);
+    assert.deepEqual(steers, ['turn-c'], 'the acknowledgement goes to the running turn, not the finished one');
+    child.stdout.end();
+  });
+});
+
+for (const pollingRetry of [false, true]) {
+  test(`initial continuation and checkpoint feedback are delivered together once (${pollingRetry ? 'polling retry' : 'first steer'})`, async () => {
+    const state = controls();
+    const connection = new FakeConnection(false, 'before', false, 'active', pollingRetry);
+    let pending = [{ id: 'input-1', message: 'Continue with the tests', sequence: 1 }];
+    state.control.load = async () => ({ desiredState: 'running', requestedModel: 'gpt-5.6', pendingInputs: pending, controlGeneration: 0 });
+    state.control.markInputDelivered = async id => { state.delivered.push(id); pending = []; };
+    let turns = 0;
+    const originalWait = connection.waitForTurn.bind(connection);
+    connection.waitForTurn = () => {
+      turns += 1;
+      if (turns === 1) return originalWait();
+      return Promise.resolve({ params: { turn: { status: 'completed' } } });
+    };
+    const originalRequest = connection.request.bind(connection);
+    connection.request = async (method, params, timeout) => {
+      if (pollingRetry && method === 'thread/goal/get') {
+        return { goal: { status: turns >= 2 ? 'complete' : 'active', objective: '/goal Ship it' } };
+      }
+      return originalRequest(method, params, timeout);
+    };
+    if (pollingRetry) connection.steerRejections.push('Codex no active turn to steer (-32600)');
+    const run = runGoalProtocol(connection as never, {
+      ...options(state.control, false, true),
+      initialControlInputMessage: 'Continue with the tests',
+      initialGoalFeedback: 'Checkpoint abc123 was published.',
+    }, 'gpt-5.6');
+    if (pollingRetry) {
+      await waitFor(() => state.delivered.length === 1, 'polling delivery of initial input');
+      connection.started.push('turn-second');
+      connection.finishTurn();
+    }
+    await run;
+    assert.deepEqual(state.delivered, ['input-1']);
+    const steers = connection.requests.filter(request => request.method === 'turn/steer');
+    assert.equal(steers.length, pollingRetry ? 2 : 1);
+    const sent = JSON.stringify(steers.at(-1)?.params.input);
+    assert.match(sent, /Checkpoint abc123 was published/);
+    assert.match(sent, /Continue with the tests/);
+  });
+}

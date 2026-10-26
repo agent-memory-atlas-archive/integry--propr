@@ -141,7 +141,8 @@ async function expectHeaderControls(page: Page, repository: string) {
   const viewport = page.viewportSize()!.width;
   await expect(page.getByTitle('Model: GPT-6 Astra')).toBeVisible();
   await expect(page.getByTitle('Elapsed time')).toHaveText('1m 6s');
-  await expect(page.getByText('Goal completed. Corrections disabled.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Continue goal', exact: true })).toBeEnabled();
+  await expect(page.getByRole('textbox', { name: 'Instructions for the continued goal' })).toBeEditable();
   await expect(page.getByLabel(/octocat/i).first()).toBeVisible();
   const openPr = page.getByRole('link', { name: /Open draft PR/ });
   await expect(openPr).toHaveAttribute('href', `https://github.com/${repository}/pull/8`);

@@ -39,6 +39,8 @@ export interface GoalRow {
     active_turn_id: string | null;
     pause_confirmed_at: string | null;
     resume_requested: boolean | number;
+    /** Set by Continue on a terminal goal; the next attempt re-arms the native goal. */
+    continue_requested?: boolean | number;
     artifact_refs?: string | GoalArtifact[] | null;
     started_at: string | null;
     paused_at: string | null;

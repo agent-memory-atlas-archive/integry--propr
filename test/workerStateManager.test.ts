@@ -2985,6 +2985,37 @@ test('ordinary state writers cannot move a terminal task back to processing', as
     await stateManager.close();
 });
 
+for (const terminalState of [TaskStates.CANCELLED, TaskStates.COMPLETED] as const) {
+    test(`a continued goal reopens its ${terminalState} backing task, and only with the explicit flag`, async () => {
+        const terminal = {
+            taskId: `goal-task-reopen-${terminalState}`,
+            issueRef: { number: 0, repoOwner: 'owner', repoName: 'repo' },
+            correlationId: `goal-reopen-${terminalState}`,
+            state: terminalState,
+            createdAt: '2026-10-24T12:09:00.000Z',
+            updatedAt: '2026-10-24T12:19:35.000Z',
+            version: 6,
+            attempts: 0,
+            history: [{ state: terminalState, timestamp: '2026-10-24T12:19:35.000Z', reason: 'Goal finished' }],
+        } satisfies TaskStateData;
+        mockRedisInstance.get.mock.mockImplementation(async () => JSON.stringify(terminal));
+        mockRedisInstance.eval.mock.resetCalls();
+        mockRedisInstance.eval.mock.mockImplementation(async () => 1);
+        const stateManager = new WorkerStateManager({ keyPrefix: TEST_KEY_PREFIX, stateExpiry: TEST_STATE_EXPIRY });
+
+        const ignored = await stateManager.updateTaskState(terminal.taskId, TaskStates.PROCESSING, { reason: 'Stale writer' });
+        assert.equal(ignored.state, terminalState);
+        assert.equal(mockRedisInstance.eval.mock.calls.length, 0);
+
+        const reopened = await stateManager.updateTaskState(terminal.taskId, TaskStates.PROCESSING, {
+            reason: 'Resuming native goal session', reopenTerminal: true,
+        });
+        assert.equal(reopened.state, TaskStates.PROCESSING);
+        assert.equal(mockRedisInstance.eval.mock.calls.length, 1);
+        await stateManager.close();
+    });
+}
+
 test('a retry writer that loses to cancellation cannot resurrect the task', async () => {
     const processing = {
         taskId: 'task-retry-cancellation-race',
