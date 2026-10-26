@@ -11,6 +11,7 @@ import {
 import { adoptPredecessorFollowupHandoff, settleFollowupHandoffAfterFailure } from './followupHandoffRecovery.js';
 import { delayPRCommentJobInPlace, predecessorWaitDelay, schedulePRCommentRecovery } from './prCommentCollisionRecovery.js';
 import { releasePRProcessingLock, startPRProcessingLockHeartbeat } from './prProcessingLock.js';
+import { releaseHeldHandoffOfClosedPullRequest, type PullRequestClosure } from './closedPullRequestHandoffs.js';
 import type { ProcessingState } from './prPublicationRecovery.js';
 import type { PullRequestPublication } from './prPublication.js';
 
@@ -277,6 +278,14 @@ export interface PredecessorHandoffGateParams {
     lockKey: string;
     lockToken: string;
     correlatedLogger: Logger;
+    /**
+     * How the pull request was closed, or null while it is open. Read only when
+     * a predecessor blocks this writer: a merged or closed pull request ends the
+     * wait instead of waiting forever behind a hold nobody can publish.
+     */
+    pullRequestClosure?: () => Promise<PullRequestClosure | null>;
+    /** Releases the closed pull request's operator-held follow-up; injectable for tests. */
+    releaseClosedHold?: typeof releaseHeldHandoffOfClosedPullRequest;
 }
 
 /** Removes the given comment IDs from a captured set in place, returning how many were removed. */
@@ -380,6 +389,8 @@ export async function gatePredecessorHandoff(params: PredecessorHandoffGateParam
         if (skipped) await releasePRProcessingLock(redisClient, params.lockKey, params.lockToken);
         return skipped;
     }
+    const closed = await endWaitOnClosedPullRequest(params, blocked);
+    if (closed) return closed;
     // Wait in place as the same job and task, backing off: an operator hold
     // can stand for days, and a fresh replacement every minute left thousands
     // of cancelled tasks behind a single unanswered follow-up.
@@ -397,6 +408,29 @@ export async function gatePredecessorHandoff(params: PredecessorHandoffGateParam
     });
     await releasePRProcessingLock(redisClient, params.lockKey, params.lockToken);
     return { status: 'rescheduled', reason: blocked, replacementTaskId };
+}
+
+/**
+ * A blocked writer on a merged or closed pull request stops instead of
+ * waiting: nothing can be published there, and the hold it waits behind would
+ * never be settled. Its captured comments are not returned to the pending
+ * list, exactly as for a job that finds the pull request closed later on, and
+ * the hold itself is released once this job has let go of the PR lease.
+ */
+async function endWaitOnClosedPullRequest(params: PredecessorHandoffGateParams, blocked: string): Promise<JobResult | undefined> {
+    const { ref, redisClient, correlatedLogger } = params;
+    let closure: PullRequestClosure | null = null;
+    try {
+        closure = await params.pullRequestClosure?.() ?? null;
+    } catch (error) {
+        correlatedLogger.warn({ error: (error as Error).message }, 'Could not read the pull request state while blocked by a predecessor; waiting');
+    }
+    if (!closure) return undefined;
+    await releasePRProcessingLock(redisClient, params.lockKey, params.lockToken);
+    const release = await (params.releaseClosedHold ?? releaseHeldHandoffOfClosedPullRequest)(ref, closure, { redis: redisClient as never });
+    correlatedLogger.info({ pullRequestNumber: ref.pullRequestNumber, closure, blocked, holdReleased: release.released, releaseReason: release.reason },
+        'Pull request is closed; ending the follow-up instead of waiting behind its predecessor');
+    return { status: 'cancelled', reason: 'cancelled_pr_closed', pullRequestNumber: ref.pullRequestNumber };
 }
 
 export interface HandoffErrorSettlementParams {

@@ -226,6 +226,8 @@ const modules: Record<string, Record<string, unknown>> = {
         stopAfterHandoffOwnershipLoss: () => ({ status: 'skipped', reason: 'followup_handoff_ownership_lost' }),
         writerOwnedWorktree: (state: { followupHandoffOwnershipLost?: boolean; worktreeInfo?: unknown }) => state.followupHandoffOwnershipLost ? undefined : state.worktreeInfo,
     },
+    // Closed pull request holds are covered by test/followupHandoffReviewBlockers.test.ts.
+    closedPullRequestHandoffs: { readPullRequestClosure: async () => null },
     prCommentCollisionRecovery: {
         createPRCommentTaskStateIfMissing: async (params: Parameters<typeof realRecovery.createPRCommentTaskStateIfMissing>[0]) => { if (realReentryHelpers) await realRecovery.createPRCommentTaskStateIfMissing(params); },
         evaluatePRCommentPreExecutionRecovery: async (params: Parameters<typeof realRecovery.evaluatePRCommentPreExecutionRecovery>[0]) => realReentryHelpers ? realRecovery.evaluatePRCommentPreExecutionRecovery(params) : {},

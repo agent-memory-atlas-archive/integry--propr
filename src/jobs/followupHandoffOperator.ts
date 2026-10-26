@@ -210,7 +210,7 @@ async function confirmUnconfirmedRetryOwnership(
  */
 export async function releaseFollowupHandoffRecord(
     key: FollowupHandoffKey,
-    options: { force?: boolean },
+    options: { force?: boolean; /** Recorded status reason; defaults to an operator release. */ reason?: string },
     deps: FollowupHandoffRecoveryDeps = {},
 ): Promise<{ released: boolean; reason?: string }> {
     const resolved = await resolveRecoveryDeps(deps);
@@ -253,7 +253,8 @@ export async function releaseFollowupHandoffRecord(
             const refusal = await branchReleaseRefusal(resolved.git, fresh);
             if (refusal) return { released: false, reason: refusal };
             const advanced = await advanceFollowupHandoff(resolved.store, fresh, {
-                status: HANDOFF_RELEASED, status_reason: options.force ? 'released_by_operator_force' : 'released_by_operator',
+                status: HANDOFF_RELEASED,
+                status_reason: options.reason ?? (options.force ? 'released_by_operator_force' : 'released_by_operator'),
             });
             return { released: Boolean(advanced), reason: advanced ? undefined : 'superseded' };
         });
