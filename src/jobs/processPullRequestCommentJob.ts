@@ -494,8 +494,11 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
         if (!(error instanceof UsageLimitError)) throw nonRetryableRepositoryWorkflowError(error);
         return { status: 'requeued', reason: 'usage_limit' };
     } finally {
-        await stopLockHeartbeat();
-        await cleanupJob({ stateManager, lockKey, lockToken, taskId, octokit: state.octokit ?? undefined, localRepoPath: state.localRepoPath, worktreeInfo: writerOwnedWorktree(state), repoOwner, repoName, pullRequestNumber, jobBranchName: context.jobBranchName, jobLlm: context.llm, jobUserId: job.data.userId, jobReasoningLevel: job.data.reasoningLevel, correlatedLogger, redisClient, skipPendingCommentFollowup: capacityRefused, success: !executionFailed });
+        try {
+            await cleanupJob({ beforeReleaseLock: stopLockHeartbeat, stateManager, lockKey, lockToken, taskId, octokit: state.octokit ?? undefined, localRepoPath: state.localRepoPath, worktreeInfo: writerOwnedWorktree(state), repoOwner, repoName, pullRequestNumber, jobBranchName: context.jobBranchName, jobLlm: context.llm, jobUserId: job.data.userId, jobReasoningLevel: job.data.reasoningLevel, correlatedLogger, redisClient, skipPendingCommentFollowup: capacityRefused, success: !executionFailed });
+        } finally {
+            await stopLockHeartbeat();
+        }
         // Only now is branch release provable; the handoff retires against that
         // evidence, or stays at cleanup_pending for recovery to release it.
         await retireExecutionHandoffAfterCleanup(state, correlatedLogger);

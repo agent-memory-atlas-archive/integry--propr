@@ -1,3 +1,4 @@
+import type { WorktreeMount } from './worktreeMounts.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
@@ -118,16 +119,22 @@ export function worktreeRemovalRecordsRoot(lifecycleRoot = repositoryStorageLife
     return path.join(lifecycleRoot, 'worktree-removals');
 }
 
-export async function interruptedWorktreeRemovals(lifecycleRoot = repositoryStorageLifecycle.root): Promise<Array<{ id: string; worktreePath: string }>> {
+export async function interruptedWorktreeRemovals(lifecycleRoot = repositoryStorageLifecycle.root): Promise<Array<{ id: string; worktreePath?: string }>> {
     const root = worktreeRemovalRecordsRoot(lifecycleRoot);
     const names = await fs.readdir(root).catch(error => {
         if (error.code === 'ENOENT') return [] as string[];
         throw error;
     });
-    const records: Array<{ id: string; worktreePath: string }> = [];
+    const records: Array<{ id: string; worktreePath?: string }> = [];
     for (const name of names.filter(name => /^[a-f0-9]{64}\.json$/.test(name)).slice(0, 100)) {
-        const record = JSON.parse(await fs.readFile(path.join(root, name), 'utf8'));
-        if (typeof record.worktreePath === 'string') records.push({ id: name.slice(0, -5), worktreePath: record.worktreePath });
+        const id = name.slice(0, -5);
+        try {
+            const record = JSON.parse(await fs.readFile(path.join(root, name), 'utf8'));
+            if (typeof record?.worktreePath !== 'string') throw new Error('Invalid removal diagnostic');
+            records.push({ id, worktreePath: record.worktreePath });
+        } catch {
+            records.push({ id });
+        }
     }
     return records;
 }
@@ -201,7 +208,7 @@ export interface WorktreeSweepOptions {
     /** Worktrees still referenced by live work (goals, follow-up handoffs, task repository roots). */
     protectedPaths: () => Promise<Iterable<string>>;
     /** Host paths bind-mounted into running containers. Throw when unknown. */
-    mountedPaths: () => Promise<Iterable<string>>;
+    mountedPaths: () => Promise<Iterable<WorktreeMount>>;
     now?: number;
 }
 
@@ -219,18 +226,21 @@ async function lastActivity(worktreePath: string, gitDir: string): Promise<numbe
     return latest;
 }
 
-function pathsOverlap(first: string, second: string): boolean {
-    const contains = (parent: string, child: string) => {
-        const relative = path.relative(parent, child);
-        return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
-    };
-    return contains(first, second) || contains(second, first);
+function containsPath(parent: string, child: string): boolean {
+    const relative = path.relative(path.resolve(parent), path.resolve(child));
+    return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
-/** Overlapping mounts expose checkout files. Only the configured whole-root
- * service mount is exempt; repository/owner ancestor mounts still protect it. */
-export function mountUsesWorktree(mount: string, worktreePath: string, root = worktreesRoot()): boolean {
-    return path.resolve(mount) !== path.resolve(root) && pathsOverlap(mount, worktreePath);
+function pathsOverlap(first: string, second: string): boolean {
+    return containsPath(first, second) || containsPath(second, first);
+}
+
+/** Shared storage mounts are exempt only for recognized service containers.
+ * Even services protect mounts below the root (owner/repository/checkouts). */
+export function mountUsesWorktree(mount: WorktreeMount, worktreePath: string, root = worktreesRoot()): boolean {
+    const source = typeof mount === 'string' ? mount : mount.source;
+    if (typeof mount !== 'string' && mount.service && containsPath(source, root)) return false;
+    return pathsOverlap(source, worktreePath);
 }
 
 /** Worktree directories at <root>/<owner>/<repo>/<task>. */
@@ -269,21 +279,27 @@ export async function sweepIdleWorktrees(options: WorktreeSweepOptions): Promise
         logger.warn({ minIdleHours: options.minIdleHours }, 'Skipped idle worktree sweep: invalid retention hours');
         return result;
     }
+    let inUse = 0;
+    let mountAuthorityFailures = 0;
+    const mountedPaths = async () => {
+        try { return await options.mountedPaths(); }
+        catch (error) { mountAuthorityFailures++; throw error; }
+    };
     sweeping = true;
     try {
         const root = path.resolve(options.worktreesBasePath ?? worktreesRoot());
         const minIdleMs = options.minIdleHours * 3_600_000;
         const unused = async (worktreePath: string): Promise<boolean> => {
-            const [protectedSnapshot, mountSnapshot] = await Promise.all([options.protectedPaths(), options.mountedPaths()]);
+            const [protectedSnapshot, mountSnapshot] = await Promise.all([options.protectedPaths(), mountedPaths()]);
             const protectedPaths = [...protectedSnapshot].map(p => path.resolve(p));
-            const mounts = [...mountSnapshot].map(p => path.resolve(p));
+            const mounts = [...mountSnapshot];
             if (protectedPaths.some(p => pathsOverlap(worktreePath, p)) || mounts.some(m => mountUsesWorktree(m, worktreePath, root))) return false;
             const gitDir = await worktreeGitDir(worktreePath);
             return !!gitDir && (options.now ?? Date.now()) - await lastActivity(worktreePath, gitDir) >= minIdleMs;
         };
         // Confirm authority even when no candidate directory exists.
         await options.protectedPaths();
-        await options.mountedPaths();
+        await mountedPaths();
         for (const worktreePath of await listWorktreeDirectories(root)) {
             const gitDir = await worktreeGitDir(worktreePath);
             if (!gitDir) { result.kept++; continue; }
@@ -294,16 +310,26 @@ export async function sweepIdleWorktrees(options: WorktreeSweepOptions): Promise
             // Detaching refreshes HEAD/index mtimes; idle age was checked above.
             const outcome = await removeWorktreeIfDisposable(worktreePath, root, async afterDetach => {
                 if (!afterDetach) return unused(worktreePath);
-                const [protectedSnapshot, mountSnapshot] = await Promise.all([options.protectedPaths(), options.mountedPaths()]);
+                const [protectedSnapshot, mountSnapshot] = await Promise.all([options.protectedPaths(), mountedPaths()]);
                 const protectedPaths = [...protectedSnapshot].map(p => path.resolve(p));
-                const mounts = [...mountSnapshot].map(p => path.resolve(p));
+                const mounts = [...mountSnapshot];
                 return !protectedPaths.some(p => pathsOverlap(worktreePath, p)) && !mounts.some(m => mountUsesWorktree(m, worktreePath, root));
             });
             if (outcome.removed) result.removed.push(worktreePath);
-            else result.kept++;
+            else {
+                result.kept++;
+                if (outcome.reason === 'in_use') inUse++;
+            }
         }
     } finally {
         sweeping = false;
+        if (mountAuthorityFailures > 0 && result.removed.length === 0) {
+            logger.warn({ mountAuthorityFailures, kept: result.kept, skipped: result.skipped },
+                'Idle worktree sweep reclaimed nothing and container mount authority failed; inspect Docker availability and permissions');
+        }
+    }
+    if (inUse > 0 && inUse === result.kept && result.removed.length === 0) {
+        logger.warn({ inUse, kept: result.kept, skipped: result.skipped }, 'Idle worktree sweep reclaimed nothing: every idle candidate is in use; inspect durable references and container mounts');
     }
     if (result.removed.length) logger.info({ removed: result.removed.length, kept: result.kept, skipped: result.skipped }, 'Removed idle worktrees whose work is already stored in Git');
     return result;

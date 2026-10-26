@@ -20,13 +20,15 @@ export async function referencedWorktreePaths(database = db): Promise<string[]> 
         })
         .whereNotNull('task.repository')
         .where(query => query.whereNull('latest.state').orWhereNotIn('latest.state', ['completed', 'failed', 'cancelled']))
-        .select('task.task_id', 'task.repository') as Array<{ task_id: string; repository: string }>;
+        .select('task.task_id', 'task.repository', 'latest.state') as Array<{ task_id: string; repository: string; state: string | null }>;
+    if (tasks.length) logger.warn({ tasks }, 'Nonterminal tasks protect repository worktrees; inspect task IDs for stale or missing history');
     const taskRoots = tasks.map(({ task_id, repository }) => {
         try {
             const parts = repository.split('/');
             if (parts.length !== 2) throw new Error('Expected owner/repo');
             return resolveRepositoryWorktreeRoot(process.env.GIT_WORKTREES_BASE_PATH || '/tmp/git-processor/worktrees', parts[0], parts[1]);
         } catch {
+            logger.warn({ taskId: task_id, repository }, 'Invalid active task repository disables worktree sweeping; repair task authority');
             throw new Error(`Invalid active task repository for task ${task_id}: ${repository}`);
         }
     });

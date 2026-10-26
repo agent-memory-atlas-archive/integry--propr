@@ -450,3 +450,39 @@ test('direct completion publishes committed terminal state and final PR before b
     await db('goals').where({ goal_id: data.goalId }).delete();
   }
 });
+
+test('a successful provider turn paused at its boundary keeps its checkout for resume', async () => {
+  const fs = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { execFileSync } = await import('node:child_process');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'paused-goal-'));
+  const checkout = path.join(root, 'checkout');
+  try {
+    execFileSync('git', ['init', '--initial-branch=main', root]);
+    execFileSync('git', ['-C', root, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-m', 'initial']);
+    execFileSync('git', ['-C', root, 'worktree', 'add', '-b', 'goal/paused', checkout]);
+    const data = { goalId: 'paused-goal', taskId: 'paused-task', generation: 1, claimId: 'claim' };
+    const goal = { goal_id: data.goalId, current_task_id: data.taskId, run_generation: 1, run_claim: 'claim',
+      result_state: null, desired_state: 'paused', worktree_path: checkout, branch_name: 'goal/paused' };
+    const forbidden = async () => { assert.fail('paused goals must not publish or finalize a terminal result'); };
+    const outcome = await processGoalJob({ data } as never, {
+      claim: async () => goal,
+      withHeartbeat: async (_data: unknown, operation: () => Promise<unknown>) => operation(),
+      prepare: async () => ({ ready: true, value: { goal, worktree: { worktreePath: checkout, branchName: 'goal/paused' } } }),
+      execute: async () => ({ success: true, modifiedFiles: [], logs: '' }),
+      result: {
+        loadGoal: async () => goal, fencedGoal: async () => goal,
+        acknowledgeInput: async () => {}, recordMetrics: async () => {},
+        handleStopped: async (_data: unknown, _goal: unknown, latest: typeof goal) => {
+          assert.equal(latest.desired_state, 'paused');
+          return { status: 'paused' };
+        },
+        saveProviderResult: forbidden, finalizeGoal: forbidden,
+      },
+    } as never);
+    assert.deepEqual(outcome, { status: 'paused' });
+    assert.ok((await fs.stat(path.join(checkout, '.git'))).isFile());
+    assert.equal(execFileSync('git', ['-C', checkout, 'symbolic-ref', '--short', 'HEAD'], { encoding: 'utf8' }).trim(), 'goal/paused');
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});

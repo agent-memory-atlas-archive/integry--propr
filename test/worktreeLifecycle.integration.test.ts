@@ -295,7 +295,7 @@ test('the idle sweep removes only idle, unreferenced, unmounted worktrees whose 
     const result = await sweepIdleWorktrees({
         worktreesBasePath: base, minIdleHours: 24, now,
         protectedPaths: async () => [referenced],
-        mountedPaths: async () => [base, path.join(mounted, 'src')],
+        mountedPaths: async () => [{ source: base, service: true }, path.join(mounted, 'src')],
     });
     assert.deepEqual(result.removed, [idle]);
     for (const kept of [referenced, mounted, dirty, recent]) assert.equal(await fs.pathExists(kept), true, kept);
@@ -532,7 +532,7 @@ for (const mode of ['mounted', 'unavailable', 'late-mounted']) {
 if [ "$1" = ps ]; then
   ${mode === 'unavailable' ? 'exit 1' : 'echo container'}
 else
-  ${mode === 'late-mounted' ? `if [ -f '${count}' ]; then echo '${path.dirname(worktree)}'; else touch '${count}'; fi` : `echo '${path.dirname(worktree)}'`}
+  ${mode === 'late-mounted' ? `if [ -f '${count}' ]; then echo 'null\tnull\t[{"Source":"${path.dirname(worktree)}"}]'; else touch '${count}'; fi` : `echo 'null\tnull\t[{"Source":"${path.dirname(worktree)}"}]'`}
 fi
 `, { mode: 0o755 });
         try {
@@ -576,3 +576,111 @@ test('sweep uses two fresh liveness snapshots per disposable candidate, with no 
     assert.equal(references, 3, 'startup authority check plus two fresh candidate snapshots');
     assert.equal(mounts, 3);
 });
+
+for (const cleanup of [true, false]) {
+    test(`${cleanup ? 'job cleanup' : 'idle sweep'} reclaims under Compose and launcher shared-storage mounts`, async () => {
+        await finishedTask();
+        const docker = path.join(bin, 'docker');
+        const rows = [
+            [['npm', 'run', 'daemon'], { 'com.docker.compose.service': 'daemon' }],
+            [['npm', 'run', 'worker'], { 'com.docker.compose.service': 'worker' }],
+            [['node', 'dist/src/indexing_worker.js'], { 'propr.service': 'indexing-worker' }],
+        ].map(([command, labels]) => [command, labels, [{ Source: root }]].map(value => JSON.stringify(value)).join('\t')).join('\n');
+        await fs.writeFile(docker, `#!/bin/sh
+if [ "$1" = ps ]; then echo services; else
+cat <<'MOUNTS'
+${rows}
+MOUNTS
+fi
+`, { mode: 0o755 });
+        try {
+            if (cleanup) await cleanupWorktree(repo, worktree, 'task');
+            else {
+                const { runningContainerMountSources } = await import('../packages/core/src/git/worktreeMounts.js');
+                const swept = await sweepIdleWorktrees({ minIdleHours: 1, now: Date.now() + 48 * 3_600_000,
+                    protectedPaths: async () => [], mountedPaths: () => runningContainerMountSources() });
+                assert.ok(swept.removed.includes(worktree));
+            }
+            assert.equal(await fs.pathExists(worktree), false);
+        } finally { await fs.writeFile(docker, '#!/bin/sh\nexit 0\n', { mode: 0o755 }); }
+    });
+}
+
+test('mount exemptions require service identity and stop at the configured root', async () => {
+    const { mountUsesWorktree } = await import('../packages/core/src/git/worktreeReclaim.js');
+    const base = process.env.GIT_WORKTREES_BASE_PATH!;
+    for (const source of [root, base]) {
+        assert.equal(mountUsesWorktree({ source, service: true }, worktree), false);
+        assert.equal(mountUsesWorktree({ source, service: false }, worktree), true);
+        assert.equal(mountUsesWorktree(source, worktree), true);
+    }
+    for (const source of [path.join(base, 'owner'), path.dirname(worktree), worktree, path.join(worktree, 'src')]) {
+        assert.equal(mountUsesWorktree({ source, service: true }, worktree), true);
+    }
+});
+
+test('sweep warns when all idle candidates are held in use', async () => {
+    const isolated = path.join(root, `warning-${serial}`);
+    const checkout = path.join(isolated, 'owner', 'repo', 'task');
+    await fs.ensureDir(path.dirname(checkout));
+    await git.raw(['worktree', 'add', '--detach', checkout, 'main']);
+    const { default: logger } = await import('../packages/core/src/utils/logger.js');
+    const warnings: string[] = [];
+    const warn = mock.method(logger, 'warn', (_context: unknown, message: string) => { warnings.push(message); });
+    try {
+        const swept = await sweepIdleWorktrees({ worktreesBasePath: isolated, minIdleHours: 1,
+            now: Date.now() + 48 * 3_600_000, protectedPaths: async () => [], mountedPaths: async () => [isolated] });
+        assert.equal(swept.kept, 1);
+        assert.ok(warnings.some(message => message.includes('every idle candidate is in use')));
+    } finally { warn.mock.restore(); }
+});
+
+test('sweep summarizes unavailable Docker authority at warn level', async () => {
+    const { default: logger } = await import('../packages/core/src/utils/logger.js');
+    const warnings: string[] = [];
+    const warn = mock.method(logger, 'warn', (_context: unknown, message: string) => { warnings.push(message); });
+    try {
+        await assert.rejects(sweepIdleWorktrees({ minIdleHours: 1,
+            protectedPaths: async () => [], mountedPaths: async () => { throw new Error('spawn docker ENOENT'); } }), /ENOENT/);
+        assert.ok(warnings.some(message => message.includes('container mount authority failed')));
+    } finally { warn.mock.restore(); }
+});
+
+for (const cleanup of [true, false]) {
+    test(`${cleanup ? 'cleanup' : 'sweep'} protects a task ancestor mount appearing after detach`, async () => {
+        await finishedTask();
+        const isolated = path.join(root, 'worktrees', `late-mount-${serial}`);
+        const moved = path.join(isolated, 'owner', 'repo', 'task');
+        await fs.ensureDir(path.dirname(moved));
+        await git.raw(['worktree', 'move', worktree, moved]);
+        worktree = moved;
+        const docker = path.join(bin, 'docker');
+        const counter = path.join(root, `late-ancestor-${serial}`);
+        const serviceRow = [['npm', 'run', 'worker'], { 'com.docker.compose.service': 'worker' }, [{ Source: root }]]
+            .map(value => JSON.stringify(value)).join('\t');
+        const taskRow = [['node', 'agent.js'], null, [{ Source: root }]].map(value => JSON.stringify(value)).join('\t');
+        await fs.writeFile(docker, `#!/bin/sh
+if [ "$1" = ps ]; then echo containers; else
+  count=0
+  if [ -f '${counter}' ]; then read count < '${counter}'; fi
+  count=$((count + 1))
+  echo "$count" > '${counter}'
+  if [ "$count" -gt ${cleanup ? 1 : 2} ]; then
+    echo '${taskRow}'
+  else
+    echo '${serviceRow}'
+  fi
+fi
+`, { mode: 0o755 });
+        try {
+            if (cleanup) await cleanupWorktree(repo, worktree, 'task');
+            else {
+                const { runningContainerMountSources } = await import('../packages/core/src/git/worktreeMounts.js');
+                await sweepIdleWorktrees({ worktreesBasePath: isolated, minIdleHours: 1, now: Date.now() + 48 * 3_600_000,
+                    protectedPaths: async () => [], mountedPaths: () => runningContainerMountSources() });
+            }
+            assert.equal(await fs.pathExists(worktree), true);
+            assert.equal(await registered(), true);
+        } finally { await fs.writeFile(docker, '#!/bin/sh\nexit 0\n', { mode: 0o755 }); }
+    });
+}

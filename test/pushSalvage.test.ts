@@ -555,3 +555,30 @@ test('a failed credential refresh keeps the original push rejection as the diagn
         await rm(tempDir, { recursive: true, force: true });
     }
 });
+
+test('corrupt salvage authority protects existing checkouts and does not break orphan retirement', async () => {
+    const { readSalvageRetentionRecord, pruneOrphanSalvageRetentionRecords } = await import('../packages/core/src/git/pushSalvage.js');
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'salvage-reader-'));
+    const worktreePath = path.join(directory, 'checkout');
+    const previousRecordDirectory = process.env.PUSH_RESCUE_WORKTREE_RECORD_DIR;
+    process.env.PUSH_RESCUE_WORKTREE_RECORD_DIR = path.join(directory, 'records');
+    await mkdir(worktreePath);
+    try {
+        await writeSalvageRetentionMarker(worktreePath, { taskId: 'reader-test', branchName: 'task' });
+        const saved = (await readSalvageRetentionRecord(worktreePath))!;
+        const valid = await readFile(saved.recordPath, 'utf8');
+        await writeFile(saved.recordPath, '{truncated');
+        await assert.rejects(readSalvageRetentionRecord(worktreePath));
+        assert.equal(await isSalvageRetainedWorktree(worktreePath), true);
+        assert.equal(await pruneOrphanSalvageRetentionRecords(path.dirname(saved.recordPath)), 0);
+        assert.equal(existsSync(saved.recordPath), true);
+        await writeFile(saved.recordPath, valid);
+        assert.equal(await pruneOrphanSalvageRetentionRecords(path.dirname(saved.recordPath)), 0);
+        await rm(worktreePath, { recursive: true });
+        assert.equal(await pruneOrphanSalvageRetentionRecords(path.dirname(saved.recordPath)), 1);
+        assert.equal(await readSalvageRetentionRecord(worktreePath), undefined);
+    } finally {
+        process.env.PUSH_RESCUE_WORKTREE_RECORD_DIR = previousRecordDirectory;
+        await rm(directory, { recursive: true, force: true });
+    }
+});

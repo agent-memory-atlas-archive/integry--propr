@@ -84,7 +84,7 @@ export class InstanceStorageService {
       // Interrupted removal is evidence for inspection, never authority to
       // discard deletion-only status or a missing .git file on a later pass.
       for (const removal of await interruptedWorktreeRemovals(this.services.lifecycle.root)) {
-        repositories.push({ id: `worktree-removal-${removal.id}`, name: `${path.basename(removal.worktreePath)} (removal interrupted; inspect permissions and registration)`,
+        repositories.push({ id: `worktree-removal-${removal.id}`, name: removal.worktreePath ? `${path.basename(removal.worktreePath)} (removal interrupted; inspect permissions and registration)` : 'Unreadable removal diagnostic (inspect lifecycle records)',
           category: 'worktrees', estimatedBytes: null, protectedReasons: ['unknown_git_state'] });
       }
       // Registry reads are rotating, bounded batches. Never claim a batch is a full inventory.
