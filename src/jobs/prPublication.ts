@@ -1,6 +1,6 @@
 import { cleanupWorktree, createHooklessGit, createWorktreePushSalvageOperations, getAuthenticatedOctokit, getRepoUrl, logger, salvageFailedPush } from '@propr/core';
 import type { PushSalvageEvent } from '@propr/core';
-import { createPullRequestHeadWorktree, pushPullRequestHeadBranch } from './prGitOperations.js';
+import { createPullRequestHeadWorktree, isRebaseConflictPushError, pushPullRequestHeadBranch } from './prGitOperations.js';
 import type { PublicationCompletion } from './prCommentPostExecution.js';
 import { resolvePullRequestGitTarget } from './prGitTarget.js';
 import {
@@ -217,11 +217,18 @@ export class PullRequestPublication {
     async push(
         worktreePath: string,
         completion?: PublicationCompletion,
-        options: { rebaseOnNonFastForward?: boolean; salvage?: PublicationSalvage } = {},
+        options: {
+            rebaseOnNonFastForward?: boolean;
+            salvage?: PublicationSalvage;
+            /** Merges a moved branch whose rebase conflicted and pushes; null falls back to salvage. */
+            integrateConflicts?: (worktreePath: string) => Promise<{ commitHash?: string } | null>;
+        } = {},
     ) {
         try {
             return await this.pushOnce(worktreePath, completion, options);
         } catch (error) {
+            const integrated = await this.tryIntegrateConflicts(worktreePath, error, options.integrateConflicts);
+            if (integrated) return integrated;
             if (!options.salvage) throw error;
             const target = this.target;
             return salvageFailedPush({
@@ -242,6 +249,22 @@ export class PullRequestPublication {
                     retryPush: () => this.pushOnce(worktreePath, completion, options),
                 }),
             });
+        }
+    }
+
+    /** Only for a direct (non-continuation) push whose automatic rebase hit conflicts. */
+    private async tryIntegrateConflicts(
+        worktreePath: string,
+        error: unknown,
+        integrate: ((worktreePath: string) => Promise<{ commitHash?: string } | null>) | undefined,
+    ) {
+        if (!integrate || this.continuation || !isRebaseConflictPushError(error)) return null;
+        try {
+            const result = await integrate(worktreePath);
+            return result ? { rebased: false, commitHash: result.commitHash } : null;
+        } catch (integrationError) {
+            logger.warn({ worktreePath, error: (integrationError as Error).message }, 'Integrating the moved PR branch failed; falling back to push salvage');
+            return null;
         }
     }
 

@@ -703,3 +703,35 @@ for (const identity of ['both', 'branch only', 'marker only', 'wrong repository'
         assert.equal((await findPRContinuation(ref))!.continuation_pr, identity === 'both' ? 100 : null);
     });
 }
+
+const rebaseConflict = () => new Error('Push was rejected because origin/contribution advanced, and automatic rebase failed.\n\nRebase error:\nCONFLICT (content): Merge conflict in doc.md');
+
+test('a push whose automatic rebase conflicts is integrated before any salvage', async () => {
+    const publication = session();
+    const prepared = await publication.prepare('integrate-conflict');
+    await implement(prepared.worktreeInfo.worktreePath);
+    finalPushError = rebaseConflict();
+    const integrated: string[] = [];
+    const salvageEvents: unknown[] = [];
+    const result = await publication.push(prepared.worktreeInfo.worktreePath, undefined, {
+        salvage: { taskId: 'task-1', onEvent: event => { salvageEvents.push(event); } },
+        integrateConflicts: async worktreePath => { integrated.push(worktreePath); return { commitHash: 'merged-head' }; },
+    });
+    assert.deepEqual(integrated, [prepared.worktreeInfo.worktreePath]);
+    assert.equal(result.commitHash, 'merged-head');
+    assert.deepEqual(salvageEvents, [], 'no rescue ref, bundle or retained worktree');
+});
+
+test('other push failures, and conflicts the integrator cannot resolve, keep the salvage path', async () => {
+    const publication = session();
+    const prepared = await publication.prepare('integrate-refused');
+    await implement(prepared.worktreeInfo.worktreePath);
+    let integrations = 0;
+    const integrateConflicts = async () => { integrations += 1; return null; };
+    finalPushError = new Error('remote: Internal Server Error');
+    await assert.rejects(publication.push(prepared.worktreeInfo.worktreePath, undefined, { integrateConflicts }), /Internal Server Error/);
+    assert.equal(integrations, 0, 'only a rebase conflict is integrated');
+    finalPushError = rebaseConflict();
+    await assert.rejects(publication.push(prepared.worktreeInfo.worktreePath, undefined, { integrateConflicts }), /automatic rebase failed/);
+    assert.equal(integrations, 1);
+});

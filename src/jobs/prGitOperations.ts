@@ -70,6 +70,15 @@ interface PushPullRequestHeadBranchOptions {
     rebaseOnNonFastForward?: boolean;
 }
 
+/**
+ * The push was rejected because the PR branch moved, and replaying the local
+ * commits onto it conflicted (pushBranch's automatic rebase aborted).
+ */
+export function isRebaseConflictPushError(error: unknown): boolean {
+    const message = (error as Error)?.message ?? '';
+    return message.includes('automatic rebase failed') && message.includes('CONFLICT');
+}
+
 export async function pushPullRequestHeadBranch(options: PushPullRequestHeadBranchOptions) {
     const { worktreePath, target, authToken, rebaseOnNonFastForward = true } = options;
     const repoUrl = getRepoUrl({ repoOwner: target.repoOwner, repoName: target.repoName });
