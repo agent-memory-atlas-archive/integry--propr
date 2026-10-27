@@ -150,6 +150,27 @@ export async function addToSafeDirectories(git: SimpleGit, worktreePath: string,
     }
 }
 
+/**
+ * Trusts every clone and worktree ProPR manages, once per process start.
+ * Worktrees are chowned for the agent containers, so Git in the worker sees
+ * them as owned by another user. The per-path entries added on creation live
+ * in the container's global config and vanish on restart, which made recovery
+ * of an older worktree fail with "dubious ownership". `<base>/*` (Git 2.46+)
+ * trusts only paths under ProPR's own folders.
+ */
+export async function trustManagedGitDirectories(git: SimpleGit): Promise<void> {
+    const clonesBase = process.env.GIT_CLONES_BASE_PATH || '/tmp/git-processor/clones';
+    const wanted = [`${path.resolve(WORKTREES_BASE_PATH)}/*`, `${path.resolve(clonesBase)}/*`];
+    try {
+        const existing = new Set((await git.raw(['config', '--global', '--get-all', 'safe.directory']).catch(() => '')).split('\n').map(line => line.trim()));
+        for (const entry of wanted) {
+            if (!existing.has(entry)) await git.raw(['config', '--global', '--add', 'safe.directory', entry]);
+        }
+    } catch (error) {
+        logger.warn({ error: (error as Error).message }, 'Could not trust ProPR clone and worktree folders; Git may reject worktrees after a restart');
+    }
+}
+
 export async function verifyWorktreeCreation(worktreePath: string): Promise<void> {
     const gitFilePath = path.join(worktreePath, '.git');
     if (await fs.pathExists(gitFilePath)) {

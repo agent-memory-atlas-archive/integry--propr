@@ -47,6 +47,14 @@ export interface FollowupHandoffGitOps {
     releaseSettledWorktree(localRepoPath: string, branchName: string, worktreePath: string): Promise<boolean>;
     /** Detaches the worktree HEAD in place: commits and working-tree files all stay. */
     detachWorktreeHead(worktreePath: string): Promise<void>;
+    /**
+     * Rebuilds a deleted worktree at its recorded path on the clone's local
+     * branch, so commits the agent made survive (they live in the shared
+     * clone, not the deleted folder). Clears the stale registration only when
+     * core proves it holds nothing beyond stored refs. False, changing
+     * nothing it cannot undo, when the worktree cannot be restored safely.
+     */
+    restoreMissingWorktree?(localRepoPath: string, worktreePath: string, branchName: string): Promise<boolean>;
 }
 
 async function fetchRemoteBranch(worktreePath: string, branchName: string): Promise<boolean> {
@@ -93,6 +101,38 @@ async function releaseGeneratedOnlyWorktree(worktreePath: string, branchName: st
     } catch {
         return false;
     }
+}
+
+async function pathExists(target: string): Promise<boolean> {
+    try {
+        await access(target);
+        return true;
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+        throw error;
+    }
+}
+
+async function restoreMissingWorktree(localRepoPath: string, worktreePath: string, branchName: string): Promise<boolean> {
+    // Lazy import: test suites replace @propr/core with enumerated mocks.
+    const { clearMissingWorktreeRegistration, setupWorktreePermissions } = await import('@propr/core');
+    if (await pathExists(worktreePath) || !await pathExists(localRepoPath)) return false;
+    const git = createHooklessGit(localRepoPath);
+    const listing = await git.raw(['worktree', 'list', '--porcelain']);
+    const registered = listing.split('\n\n').some(entry => entry.split('\n').includes(`worktree ${worktreePath}`));
+    if (registered && !await clearMissingWorktreeRegistration(git, worktreePath)) return false;
+    // The local branch keeps commits the agent made but never pushed; only a
+    // branch the clone never had starts from the remote head.
+    const local = (await git.raw(['branch', '--list', branchName])).trim();
+    if (local) {
+        await git.raw(['worktree', 'add', worktreePath, branchName]);
+    } else {
+        await git.raw(['fetch', 'origin', `+refs/heads/${branchName}:refs/remotes/origin/${branchName}`]);
+        await git.raw(['worktree', 'add', '--no-track', '-b', branchName, worktreePath, `refs/remotes/origin/${branchName}`]);
+    }
+    await setupWorktreePermissions(worktreePath, branchName, null);
+    return true;
 }
 
 /** Default Git evidence and publication operations over the retained worktree. */
@@ -181,6 +221,9 @@ export function createFollowupHandoffGitOps(getToken: () => Promise<string>): Fo
         },
         async detachWorktreeHead(worktreePath) {
             await createHooklessGit(worktreePath).raw(['checkout', '--detach']);
+        },
+        async restoreMissingWorktree(localRepoPath, worktreePath, branchName) {
+            return restoreMissingWorktree(localRepoPath, worktreePath, branchName);
         },
     };
 }

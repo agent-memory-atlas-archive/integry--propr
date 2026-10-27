@@ -367,12 +367,30 @@ async function finishRetryOwnedClaims(params: ResumeFollowupHandoffParams, recor
     return attemptHandoffCleanup(params, advanced);
 }
 
-async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome> {
+/**
+ * Something outside ProPR (a host cleanup, a manual rm -rf) deleted the worktree. Commits and the branch
+ * live in the shared clone, so it is rebuilt at its recorded path. Null when restored, else the hold.
+ */
+async function restoreDeletedWorktree(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeOutcome | null> {
+    if (!params.git.restoreMissingWorktree) return holdForOperator(params, record, 'worktree_missing');
+    const hold = await cancellationHold(params, record);
+    if (hold) return hold;
+    const context = { taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, worktreePath: record.worktree_path };
+    const restored = await params.git.restoreMissingWorktree(record.local_repo_path, record.worktree_path, record.branch_name)
+        .catch(error => { params.log.warn({ ...context, error: (error as Error).message }, 'Could not rebuild a deleted follow-up worktree'); return false; });
+    // Restore failures are not retried automatically, unlike worktree_missing.
+    if (!restored) return holdForOperator(params, record, 'worktree_restore_failed');
+    params.log.warn(context, 'Rebuilt a follow-up worktree deleted outside ProPR from its branch; recovery continues');
+    await reportHandoffOnTaskTimeline(params, record, 'worktree was deleted; rebuilt it from the branch');
+    return null;
+}
+
+async function finishWithoutChanges(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord, worktreeLost = false): Promise<ResumeOutcome> {
     // Cancellation or lease loss may land while the Git evidence or the notice
     // request is awaited: publication re-checks both before its mutation, and
     // they are re-checked again before restoring the claimed comments, or a
     // cancelled request would be requeued (or a successor's raced).
-    const notice = await publishOwedComment(params, record, interruptedWithoutChangesBody(record));
+    const notice = await publishOwedComment(params, record, interruptedWithoutChangesBody(record, worktreeLost));
     if ('done' in notice) return notice.done;
     if (notice.delivery === 'normal_completion') {
         // The normal path already delivered its (no-change) completion and the
@@ -441,7 +459,13 @@ async function collectAgentOutput(
     record: FollowupHandoffRecord,
 ): Promise<{ record: FollowupHandoffRecord } | { done: ResumeOutcome }> {
     const { git } = params;
-    const attachment = await git.worktreeAttachment(record.worktree_path, record.branch_name);
+    let attachment = await git.worktreeAttachment(record.worktree_path, record.branch_name);
+    const worktreeLost = attachment === 'missing';
+    if (worktreeLost) {
+        const restoreHold = await restoreDeletedWorktree(params, record);
+        if (restoreHold) return { done: restoreHold };
+        attachment = await git.worktreeAttachment(record.worktree_path, record.branch_name);
+    }
     if (attachment === 'missing') return { done: await holdForOperator(params, record, 'worktree_missing') };
     if (attachment === 'not_on_branch') return { done: await holdForOperator(params, record, 'worktree_not_on_branch') };
     let commitHash: string | null;
@@ -465,9 +489,11 @@ async function collectAgentOutput(
     if (!commitHash) {
         // Only the exit checkpoint's recorded success distinguishes an answered
         // request from a lost or stopped-short run that produced nothing.
-        return { done: record.agent_completed === 1
+        // A deleted worktree took the run's uncommitted edits with it, so a
+        // recorded success no longer proves the request was answered.
+        return { done: record.agent_completed === 1 && !worktreeLost
             ? await finishCompletedWithoutChanges(params, record)
-            : await finishWithoutChanges(params, record) };
+            : await finishWithoutChanges(params, record, worktreeLost) };
     }
     const advanced = await advanceFollowupHandoff(params.store, record, { phase: 'committed', commit_hash: commitHash });
     return advanced ? { record: advanced } : { done: { outcome: 'superseded' } };
@@ -483,7 +509,13 @@ async function pushCommittedWork(params: ResumeFollowupHandoffParams, record: Fo
     // A committed handoff publishes exactly the recorded worktree, branch and
     // commit. A detached/switched worktree or a replaced HEAD (for example
     // during manual recovery) is held for an operator, never pushed.
-    const attachment = await git.worktreeAttachment(record.worktree_path, record.branch_name);
+    let attachment = await git.worktreeAttachment(record.worktree_path, record.branch_name);
+    if (attachment === 'missing') {
+        // The recorded commit is on the clone's branch; the HEAD check below still guards the push.
+        const restoreHold = await restoreDeletedWorktree(params, record);
+        if (restoreHold) return { done: restoreHold };
+        attachment = await git.worktreeAttachment(record.worktree_path, record.branch_name);
+    }
     if (attachment !== 'attached') {
         return { done: await holdForOperator(params, record, attachment === 'missing' ? 'worktree_missing' : 'worktree_not_on_branch') };
     }

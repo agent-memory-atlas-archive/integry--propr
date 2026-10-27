@@ -25,6 +25,7 @@ export {
     resumeOperatorHeldFollowupHandoff,
     type FollowupHandoffStatus, type OperatorResumeResult,
 } from './followupHandoffOperator.js';
+import { releaseFollowupHandoffRecord, resumeOperatorHeldFollowupHandoff } from './followupHandoffOperator.js';
 
 /**
  * Discovers follow-up publication handoffs a worker restart interrupted and
@@ -105,6 +106,34 @@ async function adoptAndResume(
     }
 }
 
+/**
+ * A hold parked only because its worktree was deleted needs no operator:
+ * recovery rebuilds deleted worktrees from the branch, so the hold is re-armed
+ * and the pass below finishes it. A request the user cancelled is released
+ * instead; release withdraws its claimed comments and still refuses while the
+ * clone holds work the deleted folder never published.
+ */
+async function settleDeletedWorktreeHolds(deps: FollowupHandoffRecoveryDeps, resolved: ResolvedRecoveryDeps): Promise<void> {
+    const held = (await loadFollowupHandoffs(resolved.store, { status: HANDOFF_AWAITING_OPERATOR }))
+        .filter(record => record.status_reason === 'worktree_missing');
+    const shared = { ...deps, store: resolved.store, redis: resolved.redis, git: resolved.git, log: resolved.log, stateManager: resolved.stateManager };
+    for (const record of held) {
+        try {
+            const cancelled = !record.operator_authorized && !retryOwnsClaims(record)
+                && (await resolved.stateManager.getTaskState(record.task_id))?.state === resolved.taskStates.CANCELLED;
+            const result = cancelled
+                ? await releaseFollowupHandoffRecord(record, { reason: 'released_cancelled_worktree_deleted' }, shared)
+                : await resumeOperatorHeldFollowupHandoff(record, shared);
+            resolved.log.info({ repository: record.repository, pullRequest: record.pull_request, taskId: record.task_id, cancelled, result },
+                cancelled ? 'Released a cancelled follow-up held only because its worktree was deleted'
+                    : 'Re-armed a follow-up held only because its worktree was deleted; recovery rebuilds the worktree');
+        } catch (error) {
+            resolved.log.warn({ repository: record.repository, pullRequest: record.pull_request, taskId: record.task_id, error: (error as Error).message },
+                'Could not settle a follow-up held because its worktree was deleted; retrying on the next pass');
+        }
+    }
+}
+
 function countOutcome(summary: FollowupHandoffRecoverySummary, outcome: string): void {
     if (outcome === 'published') summary.published += 1;
     else if (outcome === 'no_changes') summary.noChanges += 1;
@@ -129,6 +158,7 @@ export async function recoverInterruptedFollowupHandoffs(
         failedClosed: 0, awaitingOperator: 0, lockedByOtherWriter: 0, errors: 0,
     };
     try {
+        if (!key) await settleDeletedWorktreeHolds(deps, resolved);
         const handoffs = key
             ? [await loadFollowupHandoff(resolved.store, key)]
                 .filter((record): record is FollowupHandoffRecord => record?.status === HANDOFF_ACTIVE)

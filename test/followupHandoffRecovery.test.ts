@@ -645,3 +645,110 @@ for (const phase of ['committed', 'pushed'] as const) {
         }
     });
 }
+
+/**
+ * Production git ops rebuild a deleted worktree from the clone's local branch
+ * and release a missing worktree by dropping its registration; this models both.
+ */
+function withWorktreeRestore(h: Harness, options: { failRestore?: boolean } = {}) {
+    const restores: string[] = [];
+    const gitOps = {
+        ...h.gitOps,
+        async restoreMissingWorktree(localRepoPath: string, worktreePath: string, branchName: string) {
+            if (options.failRestore) return false;
+            git(localRepoPath, 'worktree', 'prune', '--expire=now');
+            git(localRepoPath, 'worktree', 'add', worktreePath, branchName);
+            restores.push(worktreePath);
+            return true;
+        },
+        async releaseSettledWorktree(localRepoPath: string, branchName: string, worktreePath: string) {
+            if (existsSync(worktreePath)) return h.gitOps.releaseSettledWorktree(localRepoPath, branchName, worktreePath);
+            git(localRepoPath, 'worktree', 'prune', '--expire=now');
+            return true;
+        },
+    };
+    h.deps.git = gitOps;
+    return restores;
+}
+
+test('a deleted worktree is rebuilt from the branch and the agent\'s unpushed commit is published', async () => {
+    const h = await createHarness();
+    const restores = withWorktreeRestore(h);
+    const record = await seedHandoff(h);
+    await advanceFollowupHandoff({ database }, record, { phase: 'agent_exited', agent_completed: 1 });
+    await agentEdit(h);
+    git(h.fx.wt, 'add', '-A');
+    git(h.fx.wt, 'commit', '-m', 'agent commit');
+    const agentCommit = git(h.fx.wt, 'rev-parse', 'HEAD');
+    await rm(h.fx.wt, { recursive: true, force: true });
+
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.published, 1);
+    assert.equal(summary.awaitingOperator, 0);
+    assert.deepEqual(restores, [h.fx.wt]);
+    assert.equal(originHead(h.fx), agentCommit, 'the commit made before the deletion reaches the pull request');
+    assert.equal(publishedComments(h).length, 1);
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+});
+
+test('a deleted worktree without commits returns the request to the queue, even after a reported success', async () => {
+    const h = await createHarness();
+    withWorktreeRestore(h);
+    const record = await seedHandoff(h);
+    // The agent reported success, but its uncommitted edits went with the folder.
+    await advanceFollowupHandoff({ database }, record, { phase: 'agent_exited', agent_completed: 1 });
+    await agentEdit(h);
+    await rm(h.fx.wt, { recursive: true, force: true });
+
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.noChanges, 1);
+    assert.deepEqual(h.restored.map(comment => comment.id), [11]);
+    assert.equal(h.octokit.comments.length, 1);
+    assert.match(h.octokit.comments[0].body, /worktree was deleted/);
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+});
+
+test('a worktree_missing hold from before the fix is re-armed and recovered by the next pass', async () => {
+    const h = await createHarness();
+    withWorktreeRestore(h);
+    const record = await seedHandoff(h);
+    await rm(h.fx.wt, { recursive: true, force: true });
+    await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_missing' });
+
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.noChanges, 1);
+    assert.deepEqual(h.restored.map(comment => comment.id), [11]);
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+});
+
+test('a cancelled worktree_missing hold is released and its comments are not requeued', async () => {
+    const h = await createHarness({ taskStates: { 'task-1': 'cancelled' } });
+    withWorktreeRestore(h);
+    const withdrawn: number[] = [];
+    h.deps.withdrawRestoredComments = async (_record: unknown, claimed: Array<{ id: number }>) => { withdrawn.push(...claimed.map(comment => comment.id)); };
+    const record = await seedHandoff(h);
+    await rm(h.fx.wt, { recursive: true, force: true });
+    await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_missing' });
+
+    await recoverInterruptedFollowupHandoffs(h.deps);
+    const released = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(released?.status, HANDOFF_RELEASED);
+    assert.equal(released?.status_reason, 'released_cancelled_worktree_deleted');
+    assert.deepEqual(withdrawn, [11], 'the cancelled request is withdrawn from the pending list');
+    assert.equal(h.restored.length, 0);
+    assert.equal(queuedFollowupJobs.length, 0);
+});
+
+test('a worktree that cannot be rebuilt is held once as worktree_restore_failed and not retried in a loop', async () => {
+    const h = await createHarness();
+    withWorktreeRestore(h, { failRestore: true });
+    await seedHandoff(h);
+    await rm(h.fx.wt, { recursive: true, force: true });
+
+    const first = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(first.awaitingOperator, 1);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, 'worktree_restore_failed');
+    const second = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(second.inspected, 0);
+    assert.equal(h.octokit.comments.length, 0);
+});
