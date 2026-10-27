@@ -185,7 +185,11 @@ export type PredecessorAdoption =
     | {
         blocked: 'predecessor_agent_still_running' | 'predecessor_liveness_unavailable'
         | 'predecessor_awaiting_operator' | 'predecessor_container_identity_mismatch'
-        /** The same task's failed attempt could not be taken over: a Git registration still holds the branch. */
+        /**
+         * The same task's failed attempt could not be taken over: a Git registration
+         * still holds the branch, or the branch could not be restarted from the pull
+         * request head (see maintenance.md).
+         */
         | 'predecessor_branch_still_held';
     }
     | { resumed?: ResumeOutcome }
@@ -280,9 +284,10 @@ export async function adoptPredecessorFollowupHandoff(
 
 /**
  * Releases a predecessor that can publish nothing more, so this writer runs
- * instead of waiting. A release that could not free the branch keeps this
- * writer waiting: an operator hold stays reported as such, while a failed
- * same-task attempt that was never held names the branch registration.
+ * instead of waiting. A release that could not free the branch (or restart it
+ * from the pull request head) keeps this writer waiting: an operator hold
+ * stays reported as such, while a failed same-task attempt that was never
+ * held names the branch.
  */
 async function releaseForWriter(record: FollowupHandoffRecord, resolved: ResolvedRecoveryDeps, params: PredecessorAdoptionParams): Promise<PredecessorAdoption> {
     const claimIds = await releasePredecessorInline(record, resolved, params.currentTaskId, params.log);

@@ -63,10 +63,13 @@ async function movedBranch() {
     return { dir, wt, origin: path.join(dir, 'origin.git'), followup: git(wt, 'rev-parse', 'HEAD'), remote: git(path.join(dir, 'other'), 'rev-parse', 'HEAD') };
 }
 
+/** Order of the durable checkpoint and the push, as the worker would see them. */
+const events: Array<{ step: 'checkpoint' | 'push'; sha: string }> = [];
 const publicationFor = (origin: string) => ({
     target: { branchName: BRANCH, isFork: false },
     push: async (worktreePath: string, _completion: unknown, options: { rebaseOnNonFastForward?: boolean }) => {
         assert.equal(options.rebaseOnNonFastForward, false, 'the merge is pushed without rebasing');
+        events.push({ step: 'push', sha: git(worktreePath, 'rev-parse', 'HEAD') });
         git(worktreePath, 'push', 'origin', `HEAD:refs/heads/${BRANCH}`);
         return { commitHash: git(origin, 'rev-parse', `refs/heads/${BRANCH}`) };
     },
@@ -76,6 +79,7 @@ const options = (fx: Awaited<ReturnType<typeof movedBranch>>) => ({
     pullRequestNumber: 7, repoOwner: 'acme', repoName: 'widgets', getGithubToken: async () => 'token',
     stateManager: {} as never, taskId: 'task-1', correlationId: 'corr', redisClient: {} as never,
     correlatedLogger: { info() {}, warn() {}, error() {}, debug() {} } as never,
+    checkpointCommit: async (sha: string) => { events.push({ step: 'checkpoint', sha }); },
 });
 
 test('the real rebase-conflict push error is recognized', async () => {
@@ -92,11 +96,15 @@ test('a push that conflicts with commits pushed meanwhile is merged, resolved by
     resolverCalls.length = 0;
     agentResolution = async worktreePath => fs.writeFile(path.join(worktreePath, 'doc.md'), 'intro\nfrom another push\nfrom the follow-up\n');
 
+    events.length = 0;
     const result = await integrateRemoteAndPush(options(fx), fx.wt);
     assert.ok(result?.commitHash);
     assert.deepEqual(resolverCalls, [['doc.md']]);
     const head = git(fx.origin, 'rev-parse', `refs/heads/${BRANCH}`);
     assert.equal(head, result.commitHash);
+    // S17: the merge commit is the durable committed checkpoint before it is pushed, so a
+    // worker that dies after the push is not held as recorded_commit_mismatch against the original.
+    assert.deepEqual(events, [{ step: 'checkpoint', sha: head }, { step: 'push', sha: head }]);
     assert.deepEqual(git(fx.origin, 'rev-list', '--parents', '-n', '1', head).split(' ').slice(1).sort(), [fx.followup, fx.remote].sort(),
         'a merge of the follow-up and the commits pushed meanwhile');
     assert.equal(git(fx.origin, 'show', `${head}:doc.md`), 'intro\nfrom another push\nfrom the follow-up');
@@ -106,7 +114,9 @@ test('unresolved conflicts fall back with the follow-up commit untouched and not
     const fx = await movedBranch();
     agentResolution = async () => undefined; // leaves the markers in place
 
+    events.length = 0;
     assert.equal(await integrateRemoteAndPush(options(fx), fx.wt), null);
+    assert.deepEqual(events, [], 'nothing is checkpointed or pushed');
     assert.equal(git(fx.wt, 'rev-parse', 'HEAD'), fx.followup);
     assert.equal(git(fx.wt, 'status', '--porcelain'), '', 'the local merge was aborted');
     assert.equal(git(fx.origin, 'rev-parse', `refs/heads/${BRANCH}`), fx.remote);

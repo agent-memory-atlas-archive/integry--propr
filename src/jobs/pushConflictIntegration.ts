@@ -20,6 +20,12 @@ export interface PushConflictIntegrationOptions {
     correlationId: string;
     correlatedLogger: Logger;
     redisClient: Redis;
+    /**
+     * Records the merge commit as the durable committed checkpoint before it is
+     * pushed, so a worker that dies after the push is not held later as
+     * recorded_commit_mismatch against the original commit.
+     */
+    checkpointCommit?: (commitHash: string) => Promise<void>;
 }
 
 /**
@@ -35,9 +41,10 @@ export async function integrateRemoteAndPush(options: PushConflictIntegrationOpt
     const branchName = publication.target.branchName;
     const remoteBranch = `origin/${branchName}`;
     correlatedLogger.info({ pullRequestNumber, branchName }, 'Push conflicted with commits pushed while the follow-up ran; merging them in and resolving conflicts with the agent');
+    const githubToken = await options.getGithubToken();
     const { resolveConflicts } = await createAgentConflictResolver({
         worktreeInfo: options.worktreeInfo, pullRequestNumber, repoOwner: options.repoOwner, repoName: options.repoName,
-        baseBranch: remoteBranch, headBranch: branchName, githubToken: await options.getGithubToken(),
+        baseBranch: remoteBranch, headBranch: branchName, githubToken,
         stateManager: options.stateManager, taskId: options.taskId, correlationId: options.correlationId,
         correlatedLogger, redisClient: options.redisClient,
     });
@@ -46,6 +53,8 @@ export async function integrateRemoteAndPush(options: PushConflictIntegrationOpt
         // The head's own remote branch: the commits that made the push non-fast-forward.
         baseBranch: branchName,
         branchName,
+        // The fetch of the moved branch runs with the installation token, like the merge-conflict job's.
+        merge: { authToken: githubToken },
         resolveConflicts,
         author: AI_COMMIT_AUTHOR,
         commitMessage: ({ conflictedFiles }) => [
@@ -55,7 +64,10 @@ export async function integrateRemoteAndPush(options: PushConflictIntegrationOpt
             ...(conflictedFiles.length ? ['', 'Resolved conflicts in:', ...conflictedFiles.map(file => `- ${file}`)] : []),
         ].join('\n'),
         // A rebase would replay the commits and drop the merge that proves the remote was incorporated.
-        push: ({ worktreePath: path }) => publication.push(path, undefined, { rebaseOnNonFastForward: false }),
+        push: async ({ worktreePath: path, headSha }) => {
+            await options.checkpointCommit?.(headSha);
+            return publication.push(path, undefined, { rebaseOnNonFastForward: false });
+        },
     });
     if (outcome.status === 'resolved' || outcome.status === 'clean') {
         correlatedLogger.info({ pullRequestNumber, branchName, commitHash: outcome.headSha, conflictedFiles: outcome.conflictedFiles },

@@ -88,7 +88,7 @@ async function createFixture(): Promise<Fixture> {
 
 const originHead = (fx: Fixture) => git(fx.origin, 'rev-parse', `refs/heads/${BRANCH}`);
 
-interface GitCounters { commits: number; pushes: number; released: number; detached: number }
+interface GitCounters { commits: number; pushes: number; released: number; detached: number; restarted: number }
 
 function createGitOps(counters: GitCounters) {
     const clean = (wt: string) => git(wt, 'status', '--porcelain', '--untracked-files=all') === '';
@@ -147,7 +147,28 @@ function createGitOps(counters: GitCounters) {
             git(worktreePath, 'checkout', '--detach');
             counters.detached += 1;
         },
+        /** Models core's restartBranchFromRemoteHead after the authenticated fetch. */
+        async restartBranchFromRemoteHead(localRepoPath: string, branchName: string) {
+            git(localRepoPath, 'fetch', 'origin', `+refs/heads/${branchName}:refs/remotes/origin/${branchName}`);
+            const remote = git(localRepoPath, 'rev-parse', `refs/remotes/origin/${branchName}`);
+            const local = git(localRepoPath, 'rev-parse', `refs/heads/${branchName}`);
+            if (git(localRepoPath, 'rev-list', '--count', local, '--not', remote) === '0') return true;
+            if (git(localRepoPath, 'worktree', 'list', '--porcelain').split('\n').includes(`branch refs/heads/${branchName}`)) return false;
+            git(localRepoPath, 'update-ref', `refs/propr/superseded/${branchName}/${local.slice(0, 12)}`, local);
+            git(localRepoPath, 'update-ref', `refs/heads/${branchName}`, remote, local);
+            counters.restarted += 1;
+            return true;
+        },
     };
+}
+
+const localBranchHead = (fx: Fixture) => git(fx.local, 'rev-parse', `refs/heads/${BRANCH}`);
+const supersededBackups = (fx: Fixture) => git(fx.local, 'for-each-ref', '--format=%(objectname)', `refs/propr/superseded/${BRANCH}/`).split('\n').filter(Boolean);
+/** What the next job's createWorktreeFromExistingBranch checks out: the reused local branch as it is. */
+function nextJobHead(fx: Fixture, name: string): string {
+    const wt = path.join(fx.dir, name);
+    git(fx.local, 'worktree', 'add', wt, BRANCH);
+    return git(wt, 'rev-parse', 'HEAD');
 }
 
 /** In-memory PR processing lease with the adopt/renew/release script semantics. */
@@ -239,7 +260,7 @@ interface Harness {
 
 async function createHarness(options: { taskStates?: Record<string, string>; liveness?: string; comments?: FakeComment[] } = {}): Promise<Harness> {
     const fx = await createFixture();
-    const counters: GitCounters = { commits: 0, pushes: 0, released: 0, detached: 0 };
+    const counters: GitCounters = { commits: 0, pushes: 0, released: 0, detached: 0, restarted: 0 };
     const gitOps = createGitOps(counters);
     const redis = createFakeLockRedis();
     const stateManager = createStateManager(options.taskStates ?? { 'task-1': 'processing' });
@@ -781,6 +802,10 @@ test('the automatic retry of a failed attempt takes over its own not_on_branch h
     assert.equal(released?.status_reason, 'superseded_by_retry');
     assert.equal(h.counters.pushes, 0, 'the failed attempt\'s commit is not published');
     assert.ok(existsSync(path.join(h.fx.wt, 'feature.txt')), 'the failed attempt\'s files stay on disk');
+    // F3: the branch no longer carries the failed attempt's commit, so the retry does not inherit it.
+    assert.equal(localBranchHead(h.fx), originHead(h.fx), 'the branch restarts from the pull request head');
+    assert.deepEqual(supersededBackups(h.fx), [git(h.fx.wt, 'rev-parse', 'HEAD')], 'the failed commit is kept under a backup ref');
+    assert.equal(nextJobHead(h.fx, 'retry-wt'), originHead(h.fx));
     assert.deepEqual(await adoptAs(h, 'task-3'), {}, 'later comments are no longer blocked');
 });
 
@@ -1013,6 +1038,87 @@ test('S15: a new comment releases a cancelled attempt with unpublished work by d
     assert.equal(h.counters.pushes, 0);
     assert.deepEqual(withdrawn, [11]);
     assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_RELEASED);
+    // F3/F4: detaching the worktree does not move the branch ref, so the branch is restarted too.
+    assert.equal(h.counters.restarted, 1);
+    assert.equal(localBranchHead(h.fx), originHead(h.fx), 'the local branch no longer points at the cancelled commit');
+    assert.deepEqual(supersededBackups(h.fx), [unpublished], 'the cancelled commit is kept under a backup ref');
+    assert.equal(nextJobHead(h.fx, 'next-wt'), originHead(h.fx), 'the next job starts from the pull request head, not the cancelled commit');
+});
+
+test('F3: a cancelled hold stays when the branch cannot be restarted from the pull request head', async () => {
+    const h = await createHarness();
+    h.deps.withdrawRestoredComments = async () => undefined;
+    h.stateManager.states.set('task-1', 'cancelled');
+    const record = await seedHandoff(h);
+    await agentEdit(h);
+    git(h.fx.wt, 'add', '-A');
+    git(h.fx.wt, 'commit', '-m', 'never published');
+    const unpublished = git(h.fx.wt, 'rev-parse', 'HEAD');
+    await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' });
+    h.deps.git = { ...h.gitOps, restartBranchFromRemoteHead: async () => false };
+
+    assert.deepEqual(await adoptAs(h, 'task-2'), { blocked: 'predecessor_awaiting_operator' });
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR, 'the hold stands');
+    assert.equal(localBranchHead(h.fx), unpublished, 'nothing else moved the branch');
+    assert.equal(h.octokit.comments.length, 0, 'no release is announced');
+    // The stale background pass refuses the same way.
+    await database(PR_FOLLOWUP_HANDOFFS_TABLE).update({ updated_at: Date.now() - 25 * 3_600_000 });
+    await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
+    assert.equal(h.counters.pushes, 0);
+});
+
+test('S20: a cancelled hold whose task state was lost is released with its claims withdrawn', async () => {
+    const h = await createHarness({ taskStates: {} });
+    const withdrawn: number[] = [];
+    h.deps.withdrawRestoredComments = async (_record: unknown, claimed: Array<{ id: number }>) => { withdrawn.push(...claimed.map(comment => comment.id)); };
+    const record = await seedHandoff(h);
+    git(h.fx.wt, 'checkout', '--detach');
+    await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' });
+    assert.equal(await h.stateManager.getTaskState('task-1'), null, 'no task state at all');
+
+    assert.deepEqual(await adoptAs(h, 'task-2'), { releasedCancelledClaimIds: [11] }, 'the hold reason alone proves the cancellation');
+    assert.deepEqual(withdrawn, [11]);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_RELEASED);
+});
+
+test('S18: a failed attempt whose retry is pending is not rebuilt and published behind the retry\'s back', async () => {
+    const h = await createHarness({ taskStates: { 'task-1': 'pending' } }); // FAILED, then the queue scheduled its retry
+    const restores = withWorktreeRestore(h);
+    const record = await seedHandoff(h);
+    await agentEdit(h);
+    git(h.fx.wt, 'add', '-A');
+    git(h.fx.wt, 'commit', '-m', 'failed attempt');
+    const failedCommit = git(h.fx.wt, 'rev-parse', 'HEAD');
+    await advanceFollowupHandoff({ database }, record, { phase: 'committed', commit_hash: failedCommit, status_reason: 'publication_failed' });
+    await rm(h.fx.wt, { recursive: true, force: true }); // host cleanup before the retry runs
+
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.published + summary.awaitingOperator, 0);
+    assert.deepEqual(restores, [], 'no rebuild');
+    assert.equal(h.counters.pushes, 0, 'the failed attempt is not published');
+    const kept = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(kept?.status, HANDOFF_ACTIVE);
+    assert.equal(kept?.status_reason, 'publication_failed', 'the reason the retry\'s takeover relies on is kept');
+    // The retry takes the attempt over and starts from the pull request head.
+    assert.deepEqual(await adoptAs(h, 'task-1'), {});
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_RELEASED);
+    assert.equal(localBranchHead(h.fx), originHead(h.fx));
+    assert.deepEqual(supersededBackups(h.fx), [failedCommit]);
+    // Once the retry is over (no retry left), a lost worktree is rebuilt and published as before.
+    await database(PR_FOLLOWUP_HANDOFFS_TABLE).delete();
+    h.stateManager.states.set('task-1', 'failed');
+    const again = await seedHandoff(h);
+    git(h.fx.local, 'worktree', 'prune', '--expire=now');
+    git(h.fx.local, 'worktree', 'add', h.fx.wt, BRANCH);
+    await agentEdit(h);
+    git(h.fx.wt, 'add', '-A');
+    git(h.fx.wt, 'commit', '-m', 'final attempt');
+    const finalCommit = git(h.fx.wt, 'rev-parse', 'HEAD');
+    await advanceFollowupHandoff({ database }, again, { phase: 'committed', commit_hash: finalCommit, status_reason: 'publication_failed' });
+    await rm(h.fx.wt, { recursive: true, force: true });
+    assert.equal((await recoverInterruptedFollowupHandoffs(h.deps)).published, 1);
+    assert.equal(originHead(h.fx), finalCommit);
 });
 
 test('S15: the background pass releases a stale cancelled attempt with unpublished work the same way', async () => {
@@ -1029,6 +1135,9 @@ test('S15: the background pass releases a stale cancelled attempt with unpublish
     assert.equal(h.counters.detached, 1);
     assert.equal(git(h.fx.wt, 'branch', '--show-current'), '');
     assert.ok(existsSync(path.join(h.fx.wt, 'feature.txt')), 'files stay on disk');
+    assert.equal(h.counters.restarted, 1, 'the background release restarts the branch too');
+    assert.equal(localBranchHead(h.fx), originHead(h.fx));
+    assert.equal(nextJobHead(h.fx, 'next-wt'), originHead(h.fx), 'the next job does not inherit the cancelled commit');
 });
 
 test('S15: a hold whose worktree and Git registration are both gone is released without touching Git', async () => {

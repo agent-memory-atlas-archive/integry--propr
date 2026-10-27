@@ -331,6 +331,7 @@ function conflictIntegrator(params: PostExecutionParams) {
         pullRequestNumber: context.pullRequestNumber, repoOwner: context.repoOwner, repoName: context.repoName,
         getGithubToken: async () => (await octokit.auth({ type: 'installation' }) as { token: string }).token,
         stateManager, taskId, correlationId: job.data.correlationId ?? taskId, correlatedLogger: context.correlatedLogger, redisClient,
+        checkpointCommit: commitHash => markExecutionHandoffCommitted(state, commitHash),
     }, worktreePath);
 }
 

@@ -6,6 +6,7 @@ import {
 } from './followupHandoffStore.js';
 import { releaseFollowupHandoffRecord, resumeOperatorHeldFollowupHandoff } from './followupHandoffOperator.js';
 import { reportHandoffOnTaskTimeline, splitHandoffRepository, type LoggerLike } from './followupHandoffResume.js';
+import { taskAttemptEnded } from './followupHandoffTaskState.js';
 
 /**
  * Settles operator holds that no longer protect anything, so a stuck
@@ -37,11 +38,8 @@ const HOLD_EXPLANATIONS: Record<string, string> = {
     recorded_commit_mismatch: 'was overtaken by newer commits on the branch',
 };
 
-async function heldTaskEnded(record: FollowupHandoffRecord, resolved: ResolvedRecoveryDeps): Promise<boolean> {
-    const state = (await resolved.stateManager.getTaskState(record.task_id))?.state;
-    const { COMPLETED, FAILED, CANCELLED } = resolved.taskStates;
-    return !state || [COMPLETED, FAILED, CANCELLED].includes(state);
-}
+/** Whether the held attempt is over; a missing task state counts as ended (see taskAttemptEnded). */
+const heldTaskEnded = (record: FollowupHandoffRecord, resolved: ResolvedRecoveryDeps) => taskAttemptEnded(resolved, record.task_id);
 
 /**
  * Whether the job of `currentTaskId` may release this predecessor instead of
@@ -87,8 +85,11 @@ async function announceRelease(record: FollowupHandoffRecord, resolved: Resolved
  */
 export async function releasePredecessorInline(record: FollowupHandoffRecord, resolved: ResolvedRecoveryDeps, currentTaskId: string, log: LoggerLike): Promise<number[] | null> {
     const { git } = resolved;
+    // The hold reason counts as well as the task state: a cancelled hold whose
+    // task state was lost must still withdraw its claims (see taskAttemptEnded).
     const cancelled = record.task_id !== currentTaskId
-        && (await resolved.stateManager.getTaskState(record.task_id))?.state === resolved.taskStates.CANCELLED;
+        && (record.status_reason === 'cancelled_by_user'
+            || (await resolved.stateManager.getTaskState(record.task_id))?.state === resolved.taskStates.CANCELLED);
     const claimIds = cancelled ? parseClaimedComments(record).map(comment => comment.id) : [];
     if (cancelled) {
         // Durable suppression first, so a job that already captured them drops them too.
@@ -105,6 +106,19 @@ export async function releasePredecessorInline(record: FollowupHandoffRecord, re
         await git.detachWorktreeHead(record.worktree_path);
     }
     if ((await git.branchWorktreeRegistrations(record.local_repo_path, record.branch_name)).length > 0) return null;
+    // Freeing the branch is not enough: the attempt's unpublished commits may
+    // still be its tip (a refused release detached the worktree at them, a
+    // deleted worktree's registration was detached at them, a salvaged push
+    // left them), and a reused branch keeps commits it is ahead by. The next
+    // worktree would inherit them and the cancelled or failed work would land
+    // on the pull request. The branch restarts from the remote head, with the
+    // commits kept under refs/propr/superseded/; if that cannot be ensured the
+    // hold stands.
+    if (!await git.restartBranchFromRemoteHead(record.local_repo_path, record.branch_name)) {
+        log.warn({ repository: record.repository, pullRequest: record.pull_request, taskId: record.task_id, currentTaskId },
+            'The branch could not be restarted from the pull request head; the follow-up hold stands');
+        return null;
+    }
     const ownRetry = record.task_id === currentTaskId;
     const released = await advanceFollowupHandoff(resolved.store, record, {
         status: HANDOFF_RELEASED, status_reason: ownRetry ? 'superseded_by_retry' : 'auto_released_for_new_request',
@@ -142,7 +156,7 @@ export async function settleStuckHolds(deps: FollowupHandoffRecoveryDeps, resolv
                 continue;
             }
             if (now - Number(record.updated_at) < staleHoldMs() || !await heldTaskEnded(record, resolved)) continue;
-            const result = await releaseFollowupHandoffRecord(record, { force: true, reason: 'auto_released_stale_hold' }, shared);
+            const result = await releaseFollowupHandoffRecord(record, { force: true, restartBranch: true, reason: 'auto_released_stale_hold' }, shared);
             resolved.log.info({ repository: record.repository, pullRequest: record.pull_request, taskId: record.task_id, previousReason: record.status_reason, result },
                 'Released a stale follow-up hold whose attempt was over and could not publish');
             if (result.released) await announceRelease(record, resolved);

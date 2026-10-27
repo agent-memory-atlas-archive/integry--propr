@@ -210,7 +210,17 @@ async function confirmUnconfirmedRetryOwnership(
  */
 export async function releaseFollowupHandoffRecord(
     key: FollowupHandoffKey,
-    options: { force?: boolean; /** Recorded status reason; defaults to an operator release. */ reason?: string },
+    options: {
+        force?: boolean;
+        /** Recorded status reason; defaults to an operator release. */
+        reason?: string;
+        /**
+         * Restart the freed branch from the remote head when it still carries the
+         * attempt's unpublished commits (kept under refs/propr/superseded/), so the
+         * next worktree does not inherit them; refused when that cannot be ensured.
+         */
+        restartBranch?: boolean;
+    },
     deps: FollowupHandoffRecoveryDeps = {},
 ): Promise<{ released: boolean; reason?: string }> {
     const resolved = await resolveRecoveryDeps(deps);
@@ -252,6 +262,9 @@ export async function releaseFollowupHandoffRecord(
             // repository's own registrations must show the branch free.
             const refusal = await branchReleaseRefusal(resolved.git, fresh);
             if (refusal) return { released: false, reason: refusal };
+            if (options.restartBranch && !await resolved.git.restartBranchFromRemoteHead(fresh.local_repo_path, fresh.branch_name)) {
+                return { released: false, reason: 'unpublished_commits_still_on_branch' };
+            }
             const advanced = await advanceFollowupHandoff(resolved.store, fresh, {
                 status: HANDOFF_RELEASED,
                 status_reason: options.reason ?? (options.force ? 'released_by_operator_force' : 'released_by_operator'),

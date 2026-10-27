@@ -32,7 +32,7 @@ const { createFollowupHandoffGitOps } = await import('../src/jobs/followupHandof
 const { releasePredecessorInline } = await import('../src/jobs/followupHandoffAutoRelease.js');
 const { recordFollowupHandoff, advanceFollowupHandoff, loadFollowupHandoff, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED } = await import('../src/jobs/followupHandoffStore.js');
 const { up } = await import('../packages/core/src/db/migrations/20261017000000_add_pr_followup_handoffs.js');
-const { trustManagedGitDirectories, createHooklessGit } = await import('@propr/core');
+const { trustManagedGitDirectories, createHooklessGit, createWorktreeFromExistingBranch } = await import('@propr/core');
 await up(db);
 
 const BRANCH = 'propr/pr-9';
@@ -126,8 +126,8 @@ test('a branch the clone no longer has is rebuilt from the remote head through t
 const silentLog = { debug() {}, info() {}, warn() {}, error() {} };
 let holdSerial = 0;
 
-/** A worktree_missing hold of an ended task, with the recovery deps releasePredecessorInline reads. */
-async function heldMissingWorktree(clone: string, wt: string) {
+/** An operator-held handoff of an ended task, with the recovery deps releasePredecessorInline reads. */
+async function heldHandoff(clone: string, wt: string, hold: { reason: string; taskState: string }) {
     const pullRequest = 100 + holdSerial++;
     const record = await recordFollowupHandoff({
         ref: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: pullRequest },
@@ -139,22 +139,24 @@ async function heldMissingWorktree(clone: string, wt: string) {
         llm: 'claude', lockKey: `lock:${pullRequest}`, lockToken: 'dead-token',
     }, { database: db });
     assert.ok(record);
-    const held = await advanceFollowupHandoff({ database: db }, record!, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_missing' });
+    const held = await advanceFollowupHandoff({ database: db }, record!, { status: HANDOFF_AWAITING_OPERATOR, status_reason: hold.reason });
     assert.ok(held);
     const posted: string[] = [];
+    const withdrawn: number[] = [];
     const resolved = {
         store: { database: db }, git: ops, log: silentLog,
         stateManager: {
-            async getTaskState() { return { state: 'failed' }; },
+            async getTaskState() { return { state: hold.taskState }; },
             async updateTaskState() { return undefined; },
             async updateHistoryMetadata() { return undefined; },
         },
         taskStates: { COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled' },
-        withdrawRestoredComments: async () => undefined,
+        withdrawRestoredComments: async (_record: unknown, claimed: Array<{ id: number }>) => { withdrawn.push(...claimed.map(comment => comment.id)); },
         getOctokit: async () => ({ request: async (_route: string, params: { body?: string }) => { posted.push(params.body ?? ''); return { data: {} }; } }),
     };
-    return { held: held!, resolved: resolved as never, posted, key: { repository: 'acme/widgets', pull_request: pullRequest } };
+    return { held: held!, resolved: resolved as never, posted, withdrawn, key: { repository: 'acme/widgets', pull_request: pullRequest } };
 }
+const heldMissingWorktree = (clone: string, wt: string) => heldHandoff(clone, wt, { reason: 'worktree_missing', taskState: 'failed' });
 
 test('a new comment releases a worktree_missing hold whose Git registration survived, with the real release helper', async () => {
     const { clone, wt } = await fixture();
@@ -188,4 +190,65 @@ test('the real release also frees the branch when the missing worktree\'s regist
     const admin = path.join(clone, '.git', 'worktrees', path.basename(wt));
     assert.ok(await fs.pathExists(path.join(admin, 'index')), 'the staged index is retained');
     assert.doesNotMatch(await fs.readFile(path.join(admin, 'HEAD'), 'utf8'), /^ref:/, 'the registration HEAD is detached');
+});
+
+// --- F3/F4: a released attempt's unpublished commit is never inherited by the next job.
+
+/**
+ * The shared clone at its production path, so createWorktreeFromExistingBranch
+ * (real core) creates the jobs' worktrees from it exactly as the worker does.
+ */
+async function productionClone() {
+    const owner = 'acme';
+    const repoName = `widgets-${serial++}`;
+    const dir = path.join(root, `e2e-${repoName}`);
+    await fs.ensureDir(dir);
+    git(dir, 'init', '--bare', 'origin.git');
+    const clone = path.join(root, 'clones', owner, repoName);
+    await fs.ensureDir(path.dirname(clone));
+    git(dir, 'clone', 'origin.git', clone);
+    await fs.writeFile(path.join(clone, 'a.txt'), 'a\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-m', 'base');
+    git(clone, 'branch', '-M', BRANCH);
+    git(clone, 'push', '-u', 'origin', BRANCH);
+    git(clone, 'checkout', '--detach');
+    const origin = path.join(dir, 'origin.git');
+    const jobWorktree = async (name: string) => (await createWorktreeFromExistingBranch(clone, BRANCH, { worktreeDirName: name, owner, repoName })).worktreePath;
+    return { clone, origin, jobWorktree, remoteHead: () => git(origin, 'rev-parse', `refs/heads/${BRANCH}`) };
+}
+
+test('F3: a cancelled follow-up\'s unpublished commit is not inherited by the next job and never reaches the pull request', async () => {
+    const fx = await productionClone();
+    const before = fx.remoteHead();
+    // The cancelled attempt committed on the branch in its worktree but never pushed.
+    const cancelledWt = await fx.jobWorktree('attempt-1');
+    await fs.writeFile(path.join(cancelledWt, 'cancelled.txt'), 'cancelled work\n');
+    git(cancelledWt, 'add', '.');
+    git(cancelledWt, 'commit', '-m', 'cancelled work');
+    const cancelledCommit = git(cancelledWt, 'rev-parse', 'HEAD');
+    const { held, resolved, withdrawn, key } = await heldHandoff(fx.clone, cancelledWt, { reason: 'cancelled_by_user', taskState: 'cancelled' });
+
+    // A new comment releases the hold with the real Git operations.
+    assert.deepEqual(await releasePredecessorInline(held, resolved, 'task-new', silentLog), [11]);
+    assert.deepEqual(withdrawn, [11]);
+    assert.equal((await loadFollowupHandoff({ database: db }, key))?.status, HANDOFF_RELEASED);
+    assert.equal(git(cancelledWt, 'branch', '--show-current'), '', 'the cancelled worktree is detached in place');
+    assert.equal(git(cancelledWt, 'rev-parse', 'HEAD'), cancelledCommit, 'with its commit still checked out');
+    assert.equal(git(fx.clone, 'rev-parse', `refs/heads/${BRANCH}`), before, 'the local branch restarted from the pull request head');
+    const backups = git(fx.clone, 'for-each-ref', '--format=%(refname) %(objectname)', `refs/propr/superseded/${BRANCH}/`).split('\n');
+    assert.equal(backups.length, 1);
+    assert.match(backups[0], new RegExp(`-${cancelledCommit.slice(0, 12)} ${cancelledCommit}$`), 'the cancelled commit is kept under a backup ref named after it');
+
+    // The next job's worktree is created from the reused branch, implements and pushes.
+    const nextWt = await fx.jobWorktree('attempt-2');
+    assert.equal(git(nextWt, 'rev-parse', 'HEAD'), before, 'the next job starts from the pull request head, not the cancelled commit');
+    await fs.writeFile(path.join(nextWt, 'next.txt'), 'new request\n');
+    git(nextWt, 'add', '.');
+    git(nextWt, 'commit', '-m', 'new request');
+    git(nextWt, 'push', 'origin', `HEAD:refs/heads/${BRANCH}`);
+    const published = fx.remoteHead();
+    assert.equal(published, git(nextWt, 'rev-parse', 'HEAD'));
+    assert.throws(() => git(fx.origin, 'merge-base', '--is-ancestor', cancelledCommit, published), 'the cancelled commit never reached the pull request');
+    assert.equal(git(fx.clone, 'cat-file', '-t', cancelledCommit), 'commit', 'while the clone still keeps it');
 });

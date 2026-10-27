@@ -6,6 +6,7 @@ import {
 
 import { isNonFastForwardPushError } from './followupHandoffGitOps.js';
 import { handoffCommentMarker } from './followupHandoffMarker.js';
+import { pendingRetryHold } from './followupHandoffTaskState.js';
 import {
     deliveredOutcome, failedOutcomes, interruptedWithoutChangesBody, normalDelivery, recoveredCompletionBody, recoveredNoChangeCompletionBody,
     recoveredTaskReasons, recoveredTaskRecaps, recoveryCommitMessage, worktreeWasLost, WORKTREE_LOST_REASON,
@@ -374,13 +375,13 @@ async function finishRetryOwnedClaims(params: ResumeFollowupHandoffParams, recor
  * Something outside ProPR (a host cleanup, a manual rm -rf) deleted the worktree. Commits and the branch
  * live in the shared clone, so it is rebuilt at its recorded path. The loss is recorded durably before
  * the rebuild: the deleted folder took the run's uncommitted edits with it, so a recorded agent success
- * is invalidated (`agent_completed` null = lost) in the fenced write. A worker that dies after the
- * rebuild then leaves a record no later pass can mistake for an intact, successfully answered run.
- * Returns the advanced record when restored, else the hold.
+ * is invalidated (`agent_completed` null = lost) in the fenced write, and a worker that dies after the
+ * rebuild leaves no record a later pass can mistake for an intact, answered run. A failed attempt whose
+ * retry is pending is left to that retry. Returns the advanced record when restored, else the hold.
  */
 async function restoreDeletedWorktree(params: ResumeFollowupHandoffParams, record: FollowupHandoffRecord): Promise<ResumeStep> {
     if (!params.git.restoreMissingWorktree) return { done: await holdForOperator(params, record, 'worktree_missing') };
-    const hold = await cancellationHold(params, record);
+    const hold = await cancellationHold(params, record) ?? await pendingRetryHold(record, params);
     if (hold) return { done: hold };
     const marked = await advanceFollowupHandoff(params.store, record, { agent_completed: null, agent_summary: null, status_reason: WORKTREE_LOST_REASON });
     if (!marked) return { done: { outcome: 'superseded' } };

@@ -1,5 +1,5 @@
 import { access } from 'node:fs/promises';
-import { commitChanges, createHooklessGit, releaseBranchFromSettledWorktree } from '@propr/core';
+import { commitChanges, createHooklessGit, logger, releaseBranchFromSettledWorktree } from '@propr/core';
 import { AI_COMMIT_AUTHOR } from './commitAuthor.js';
 import { pushPullRequestHeadBranch } from './prGitOperations.js';
 
@@ -47,6 +47,16 @@ export interface FollowupHandoffGitOps {
     releaseSettledWorktree(localRepoPath: string, branchName: string, worktreePath: string): Promise<boolean>;
     /** Detaches the worktree HEAD in place: commits and working-tree files all stay. */
     detachWorktreeHead(worktreePath: string): Promise<void>;
+    /**
+     * Restarts the clone's local branch from the freshly fetched remote head
+     * when it carries commits the remote lacks, keeping them under
+     * refs/propr/superseded/. A released attempt's unpublished commits would
+     * otherwise stay the branch tip and be inherited, then pushed, by the
+     * next worktree created from the branch. True once the branch holds
+     * nothing the remote lacks; false, changing nothing, when that could not
+     * be ensured (no remote head, branch still checked out, fetch failed).
+     */
+    restartBranchFromRemoteHead(localRepoPath: string, branchName: string): Promise<boolean>;
     /**
      * Rebuilds a deleted worktree at its recorded path on the clone's local
      * branch, so commits the agent made survive (they live in the shared
@@ -226,6 +236,21 @@ export function createFollowupHandoffGitOps(getToken: () => Promise<string>): Fo
         },
         async detachWorktreeHead(worktreePath) {
             await createHooklessGit(worktreePath).raw(['checkout', '--detach']);
+        },
+        async restartBranchFromRemoteHead(localRepoPath, branchName) {
+            // Lazy import: test suites replace @propr/core with enumerated mocks.
+            const { configureGitAuthentication, restartBranchFromRemoteHead } = await import('@propr/core');
+            const git = createHooklessGit(localRepoPath);
+            try {
+                // The clone's origin is the clean repository URL; the fetch is authenticated per command.
+                configureGitAuthentication(git, await getToken());
+                await git.raw(['fetch', 'origin', `+refs/heads/${branchName}:refs/remotes/origin/${branchName}`]);
+                return await restartBranchFromRemoteHead(git, branchName);
+            } catch (error) {
+                logger.warn({ localRepoPath, branchName, error: (error as Error).message },
+                    'Could not restart the local branch from the remote head after a release');
+                return false;
+            }
         },
         async restoreMissingWorktree(localRepoPath, worktreePath, branchName) {
             return restoreMissingWorktree(localRepoPath, worktreePath, branchName, getToken);

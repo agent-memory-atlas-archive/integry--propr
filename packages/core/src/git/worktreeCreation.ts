@@ -75,27 +75,69 @@ export async function addWorktreeWithoutTracking(
  * in any worktree is never moved.
  */
 async function realignDivergedLocalBranch(git: SimpleGit, branchName: string, startPoint: string): Promise<void> {
-    const branchRef = `refs/heads/${branchName}`;
     let target: string;
     try {
         target = (await git.raw(['rev-parse', '--verify', `${startPoint}^{commit}`])).trim();
     } catch {
         return; // No start point to align with; keep the branch as it is.
     }
-    const local = (await git.raw(['rev-parse', '--verify', `${branchRef}^{commit}`])).trim();
+    const local = (await git.raw(['rev-parse', '--verify', `refs/heads/${branchName}^{commit}`])).trim();
     if (local === target) return;
     const behind = (await git.raw(['rev-list', '--count', target, '--not', local])).trim();
     if (behind === '0') return; // Equal content or ahead: unpushed work stays on the branch.
-    if ((await git.raw(['worktree', 'list', '--porcelain'])).split('\n').includes(`branch ${branchRef}`)) return;
-    const ahead = (await git.raw(['rev-list', '--count', local, '--not', target])).trim();
-    if (ahead !== '0') {
-        const backupRef = `refs/propr/superseded/${branchName}/${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}`;
-        await git.raw(['update-ref', backupRef, local]);
-        logger.warn({ branchName, localHead: local, startPoint: target, localOnlyCommits: Number(ahead), backupRef },
-            'Local branch diverged from the pull request head; its local-only commits were kept under a backup ref and the branch restarts from the head');
+    await restartLocalBranch(git, branchName, { from: local, to: target, reason: `align with ${startPoint}` });
+}
+
+/** Backup ref for a superseded branch tip: the second alone can repeat, so the tip's short id keeps it unique. */
+function supersededBackupRef(branchName: string, tip: string): string {
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+    return `refs/propr/superseded/${branchName}/${stamp}-${tip.slice(0, 12)}`;
+}
+
+/**
+ * Moves a local branch from the tip read by the caller to `to`, keeping any
+ * commit only the old tip reached under refs/propr/superseded/. The branch
+ * must not be checked out in any worktree (then nothing changes and false is
+ * returned), and the update is compare-and-swap on the old tip, so a
+ * concurrent writer makes it throw rather than be overwritten.
+ */
+async function restartLocalBranch(git: SimpleGit, branchName: string, move: { from: string; to: string; reason: string }): Promise<boolean> {
+    const branchRef = `refs/heads/${branchName}`;
+    if ((await git.raw(['worktree', 'list', '--porcelain'])).split('\n').includes(`branch ${branchRef}`)) return false;
+    const localOnly = (await git.raw(['rev-list', '--count', move.from, '--not', move.to])).trim();
+    if (localOnly !== '0') {
+        const backupRef = supersededBackupRef(branchName, move.from);
+        await git.raw(['update-ref', backupRef, move.from]);
+        logger.warn({ branchName, localHead: move.from, target: move.to, localOnlyCommits: Number(localOnly), backupRef },
+            'Local branch carried commits its new tip lacks; they were kept under a backup ref and the branch restarts from the new tip');
     }
     // Compare-and-swap on the old value: a concurrent writer makes this fail rather than be overwritten.
-    await git.raw(['update-ref', '-m', `propr: align with ${startPoint}`, branchRef, target, local]);
+    await git.raw(['update-ref', '-m', `propr: ${move.reason}`, branchRef, move.to, move.from]);
+    return true;
+}
+
+/**
+ * Restarts a local branch from its freshly fetched remote head when it carries
+ * commits the remote lacks. Those commits belong to an attempt that is over and
+ * must not be published (a cancelled request, a failed attempt whose retry
+ * starts over), yet a reused branch keeps commits it is ahead by, so the next
+ * worktree would inherit and push them. The commits are kept under
+ * refs/propr/superseded/. Returns true once the branch holds nothing the
+ * remote lacks, and false, changing nothing, when there is no remote head or
+ * the branch is checked out somewhere; a concurrent move throws. The caller
+ * fetches `refs/remotes/origin/<branch>` first.
+ */
+export async function restartBranchFromRemoteHead(git: SimpleGit, branchName: string): Promise<boolean> {
+    let remote: string;
+    try {
+        remote = (await git.raw(['rev-parse', '--verify', `refs/remotes/origin/${branchName}^{commit}`])).trim();
+    } catch {
+        return false;
+    }
+    if (!await localBranchExists(git, branchName)) return true;
+    const local = (await git.raw(['rev-parse', '--verify', `refs/heads/${branchName}^{commit}`])).trim();
+    if ((await git.raw(['rev-list', '--count', local, '--not', remote])).trim() === '0') return true;
+    return restartLocalBranch(git, branchName, { from: local, to: remote, reason: `restart from origin/${branchName}` });
 }
 
 export async function cleanupExistingBranch(git: SimpleGit, branchName: string): Promise<void> {

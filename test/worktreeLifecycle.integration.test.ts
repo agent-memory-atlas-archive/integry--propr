@@ -981,6 +981,18 @@ test('a local branch left diverged by failed attempts restarts from the rebased 
     assert.equal(await headOf('attempt-2'), rebased, 'the next run starts from the pull request head');
     const backups = (await git.raw(['for-each-ref', '--format=%(objectname)', 'refs/propr/superseded/pr/'])).trim();
     assert.equal(backups, stale, 'the failed attempt\'s commit is kept under a backup ref');
+
+    // S19: a second realignment of the same branch within the same second keeps its own backup.
+    await git.raw(['worktree', 'remove', '--force', path.join(root, 'worktrees', 'owner', repoName, 'attempt-2')]);
+    const staleAgain = await failedAttempt('attempt-3', 'failed again');
+    const rebasedAgain = await pushToRemote(initial, 'dependabot rebase again', true);
+    assert.equal(await headOf('attempt-4'), rebasedAgain);
+    const named = (await git.raw(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/propr/superseded/pr/'])).trim().split('\n');
+    assert.deepEqual(named.map(line => line.split(' ')[1]).sort(), [stale, staleAgain].sort(), 'both superseded tips are kept');
+    for (const line of named) {
+        const [ref, tip] = line.split(' ');
+        assert.match(ref, new RegExp(`^refs/propr/superseded/pr/\\d{8}T\\d{6}Z-${tip.slice(0, 12)}$`), 'the backup name carries the tip it saves');
+    }
 });
 
 test('a local branch behind the PR head is fast-forwarded, and one ahead keeps its unpushed commit', async () => {

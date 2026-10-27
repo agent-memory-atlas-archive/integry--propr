@@ -71,6 +71,8 @@ export type ResumeOutcome =
      */
     | { outcome: 'settled' }
     | { outcome: 'awaiting_operator'; reason: string }
+    /** A failed attempt whose queued retry takes it over; recovery leaves it untouched. */
+    | { outcome: 'retry_pending' }
     | { outcome: 'cleanup_pending' }
     | { outcome: 'ownership_lost' }
     | { outcome: 'superseded' };
