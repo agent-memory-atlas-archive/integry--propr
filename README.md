@@ -14,7 +14,7 @@
   <a href="https://docs.propr.dev/docs/intro"><strong>Docs</strong></a> ·
   <a href="https://demo.propr.dev"><strong>Live demo</strong></a> ·
   <a href="https://propr.dev"><strong>Website</strong></a> ·
-  <a href="https://discord.gg/5FjuaQBud"><strong>Discord</strong></a> ·
+  <a href="https://discord.gg/VJxDASAE64"><strong>Discord</strong></a> ·
   <a href="https://propr.dev/proof/"><strong>Built with ProPR</strong></a>
 </p>
 
@@ -24,7 +24,7 @@
   <a href="https://github.com/integry/propr/releases"><img src="https://img.shields.io/github/v/release/integry/propr" alt="Latest release" /></a>
   <a href="https://github.com/integry/propr/commits/main"><img src="https://img.shields.io/github/commit-activity/m/integry/propr" alt="Commit activity" /></a>
   <a href="https://github.com/integry/propr/actions/workflows/test-nightly.yml"><img src="https://img.shields.io/github/actions/workflow/status/integry/propr/test-nightly.yml?label=nightly%20tests" alt="Nightly tests" /></a>
-  <a href="https://discord.gg/5FjuaQBud"><img src="https://img.shields.io/badge/discord-join-7289da" alt="Discord" /></a>
+  <a href="https://discord.gg/VJxDASAE64"><img src="https://img.shields.io/badge/discord-join-7289da" alt="Discord" /></a>
 </p>
 
 <br />
@@ -355,7 +355,7 @@ Contributions are welcome — bug reports, documentation fixes, and code. Start 
 
 ## Community
 
-- [Discord](https://discord.gg/5FjuaQBud) — questions, setup help and feedback
+- [Discord](https://discord.gg/VJxDASAE64) — questions, setup help and feedback
 - [GitHub Issues](https://github.com/integry/propr/issues) — bugs and feature requests
 - [Roadmap](docs/ROADMAP.md) — where ProPR is heading, with a public issue behind each item
 - [Changelog](CHANGELOG.md) — release history

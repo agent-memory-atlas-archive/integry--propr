@@ -3,7 +3,7 @@
 Themes, ordered roughly by intent, with no promised dates; every item
 links to a public issue where the actual state lives. Pre-1.0 is when
 direction is cheapest to change — open an issue or make the case in
-[Discord](https://discord.gg/5FjuaQBud).
+[Discord](https://discord.gg/VJxDASAE64).
 
 _Last reviewed: 2026-07-04._
 
