@@ -5,7 +5,7 @@ Thanks for your interest in improving ProPR. Bug reports, documentation fixes an
 ## Ways to contribute
 
 - **Report a bug or request a feature** in [GitHub Issues](https://github.com/integry/propr/issues). Include your ProPR version (`propr --version`), how you installed it, and the steps to reproduce.
-- **Ask a question or share feedback** in [Discord](https://discord.gg/5FjuaQBud).
+- **Ask a question or share feedback** in [Discord](https://discord.gg/VJxDASAE64).
 - **Influence direction** through the [roadmap](../docs/ROADMAP.md): every item links to a public issue, and pre-1.0 is when direction is cheapest to change.
 - **Report a security vulnerability privately** as described in [SECURITY.md](SECURITY.md). Please do not open a public issue for it.
 
