@@ -721,7 +721,7 @@ test('a worktree_missing hold from before the fix is re-armed and recovered by t
     assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
 });
 
-test('a cancelled worktree_missing hold is released and its comments are not requeued', async () => {
+test('a cancelled hold is released by the background pass once stale, and its comments are not requeued', async () => {
     const h = await createHarness({ taskStates: { 'task-1': 'cancelled' } });
     withWorktreeRestore(h);
     const withdrawn: number[] = [];
@@ -731,12 +731,16 @@ test('a cancelled worktree_missing hold is released and its comments are not req
     await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_missing' });
 
     await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR, 'a fresh hold is left for a day');
+    await database(PR_FOLLOWUP_HANDOFFS_TABLE).update({ updated_at: Date.now() - 25 * 3_600_000 });
+    await recoverInterruptedFollowupHandoffs(h.deps);
     const released = await loadFollowupHandoff({ database }, KEY);
     assert.equal(released?.status, HANDOFF_RELEASED);
-    assert.equal(released?.status_reason, 'released_cancelled_worktree_deleted');
+    assert.equal(released?.status_reason, 'auto_released_stale_hold');
     assert.deepEqual(withdrawn, [11], 'the cancelled request is withdrawn from the pending list');
     assert.equal(h.restored.length, 0);
     assert.equal(queuedFollowupJobs.length, 0);
+    assert.match(h.octokit.comments.at(-1)?.body ?? '', /Cleared a stuck follow-up/);
 });
 
 test('a worktree that cannot be rebuilt is held once as worktree_restore_failed and not retried in a loop', async () => {
@@ -808,4 +812,59 @@ test('a user-cancelled hold is never taken over by a job of the same task', asyn
     const record = await seedHandoff(h);
     await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' });
     assert.deepEqual(await adoptAs(h, 'task-1'), { blocked: 'predecessor_awaiting_operator' });
+});
+
+async function heldBy(h: Harness, reason: string, taskState: string) {
+    h.stateManager.states.set('task-1', taskState);
+    const record = await seedHandoff(h);
+    git(h.fx.wt, 'checkout', '--detach');
+    await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: reason });
+}
+
+test('a new comment releases a hold whose attempt failed and gave up its branch, and tells the PR', async () => {
+    const h = await createHarness();
+    await heldBy(h, 'worktree_not_on_branch', 'failed');
+    assert.deepEqual(await adoptAs(h, 'task-2'), {});
+    const released = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(released?.status, HANDOFF_RELEASED);
+    assert.equal(released?.status_reason, 'auto_released_for_new_request');
+    assert.equal(h.counters.pushes, 0);
+    assert.ok(existsSync(path.join(h.fx.wt, 'base.txt')), 'the old worktree stays on disk');
+    assert.equal(h.octokit.comments.length, 1);
+    assert.match(h.octokit.comments[0].body, /Cleared a stuck follow-up[\s\S]*comment again/);
+    assert.doesNotMatch(h.octokit.comments[0].body, /\/tmp|fx-/, 'no host paths on the pull request');
+});
+
+test('a new comment drops a cancelled request\'s comments when it releases the hold', async () => {
+    const h = await createHarness();
+    const withdrawn: number[] = [];
+    h.deps.withdrawRestoredComments = async (_record: unknown, claimed: Array<{ id: number }>) => { withdrawn.push(...claimed.map(comment => comment.id)); };
+    await heldBy(h, 'cancelled_by_user', 'cancelled');
+    assert.deepEqual(await adoptAs(h, 'task-2'), { releasedCancelledClaimIds: [11] });
+    assert.deepEqual(withdrawn, [11]);
+});
+
+test('a hold whose own retry is still pending keeps a new comment waiting for that retry', async () => {
+    const h = await createHarness();
+    await heldBy(h, 'worktree_not_on_branch', 'pending');
+    assert.deepEqual(await adoptAs(h, 'task-2'), { blocked: 'predecessor_awaiting_operator' });
+});
+
+test('holds that need a real decision are never released automatically', async () => {
+    const h = await createHarness();
+    await heldBy(h, 'pr_binding_mismatch', 'failed');
+    assert.deepEqual(await adoptAs(h, 'task-2'), { blocked: 'predecessor_awaiting_operator' });
+    await database(PR_FOLLOWUP_HANDOFFS_TABLE).update({ updated_at: Date.now() - 30 * 24 * 3_600_000 });
+    await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
+    assert.equal(h.octokit.comments.length, 0);
+});
+
+test('a stale failed hold is released by the background pass without any new comment', async () => {
+    const h = await createHarness();
+    await heldBy(h, 'head_advanced_externally', 'failed');
+    await database(PR_FOLLOWUP_HANDOFFS_TABLE).update({ updated_at: Date.now() - 25 * 3_600_000 });
+    await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, 'auto_released_stale_hold');
+    assert.equal(h.octokit.comments.length, 1);
 });

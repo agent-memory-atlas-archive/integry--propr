@@ -144,6 +144,16 @@ The daemon needs access to the Docker socket, the clone/worktree roots at their 
 
 Job-end removal also retains any checkout named by an unreleased follow-up handoff, including committed work awaiting publication.
 
+### Stuck follow-ups settle themselves
+
+A follow-up handoff held for an operator blocks new follow-ups on its pull request. Holds that can no longer publish anything are settled automatically. ProPR then posts a short note on the pull request, and the held attempt's worktree stays on disk.
+
+- **Same task, after a failure.** The task's automatic retry takes over its own failed attempt. This applies once the attempt has given up its branch, for example after a rejected push was salvaged to a rescue ref.
+- **Ended attempt, new comment.** A new comment releases a hold whose attempt has ended when the attempt was cancelled, or its worktree left or lost the branch (`worktree_not_on_branch`, `worktree_missing`, `worktree_restore_failed`), or newer commits overtook it (`head_advanced_externally`, `recorded_commit_mismatch`). A cancelled request's comments are withdrawn, never run.
+- **Background pass.** Such holds older than `FOLLOWUP_HOLD_AUTO_RELEASE_HOURS` (default 24) are released even without a new comment. A hold kept only because its worktree was deleted is retried instead, and recovery rebuilds the worktree from the branch.
+
+Holds that need a decision stay for an operator: an unconfirmed usage-limit retry, fork publication, and pull request binding mismatches.
+
 Sweep diagnostics report the number of nonterminal tasks, the number of blocked repositories, and a sample of at most 20 tasks once per sweep. To reconcile a blocked repository, inspect the sampled tasks and their latest history, confirm that no job, goal, container or recovery obligation is active, then cancel or finish orphaned tasks through normal task controls. Do not infer termination from age alone or delete history to bypass protection. Callers that omit a retention strategy honor `WORKTREE_RETENTION_STRATEGY`, including `always_keep`.
 
 Removal detaches HEAD before deleting the checkout, freeing the task branch even when ignored build output takes minutes to remove. If a fresh reference or mount appears after detach, the checkout is kept detached and a warning records that outcome. A failed or interrupted removal can leave a partial checkout. Its diagnostic lives outside the checkout under the shared storage lifecycle directory's `worktree-removals/` and appears in storage inventory as requiring inspection. Inspect permissions and Git registrations before operator recovery; deletion-only status or a missing `.git` file never authorizes forced removal.
