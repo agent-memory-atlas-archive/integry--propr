@@ -48,7 +48,10 @@ export async function addWorktreeWithoutTracking(
     const { startPoint, resetBranch = false } = options;
     if (resetBranch) {
         const exists = await localBranchExists(git, branchName);
-        if (exists) return git.raw(['worktree', 'add', worktreePath, branchName]);
+        if (exists) {
+            await realignDivergedLocalBranch(git, branchName, startPoint);
+            return git.raw(['worktree', 'add', worktreePath, branchName]);
+        }
     }
     return git.raw([
         'worktree',
@@ -59,6 +62,40 @@ export async function addWorktreeWithoutTracking(
         worktreePath,
         startPoint,
     ]);
+}
+
+/**
+ * Brings a reused local branch onto its start point (the pull request head)
+ * without losing commits. A branch behind is fast-forwarded. A branch ahead
+ * keeps its unpushed commits. A diverged branch (the remote was rebased or
+ * force-pushed) can never publish its local-only commits, which are failed
+ * attempts' leftovers: they are kept under refs/propr/superseded/ and the
+ * branch restarts from the start point. Otherwise every later run would build
+ * on the stale history and every push would be rejected. A branch checked out
+ * in any worktree is never moved.
+ */
+async function realignDivergedLocalBranch(git: SimpleGit, branchName: string, startPoint: string): Promise<void> {
+    const branchRef = `refs/heads/${branchName}`;
+    let target: string;
+    try {
+        target = (await git.raw(['rev-parse', '--verify', `${startPoint}^{commit}`])).trim();
+    } catch {
+        return; // No start point to align with; keep the branch as it is.
+    }
+    const local = (await git.raw(['rev-parse', '--verify', `${branchRef}^{commit}`])).trim();
+    if (local === target) return;
+    const behind = (await git.raw(['rev-list', '--count', target, '--not', local])).trim();
+    if (behind === '0') return; // Equal content or ahead: unpushed work stays on the branch.
+    if ((await git.raw(['worktree', 'list', '--porcelain'])).split('\n').includes(`branch ${branchRef}`)) return;
+    const ahead = (await git.raw(['rev-list', '--count', local, '--not', target])).trim();
+    if (ahead !== '0') {
+        const backupRef = `refs/propr/superseded/${branchName}/${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}`;
+        await git.raw(['update-ref', backupRef, local]);
+        logger.warn({ branchName, localHead: local, startPoint: target, localOnlyCommits: Number(ahead), backupRef },
+            'Local branch diverged from the pull request head; its local-only commits were kept under a backup ref and the branch restarts from the head');
+    }
+    // Compare-and-swap on the old value: a concurrent writer makes this fail rather than be overwritten.
+    await git.raw(['update-ref', '-m', `propr: align with ${startPoint}`, branchRef, target, local]);
 }
 
 export async function cleanupExistingBranch(git: SimpleGit, branchName: string): Promise<void> {
