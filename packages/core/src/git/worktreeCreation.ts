@@ -88,12 +88,24 @@ export function worktreeHoldingBranch(message: string): string | null {
     return /already (?:used by worktree|checked out) at '([^']+)'/.exec(message)?.[1] ?? null;
 }
 
+/** Resolve symlinked ancestors even when the checkout (and its .git file) is gone. */
+async function canonicalMissingPath(target: string): Promise<string> {
+    try {
+        return await fs.realpath(target);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        const parent = path.dirname(target);
+        if (parent === target) throw error;
+        return path.join(await canonicalMissingPath(parent), path.basename(target));
+    }
+}
+
 /**
  * Frees a branch held only by the registration of a worktree whose checkout
  * directory is gone (removed while worktree pruning is disabled). With no
- * checkout there are no uncommitted changes, and the branch ref keeps every
- * commit, so the registration's HEAD is pointed at the branch's commit,
- * detached: the registration itself is kept, as retention requires.
+ * checkout the index may still hold staged changes; it is retained. The
+ * branch ref keeps the current commit, so the registration's HEAD is detached
+ * at that commit. The registration itself is kept, as retention requires.
  */
 async function detachMissingWorktreeRegistration(git: SimpleGit, branchName: string, holderPath: string): Promise<boolean> {
     const commonDir = (await git.raw(['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
@@ -102,12 +114,65 @@ async function detachMissingWorktreeRegistration(git: SimpleGit, branchName: str
     for (const id of await fs.readdir(registrations)) {
         const admin = path.join(registrations, id);
         const gitdir = (await fs.readFile(path.join(admin, 'gitdir'), 'utf8').catch(() => '')).trim();
-        if (gitdir !== path.join(holderPath, '.git')) continue;
+        if (!gitdir || await canonicalMissingPath(gitdir) !== await canonicalMissingPath(path.join(holderPath, '.git'))) continue;
         const head = (await fs.readFile(path.join(admin, 'HEAD'), 'utf8').catch(() => '')).trim();
         if (head !== `ref: refs/heads/${branchName}`) return false;
         const commit = (await git.raw(['rev-parse', '--verify', `refs/heads/${branchName}^{commit}`])).trim();
         await git.raw(['update-ref', '--no-deref', `worktrees/${id}/HEAD`, commit]);
         logger.warn({ branchName, holderPath, commit }, 'Released branch from the registration of a worktree whose checkout is missing; the registration is kept with a detached HEAD');
+        return true;
+    }
+    return false;
+}
+
+/** Git's refusal to add a worktree at a path whose checkout is gone but whose registration remains. */
+export function isMissingRegisteredWorktreeError(message: string): boolean {
+    return /is a missing but already registered worktree/.test(message);
+}
+
+/**
+ * Clears the registration of a worktree whose checkout directory is gone, so the
+ * same path can be checked out again (a continued goal rebuilds its saved path).
+ * Only the current HEAD and index are proven recoverable: a branch,
+ * remote-tracking ref or tag must contain HEAD, and the index must match it.
+ * Locked registrations and operations in progress are retained. Historical
+ * logs/HEAD entries are discarded, just as with git worktree remove; abandoned
+ * detached commits anchored only by that reflog may become unreachable.
+ * Returns false, changing nothing, when the proof fails.
+ */
+export async function clearMissingWorktreeRegistration(git: SimpleGit, worktreePath: string): Promise<boolean> {
+    if (await fs.pathExists(worktreePath)) return false;
+    const commonDir = (await git.raw(['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+    const registrations = path.join(commonDir, 'worktrees');
+    if (!await fs.pathExists(registrations)) return false;
+    for (const id of await fs.readdir(registrations)) {
+        const admin = path.join(registrations, id);
+        const gitdir = (await fs.readFile(path.join(admin, 'gitdir'), 'utf8').catch(() => '')).trim();
+        if (!gitdir || await canonicalMissingPath(gitdir) !== await canonicalMissingPath(path.join(worktreePath, '.git'))) continue;
+        if (await fs.pathExists(path.join(admin, 'locked'))) return false;
+        const head = (await fs.readFile(path.join(admin, 'HEAD'), 'utf8').catch(() => '')).trim();
+        const symbolic = /^ref: (refs\/heads\/.+)$/.exec(head)?.[1];
+        const commit = symbolic
+            ? (await git.raw(['rev-parse', '--verify', `${symbolic}^{commit}`])).trim()
+            : /^[0-9a-f]{40,64}$/.test(head) ? head : null;
+        if (!commit) return false;
+        // Read a count rather than an exit status (see localBranchExists).
+        const unpublished = (await git.raw(['rev-list', '--count', commit, '--not', '--branches', '--remotes', '--tags'])).trim();
+        if (unpublished !== '0') return false;
+        // A deleted checkout can still have staged work recoverable only from
+        // this index. Never infer a clean index from a recoverable HEAD.
+        if (!await fs.pathExists(path.join(admin, 'index'))) return false;
+        const staged = await createHooklessGit(admin).raw(['diff-index', '--cached', '--name-only', commit, '--']);
+        if (staged.trim()) return false;
+        // Refresh filesystem guards after the awaited Git inspection. External
+        // Git processes can still race these checks; this is not an atomic lock.
+        if (await fs.pathExists(worktreePath) || await fs.pathExists(path.join(admin, 'locked'))) return false;
+        for (const marker of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'rebase-merge', 'rebase-apply', 'sequencer']) {
+            if (await fs.pathExists(path.join(admin, marker))) return false;
+        }
+        if ((await fs.readFile(path.join(admin, 'HEAD'), 'utf8')).trim() !== head) return false;
+        await fs.remove(admin);
+        logger.warn({ worktreePath, commit }, 'Cleared missing worktree registration: current HEAD is stored in Git and index matches; administrative HEAD reflog history is discarded');
         return true;
     }
     return false;
@@ -211,6 +276,37 @@ async function handleWorktreeCreationError(git: SimpleGit, branchName: string, e
     }
 }
 
+/** Try each targeted recovery at most once, including conflicts revealed by a retry. */
+async function addWorktreeFromRemoteWithRecovery(git: SimpleGit, worktreePath: string, branchName: string): Promise<string> {
+    const addWorktree = () => addWorktreeWithoutTracking(
+        git,
+        worktreePath,
+        branchName,
+        { startPoint: `origin/${branchName}`, resetBranch: true },
+    );
+    let clearedMissing = false;
+    let releasedHolder = false;
+    for (;;) {
+        try {
+            return await addWorktree();
+        } catch (error) {
+            const message = (error as Error).message || '';
+            if (!clearedMissing && isMissingRegisteredWorktreeError(message)) {
+                const cleared = await clearMissingWorktreeRegistration(git, worktreePath).catch(inspectionError => {
+                    logger.warn({ worktreePath, error: redactAuthenticatedGitUrl((inspectionError as Error).message) }, 'Could not clear the missing worktree registration');
+                    return false;
+                });
+                if (!cleared) throw error;
+                clearedMissing = true;
+            } else {
+                const holderPath = worktreeHoldingBranch(message);
+                if (releasedHolder || !holderPath || !await releaseBranchFromSettledWorktree(git, branchName, holderPath)) throw error;
+                releasedHolder = true;
+            }
+        }
+    }
+}
+
 async function createWorktreeFromRemote(git: SimpleGit, worktreePath: string, branchName: string, localRepoPath: string): Promise<void> {
     try {
         const worktreeMetadataDir = path.join(localRepoPath, '.git', 'worktrees');
@@ -228,20 +324,7 @@ async function createWorktreeFromRemote(git: SimpleGit, worktreePath: string, br
             logger.warn({ error: (listError as Error).message }, 'Failed to list existing worktrees');
         }
 
-        const addWorktree = () => addWorktreeWithoutTracking(
-            git,
-            worktreePath,
-            branchName,
-            { startPoint: `origin/${branchName}`, resetBranch: true },
-        );
-        let worktreeAddResult: string;
-        try {
-            worktreeAddResult = await addWorktree();
-        } catch (error) {
-            const holderPath = worktreeHoldingBranch((error as Error).message || '');
-            if (!holderPath || !await releaseBranchFromSettledWorktree(git, branchName, holderPath)) throw error;
-            worktreeAddResult = await addWorktree();
-        }
+        const worktreeAddResult = await addWorktreeFromRemoteWithRecovery(git, worktreePath, branchName);
         logger.info({ branchName, worktreePath, gitOutput: worktreeAddResult.trim() }, 'Git worktree add command completed');
 
     } catch (error) {

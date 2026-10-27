@@ -23,7 +23,8 @@ await handoffDb.schema.createTable('pr_followup_handoffs', table => {
     table.string('worktree_path'); table.string('status'); table.string('phase');
 });
 await mock.module('../packages/core/src/db/connection.js', { namedExports: { db: handoffDb } });
-const { cleanupExistingBranch, addWorktreeWithoutTracking, removeStaleWorktreeRegistration } =
+const { cleanupExistingBranch, addWorktreeWithoutTracking, removeStaleWorktreeRegistration,
+    clearMissingWorktreeRegistration, releaseBranchFromSettledWorktree } =
     await import('../packages/core/src/git/worktreeCreation.js');
 const { cleanupWorktree, cleanupExpiredWorktrees, safePruneWorktrees,
     createWorktreeForIssue, createWorktreeFromExistingBranch } =
@@ -800,3 +801,157 @@ test('storage gate warning delay rejects unsupported Node timer values', async (
         else process.env.WORKTREE_SWEEP_INTERVAL_MS = previous;
     }
 });
+
+test('an existing-branch worktree can be rebuilt at its saved path after the checkout was deleted', async () => {
+    await remoteBranch('goal');
+    const first = await createWorktreeFromExistingBranch(repo, 'goal', { owner: 'owner', repoName, worktreeDirName: 'goal-checkout' });
+    // The checkout disappears (manual cleanup) but Git keeps its registration.
+    await fs.remove(first.worktreePath);
+    assert.match(await git.raw(['worktree', 'list', '--porcelain']), /goal-checkout/);
+    const rebuilt = await createWorktreeFromExistingBranch(repo, 'goal', { owner: 'owner', repoName, worktreeDirName: 'goal-checkout' });
+    assert.equal(rebuilt.worktreePath, first.worktreePath);
+    assert.equal((await simpleGit(rebuilt.worktreePath).raw(['branch', '--show-current'])).trim(), 'goal');
+    assert.equal((await simpleGit(rebuilt.worktreePath).revparse(['HEAD'])).trim(), initial);
+});
+
+test('a missing worktree registration whose HEAD no ref contains is kept and the rebuild fails', async () => {
+    await remoteBranch('goal');
+    const first = await createWorktreeFromExistingBranch(repo, 'goal', { owner: 'owner', repoName, worktreeDirName: 'goal-checkout' });
+    const wt = simpleGit(first.worktreePath);
+    await wt.checkout(['--detach']);
+    await fs.writeFile(path.join(first.worktreePath, 'tracked'), 'only here');
+    await wt.add('.').commit('unpublished detached commit');
+    const head = (await wt.revparse(['HEAD'])).trim();
+    const admin = (await fs.readFile(path.join(first.worktreePath, '.git'), 'utf8')).trim().slice('gitdir: '.length);
+    await fs.remove(first.worktreePath);
+    await assert.rejects(createWorktreeFromExistingBranch(repo, 'goal', { owner: 'owner', repoName, worktreeDirName: 'goal-checkout' }),
+        /missing but already registered/);
+    assert.equal((await fs.readFile(path.join(admin, 'HEAD'), 'utf8')).trim(), head);
+});
+
+async function missingGoalCheckout(symlinkedBase = false) {
+    await remoteBranch('goal');
+    const options = { owner: 'owner', repoName, worktreeDirName: 'goal-checkout' };
+    if (symlinkedBase) {
+        const parent = path.join(root, 'worktrees', 'owner', repoName);
+        const realParent = `${parent}-real`;
+        await fs.ensureDir(realParent);
+        await fs.symlink(realParent, parent, 'dir');
+    }
+    const first = await createWorktreeFromExistingBranch(repo, 'goal', options);
+    const admin = (await fs.readFile(path.join(first.worktreePath, '.git'), 'utf8')).trim().slice('gitdir: '.length);
+    return { options, checkout: first.worktreePath, admin, wt: simpleGit(first.worktreePath) };
+}
+
+for (const change of ['added', 'modified', 'deleted', 'corrupt-index', 'locked', 'MERGE_HEAD', 'sequencer']) {
+    test(`missing registration retains ${change} state and the original rebuild error`, async () => {
+        const { options, checkout, admin, wt } = await missingGoalCheckout();
+        if (change === 'added') {
+            await fs.writeFile(path.join(checkout, 'newfile'), 'staged content');
+            await wt.add('newfile');
+        } else if (change === 'modified') {
+            await fs.writeFile(path.join(checkout, 'tracked'), 'staged content');
+            await wt.add('tracked');
+        } else if (change === 'deleted') {
+            await wt.rm('tracked');
+        } else if (change === 'corrupt-index') {
+            await fs.writeFile(path.join(admin, 'index'), 'unreadable index');
+        } else if (change === 'sequencer') {
+            await fs.ensureDir(path.join(admin, change));
+        } else {
+            await fs.writeFile(path.join(admin, change), initial);
+        }
+        const index = await fs.readFile(path.join(admin, 'index'));
+        await fs.remove(checkout);
+        await assert.rejects(createWorktreeFromExistingBranch(repo, 'goal', options),
+            change === 'locked' ? /missing but locked/ : /missing but already registered/);
+        if (change === 'locked') assert.equal(await clearMissingWorktreeRegistration(git, checkout), false);
+        assert.deepEqual(await fs.readFile(path.join(admin, 'index')), index);
+        if (change === 'added' || change === 'modified') {
+            assert.equal(await simpleGit(admin).raw(['show', change === 'added' ? ':newfile' : ':tracked']), 'staged content');
+        }
+    });
+}
+
+test('a failed HEAD inspection logs a warning and preserves the original Git diagnosis', async () => {
+    const { options, checkout, admin } = await missingGoalCheckout();
+    await fs.remove(checkout);
+    const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+    const wrapper = path.join(bin, 'git');
+    await fs.writeFile(wrapper, `#!/bin/sh
+case " $* " in
+  *" rev-list --count "*) echo 'fatal: bad object during inspection' >&2; exit 1 ;;
+esac
+exec '${realGit}' "$@"
+`, { mode: 0o755 });
+    const { default: logger } = await import('../packages/core/src/utils/logger.js');
+    const warnings: string[] = [];
+    const warn = mock.method(logger, 'warn', (_context: unknown, message: string) => { warnings.push(message); });
+    try {
+        await assert.rejects(createWorktreeFromExistingBranch(repo, 'goal', options), /missing but already registered/);
+        assert.ok(warnings.includes('Could not clear the missing worktree registration'));
+        assert.equal(await fs.pathExists(path.join(admin, 'index')), true);
+    } finally {
+        warn.mock.restore();
+        await fs.remove(wrapper);
+    }
+});
+
+for (const recovery of ['clear', 'detach']) {
+    test(`${recovery} matches a missing checkout through a symlinked base path`, async () => {
+        const { options, checkout, admin, wt } = await missingGoalCheckout(true);
+        assert.notEqual((await fs.readFile(path.join(admin, 'gitdir'), 'utf8')).trim(), path.join(checkout, '.git'));
+        if (recovery === 'detach') {
+            await fs.writeFile(path.join(checkout, 'newfile'), 'retained staged content');
+            await wt.add('newfile');
+        }
+        await fs.remove(checkout);
+        if (recovery === 'clear') {
+            const rebuilt = await createWorktreeFromExistingBranch(repo, 'goal', options);
+            assert.equal(rebuilt.worktreePath, checkout);
+        } else {
+            assert.equal(await releaseBranchFromSettledWorktree(git, 'goal', checkout), true);
+            assert.equal((await fs.readFile(path.join(admin, 'HEAD'), 'utf8')).trim(), initial);
+            assert.equal(await simpleGit(admin).raw(['show', ':newfile']), 'retained staged content');
+        }
+    });
+}
+
+for (const missingHolder of [false, true]) {
+    test(`rebuild recovers both a missing target registration and a branch holder (missing=${missingHolder})`, async () => {
+        const { options, checkout, wt } = await missingGoalCheckout();
+        await wt.checkout(['--detach']);
+        const holder = `${checkout}-holder`;
+        await git.raw(['worktree', 'add', holder, 'goal']);
+        const admin = (await fs.readFile(path.join(holder, '.git'), 'utf8')).trim().slice('gitdir: '.length);
+        await fs.remove(checkout);
+        if (missingHolder) await fs.remove(holder);
+        await createWorktreeFromExistingBranch(repo, 'goal', options);
+        assert.equal((await simpleGit(checkout).raw(['branch', '--show-current'])).trim(), 'goal');
+        assert.equal((await fs.readFile(path.join(admin, 'HEAD'), 'utf8')).trim(), initial);
+    });
+}
+
+for (const late of ['staged', 'locked', 'checkout']) {
+    test(`clear refreshes ${late} evidence after awaited reachability inspection`, async () => {
+        const { checkout, admin } = await missingGoalCheckout();
+        await fs.remove(checkout);
+        const original = git.raw.bind(git);
+        const intercept = mock.method(git, 'raw', async (args: string[]) => {
+            const result = await original(args);
+            if (args[0] === 'rev-list') {
+                if (late === 'staged') {
+                    const blob = (await original(['rev-parse', 'HEAD:tracked'])).trim();
+                    // Stage an existing blob, with a different path from the committed tree.
+                    await simpleGit(admin).raw(['update-index', '--add', '--cacheinfo', `100644,${blob},late-file`]);
+                } else if (late === 'locked') await fs.writeFile(path.join(admin, 'locked'), 'late lock');
+                else await fs.ensureDir(checkout);
+            }
+            return result;
+        });
+        try {
+            assert.equal(await clearMissingWorktreeRegistration(git, checkout), false);
+            assert.equal(await fs.pathExists(path.join(admin, 'index')), true);
+        } finally { intercept.mock.restore(); }
+    });
+}
