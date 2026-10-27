@@ -21,7 +21,7 @@ import {
 } from './webhookPayloadGuards.js';
 import { buildDeliveryInterest, type DeliveryInterest } from '../intake/routingDeliveryInterest.js';
 import type { Redis } from 'ioredis';
-import { ACCEPTED_NO_SEAT_DISPOSITION, normalizeDisposition, type DeliveryDisposition } from '../intake/routingWebSocketProtocol.js';
+import { ACCEPTED_NO_SEAT_DISPOSITION, ROUTING_HUB_PROTOCOL_VERSION, normalizeDisposition, type DeliveryDisposition } from '../intake/routingWebSocketProtocol.js';
 
 import { SUPPORTED_WEBHOOK_EVENTS } from '@propr/shared';
 export { SUPPORTED_WEBHOOK_EVENTS } from '@propr/shared';
@@ -119,7 +119,7 @@ export function getWebhookDeliveryInterest(): DeliveryInterest {
     return buildDeliveryInterest({
         repositories: repositoryFilter?.monitoredRepositories?.() ?? '*',
         checkRunProcessorRegistered: processCheckRun !== null,
-    });
+    }, ROUTING_HUB_PROTOCOL_VERSION);
 }
 
 async function handleIssuesEvent(

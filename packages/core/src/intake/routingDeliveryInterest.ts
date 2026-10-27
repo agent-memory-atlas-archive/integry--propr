@@ -173,8 +173,13 @@ export class DeliveryInterestAnnouncer {
         return buildRoutingHello(this.protocolVersion, this.declared);
     }
 
-    /** Heartbeat hellos repeat what the socket already declared, so they never reset it. */
+    /**
+     * Heartbeat hellos repeat what the socket already declared, so they never
+     * reset it. A hello carrying the declaration still counts as one, so it
+     * restarts the debounce window before the next `interest` frame.
+     */
     probeHello(): Record<string, unknown> {
+        if (this.socket && this.declared) this.declaredAt = this.now();
         return buildRoutingHello(this.protocolVersion, this.socket ? this.declared : null);
     }
 
@@ -187,9 +192,11 @@ export class DeliveryInterestAnnouncer {
             return;
         }
         if (JSON.stringify(this.current()) === this.declaredKey) return;
+        // Re-check the window when the timer fires: a heartbeat hello sent in the
+        // meantime restarts it.
         this.timer = setTimeout(() => {
             this.timer = null;
-            this.announce();
+            this.refresh();
         }, wait);
     }
 

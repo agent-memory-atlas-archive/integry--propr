@@ -104,7 +104,7 @@ This contract keeps policy local, adds no preflight latency or new request path,
 
 ### Delivery Interest
 
-To spare the relay from storing and forwarding deliveries your instance would discard anyway, the daemon declares its *delivery interest* (capability `delivery_interest.v1`). The declaration rides on the routing `hello` and is resent as an `interest` frame when it changes, for example after you add or remove a monitored repository. A changed declaration is sent at most once every 5 seconds, and an unchanged one is never resent.
+To spare the relay from storing and forwarding deliveries your instance would discard anyway, the daemon declares its *delivery interest* (capability `delivery_interest.v1`). The declaration rides on the routing `hello` and is resent as an `interest` frame when it changes, for example after you add or remove a monitored repository. A changed declaration is sent at most once every 5 seconds, and an unchanged one is never resent as an `interest` frame. The periodic heartbeat `hello` repeats the current declaration and counts toward the 5-second spacing. A newly added repository can therefore take up to about 5 seconds (plus the config reload) before the relay forwards its deliveries.
 
 The declaration only describes deliveries the local handlers already ignore on every code path, and it is built from the same checks those handlers use:
 

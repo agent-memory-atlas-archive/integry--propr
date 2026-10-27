@@ -188,6 +188,20 @@ test('interest frames are sent only on change and at most once per debounce wind
     await service.stop();
 });
 
+test('a heartbeat hello carrying the declaration restarts the debounce window', async () => {
+    let repositories = ['acme/widgets'];
+    const { service, socket } = await connect({ deliveryInterest: () => interestFor(repositories) });
+    advance(60_000);
+    assert.equal(socket.frames('hello').length, 2, 'the heartbeat hello was sent');
+    repositories = ['acme/gadgets'];
+    service.refreshDeliveryInterest();
+    advance(4_999);
+    assert.deepEqual(socket.frames('interest'), [], 'no interest frame within 5 s of the heartbeat hello');
+    advance(1);
+    assert.deepEqual(socket.frames('interest'), [{ type: 'interest', interest: interestFor(['acme/gadgets']) }]);
+    await service.stop();
+});
+
 test('a reconnect declares the current interest in its hello and drops a pending frame', async () => {
     let repositories = ['acme/widgets'];
     const { service, socket } = await connect({ deliveryInterest: () => interestFor(repositories), reconnectDelayMs: 10 });

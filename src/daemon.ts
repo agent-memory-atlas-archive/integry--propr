@@ -448,7 +448,9 @@ async function startDaemon(options: DaemonOptions = {}): Promise<void> {
         safePoll,
         pollingIntervalMs: POLLING_INTERVAL_MS,
         initWebhookHandler: initSharedWebhookHandler,
-        createRoutingService: () => new RoutingWebSocketIntakeService(),
+        // Assigned on creation, not after startup resolves, so a config reload
+        // while the status publisher starts still refreshes the delivery interest.
+        createRoutingService: () => (routingService = new RoutingWebSocketIntakeService()),
         startRoutingStatusPublisher: (service) => startRoutingStatusPublisher(service, heartbeatRedis),
         logger,
         startupLogContext: baseStartupLog,
