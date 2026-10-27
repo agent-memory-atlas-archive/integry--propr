@@ -29,7 +29,11 @@ await mock.module('../packages/core/src/db/connection.js', {
 after(async () => { await db.destroy(); await fs.remove(root); });
 
 const { createFollowupHandoffGitOps } = await import('../src/jobs/followupHandoffGitOps.js');
+const { releasePredecessorInline } = await import('../src/jobs/followupHandoffAutoRelease.js');
+const { recordFollowupHandoff, advanceFollowupHandoff, loadFollowupHandoff, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED } = await import('../src/jobs/followupHandoffStore.js');
+const { up } = await import('../packages/core/src/db/migrations/20261017000000_add_pr_followup_handoffs.js');
 const { trustManagedGitDirectories, createHooklessGit } = await import('@propr/core');
+await up(db);
 
 const BRANCH = 'propr/pr-9';
 const git = (cwd: string, ...args: string[]) => execFileSync('git', [
@@ -87,4 +91,101 @@ test('startup trust writes managed directory entries once to the isolated global
     await trustManagedGitDirectories(createHooklessGit()); // idempotent
     const entries = git(root, 'config', '--global', '--get-all', 'safe.directory').split('\n');
     assert.deepEqual(entries.sort(), [`${path.join(root, 'clones')}/*`, `${path.join(root, 'worktrees')}/*`].sort());
+});
+
+test('releasing a deleted worktree reports nothing to release instead of throwing', async () => {
+    const { clone, wt } = await fixture();
+    git(wt, 'checkout', '--detach'); // failure cleanup or push salvage gave up the branch
+    await fs.remove(wt);
+
+    assert.equal(await ops.releaseSettledWorktree(clone, BRANCH, wt), false);
+    assert.deepEqual(await ops.branchWorktreeRegistrations(clone, BRANCH), [], 'the branch is already free');
+    git(clone, 'worktree', 'prune', '--expire=now');
+    assert.equal(await ops.releaseSettledWorktree(clone, BRANCH, wt), false, 'also with no registration left at all');
+});
+
+// --- S13: the fallback fetch for a branch the clone no longer has is authenticated.
+
+test('a branch the clone no longer has is rebuilt from the remote head through the authenticated fetch', async () => {
+    const { clone, wt } = await fixture();
+    await fs.remove(wt);
+    git(clone, 'worktree', 'prune', '--expire=now');
+    git(clone, 'branch', '-D', BRANCH);
+    git(clone, 'update-ref', '-d', `refs/remotes/origin/${BRANCH}`);
+    let tokensRequested = 0;
+    const authenticated = createFollowupHandoffGitOps(async () => { tokensRequested += 1; return 'installation-token'; });
+
+    assert.equal(await authenticated.restoreMissingWorktree!(clone, wt, BRANCH), true);
+    assert.equal(tokensRequested, 1, 'the remote fetch ran with the installation token, like every other remote operation');
+    assert.equal(await authenticated.worktreeAttachment(wt, BRANCH), 'attached');
+    assert.equal(git(wt, 'rev-parse', 'HEAD'), git(clone, 'rev-parse', `refs/remotes/origin/${BRANCH}`));
+});
+
+// --- S9: in-line release of a missing-worktree hold with the production release helper.
+
+const silentLog = { debug() {}, info() {}, warn() {}, error() {} };
+let holdSerial = 0;
+
+/** A worktree_missing hold of an ended task, with the recovery deps releasePredecessorInline reads. */
+async function heldMissingWorktree(clone: string, wt: string) {
+    const pullRequest = 100 + holdSerial++;
+    const record = await recordFollowupHandoff({
+        ref: { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: pullRequest },
+        taskId: `task-${pullRequest}`, sourceTaskIds: [], correlationId: 'corr',
+        target: { repoOwner: 'acme', repoName: 'widgets', branchName: BRANCH, isFork: false },
+        worktreePath: wt, localRepoPath: clone,
+        claimedComments: [{ id: 11, body: 'please', author: 'alice', type: 'issue' }],
+        jobData: { pullRequestNumber: pullRequest, repoOwner: 'acme', repoName: 'widgets' } as never,
+        llm: 'claude', lockKey: `lock:${pullRequest}`, lockToken: 'dead-token',
+    }, { database: db });
+    assert.ok(record);
+    const held = await advanceFollowupHandoff({ database: db }, record!, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_missing' });
+    assert.ok(held);
+    const posted: string[] = [];
+    const resolved = {
+        store: { database: db }, git: ops, log: silentLog,
+        stateManager: {
+            async getTaskState() { return { state: 'failed' }; },
+            async updateTaskState() { return undefined; },
+            async updateHistoryMetadata() { return undefined; },
+        },
+        taskStates: { COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled' },
+        withdrawRestoredComments: async () => undefined,
+        getOctokit: async () => ({ request: async (_route: string, params: { body?: string }) => { posted.push(params.body ?? ''); return { data: {} }; } }),
+    };
+    return { held: held!, resolved: resolved as never, posted, key: { repository: 'acme/widgets', pull_request: pullRequest } };
+}
+
+test('a new comment releases a worktree_missing hold whose Git registration survived, with the real release helper', async () => {
+    const { clone, wt } = await fixture();
+    await fs.remove(wt); // host cleanup; the registration still holds the branch
+    assert.deepEqual(await ops.branchWorktreeRegistrations(clone, BRANCH), [wt]);
+    const { held, resolved, posted, key } = await heldMissingWorktree(clone, wt);
+
+    assert.deepEqual(await releasePredecessorInline(held, resolved, 'task-new', silentLog), []);
+    const released = await loadFollowupHandoff({ database: db }, key);
+    assert.equal(released?.status, HANDOFF_RELEASED);
+    assert.equal(released?.status_reason, 'auto_released_for_new_request');
+    assert.deepEqual(await ops.branchWorktreeRegistrations(clone, BRANCH), [], 'the surviving registration no longer holds the branch');
+    assert.match(git(clone, 'worktree', 'list', '--porcelain'), new RegExp(`worktree ${wt}\n`), 'the registration itself is kept');
+    assert.equal(posted.length, 1);
+    assert.match(posted[0], /Cleared a stuck follow-up/);
+});
+
+test('the real release also frees the branch when the missing worktree\'s registration holds staged work', async () => {
+    const { clone, wt } = await fixture();
+    await fs.writeFile(path.join(wt, 'b.txt'), 'staged\n');
+    git(wt, 'add', '.');
+    await fs.remove(wt);
+    // The rebuild refuses this registration (staged work is recoverable only from its index) ...
+    assert.equal(await ops.restoreMissingWorktree!(clone, wt, BRANCH), false);
+    const { held, resolved, key } = await heldMissingWorktree(clone, wt);
+
+    // ... but a release only detaches it, so the branch is freed and the index stays.
+    assert.deepEqual(await releasePredecessorInline(held, resolved, 'task-new', silentLog), []);
+    assert.equal((await loadFollowupHandoff({ database: db }, key))?.status, HANDOFF_RELEASED);
+    assert.deepEqual(await ops.branchWorktreeRegistrations(clone, BRANCH), []);
+    const admin = path.join(clone, '.git', 'worktrees', path.basename(wt));
+    assert.ok(await fs.pathExists(path.join(admin, 'index')), 'the staged index is retained');
+    assert.doesNotMatch(await fs.readFile(path.join(admin, 'HEAD'), 'utf8'), /^ref:/, 'the registration HEAD is detached');
 });

@@ -25,7 +25,7 @@ export {
     resumeOperatorHeldFollowupHandoff,
     type FollowupHandoffStatus, type OperatorResumeResult,
 } from './followupHandoffOperator.js';
-import { releaseFollowupHandoffRecord, resumeOperatorHeldFollowupHandoff } from './followupHandoffOperator.js';
+import { predecessorReleasable, releasePredecessorInline, settleStuckHolds } from './followupHandoffAutoRelease.js';
 
 /**
  * Discovers follow-up publication handoffs a worker restart interrupted and
@@ -106,34 +106,6 @@ async function adoptAndResume(
     }
 }
 
-/**
- * A hold parked only because its worktree was deleted needs no operator:
- * recovery rebuilds deleted worktrees from the branch, so the hold is re-armed
- * and the pass below finishes it. A request the user cancelled is released
- * instead; release withdraws its claimed comments and still refuses while the
- * clone holds work the deleted folder never published.
- */
-async function settleDeletedWorktreeHolds(deps: FollowupHandoffRecoveryDeps, resolved: ResolvedRecoveryDeps): Promise<void> {
-    const held = (await loadFollowupHandoffs(resolved.store, { status: HANDOFF_AWAITING_OPERATOR }))
-        .filter(record => record.status_reason === 'worktree_missing');
-    const shared = { ...deps, store: resolved.store, redis: resolved.redis, git: resolved.git, log: resolved.log, stateManager: resolved.stateManager };
-    for (const record of held) {
-        try {
-            const cancelled = !record.operator_authorized && !retryOwnsClaims(record)
-                && (await resolved.stateManager.getTaskState(record.task_id))?.state === resolved.taskStates.CANCELLED;
-            const result = cancelled
-                ? await releaseFollowupHandoffRecord(record, { reason: 'released_cancelled_worktree_deleted' }, shared)
-                : await resumeOperatorHeldFollowupHandoff(record, shared);
-            resolved.log.info({ repository: record.repository, pullRequest: record.pull_request, taskId: record.task_id, cancelled, result },
-                cancelled ? 'Released a cancelled follow-up held only because its worktree was deleted'
-                    : 'Re-armed a follow-up held only because its worktree was deleted; recovery rebuilds the worktree');
-        } catch (error) {
-            resolved.log.warn({ repository: record.repository, pullRequest: record.pull_request, taskId: record.task_id, error: (error as Error).message },
-                'Could not settle a follow-up held because its worktree was deleted; retrying on the next pass');
-        }
-    }
-}
-
 function countOutcome(summary: FollowupHandoffRecoverySummary, outcome: string): void {
     if (outcome === 'published') summary.published += 1;
     else if (outcome === 'no_changes') summary.noChanges += 1;
@@ -158,7 +130,7 @@ export async function recoverInterruptedFollowupHandoffs(
         failedClosed: 0, awaitingOperator: 0, lockedByOtherWriter: 0, errors: 0,
     };
     try {
-        if (!key) await settleDeletedWorktreeHolds(deps, resolved);
+        if (!key) await settleStuckHolds(deps, resolved);
         const handoffs = key
             ? [await loadFollowupHandoff(resolved.store, key)]
                 .filter((record): record is FollowupHandoffRecord => record?.status === HANDOFF_ACTIVE)
@@ -212,7 +184,9 @@ export interface PredecessorAdoptionParams {
 export type PredecessorAdoption =
     | {
         blocked: 'predecessor_agent_still_running' | 'predecessor_liveness_unavailable'
-        | 'predecessor_awaiting_operator' | 'predecessor_container_identity_mismatch';
+        | 'predecessor_awaiting_operator' | 'predecessor_container_identity_mismatch'
+        /** The same task's failed attempt could not be taken over: a Git registration still holds the branch. */
+        | 'predecessor_branch_still_held';
     }
     | { resumed?: ResumeOutcome }
     /** Comment IDs a released, unauthorized cancelled predecessor claimed; they must never execute. */
@@ -258,9 +232,10 @@ export async function adoptPredecessorFollowupHandoff(
             const claimIds = await releasedCancelledClaimIds(record, resolved);
             return claimIds.length > 0 ? { releasedCancelledClaimIds: claimIds } : {};
         }
-        // An unresolved operator hold is a standing obligation: a new attempt
-        // must not run (and later overwrite it) until the operator settles it.
-        if (record.status === HANDOFF_AWAITING_OPERATOR) return { blocked: 'predecessor_awaiting_operator' };
+        // An operator hold is a standing obligation unless its attempt is over
+        // and can publish nothing more; then this writer releases it instead.
+        const releasable = await predecessorReleasable(record, resolved, params.currentTaskId);
+        if (record.status === HANDOFF_AWAITING_OPERATOR && !releasable) return { blocked: 'predecessor_awaiting_operator' };
         const inspection = await resolved.inspectLiveness(record.task_id);
         const identityConflict = containerIdentityConflict(record, inspection);
         if (identityConflict) {
@@ -272,6 +247,7 @@ export async function adoptPredecessorFollowupHandoff(
             await recordFailedClosed(record, resolved);
             return { blocked: 'predecessor_liveness_unavailable' };
         }
+        if (releasable) return await releaseForWriter(record, resolved, params);
         const recoveredBy = record.task_id === params.currentTaskId ? undefined : params.currentTaskId;
         // Durable successor ownership, installed before any recovery mutation:
         // a suspended predecessor's normal-path checkpoint treats an unchanged
@@ -300,6 +276,20 @@ export async function adoptPredecessorFollowupHandoff(
     } finally {
         if (resolved.ownRedis) await resolved.redis.quit?.();
     }
+}
+
+/**
+ * Releases a predecessor that can publish nothing more, so this writer runs
+ * instead of waiting. A release that could not free the branch keeps this
+ * writer waiting: an operator hold stays reported as such, while a failed
+ * same-task attempt that was never held names the branch registration.
+ */
+async function releaseForWriter(record: FollowupHandoffRecord, resolved: ResolvedRecoveryDeps, params: PredecessorAdoptionParams): Promise<PredecessorAdoption> {
+    const claimIds = await releasePredecessorInline(record, resolved, params.currentTaskId, params.log);
+    if (!claimIds) {
+        return { blocked: record.status === HANDOFF_AWAITING_OPERATOR ? 'predecessor_awaiting_operator' : 'predecessor_branch_still_held' };
+    }
+    return claimIds.length > 0 ? { releasedCancelledClaimIds: claimIds } : {};
 }
 
 /** The continuation record's durable publication checkpoint, matching findPRContinuation's mapping. */

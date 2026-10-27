@@ -721,7 +721,7 @@ test('a worktree_missing hold from before the fix is re-armed and recovered by t
     assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
 });
 
-test('a cancelled worktree_missing hold is released and its comments are not requeued', async () => {
+test('a cancelled hold is released by the background pass once stale, and its comments are not requeued', async () => {
     const h = await createHarness({ taskStates: { 'task-1': 'cancelled' } });
     withWorktreeRestore(h);
     const withdrawn: number[] = [];
@@ -731,12 +731,16 @@ test('a cancelled worktree_missing hold is released and its comments are not req
     await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_missing' });
 
     await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR, 'a fresh hold is left for a day');
+    await database(PR_FOLLOWUP_HANDOFFS_TABLE).update({ updated_at: Date.now() - 25 * 3_600_000 });
+    await recoverInterruptedFollowupHandoffs(h.deps);
     const released = await loadFollowupHandoff({ database }, KEY);
     assert.equal(released?.status, HANDOFF_RELEASED);
-    assert.equal(released?.status_reason, 'released_cancelled_worktree_deleted');
+    assert.equal(released?.status_reason, 'auto_released_stale_hold');
     assert.deepEqual(withdrawn, [11], 'the cancelled request is withdrawn from the pending list');
     assert.equal(h.restored.length, 0);
     assert.equal(queuedFollowupJobs.length, 0);
+    assert.match(h.octokit.comments.at(-1)?.body ?? '', /Cleared a stuck follow-up/);
 });
 
 test('a worktree that cannot be rebuilt is held once as worktree_restore_failed and not retried in a loop', async () => {
@@ -751,4 +755,299 @@ test('a worktree that cannot be rebuilt is held once as worktree_restore_failed 
     const second = await recoverInterruptedFollowupHandoffs(h.deps);
     assert.equal(second.inspected, 0);
     assert.equal(h.octokit.comments.length, 0);
+});
+
+const adoptAs = (h: Harness, currentTaskId: string) => adoptPredecessorFollowupHandoff(
+    { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId, log: silentLog, lockToken: `${currentTaskId}-token` },
+    h.deps,
+);
+
+test('the automatic retry of a failed attempt takes over its own not_on_branch hold instead of waiting forever', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    await agentEdit(h);
+    git(h.fx.wt, 'add', '-A');
+    git(h.fx.wt, 'commit', '-m', 'agent commit');
+    // Push salvage after a rejected push: commits kept elsewhere, worktree moved off the branch.
+    git(h.fx.wt, 'checkout', '--detach');
+    await advanceFollowupHandoff({ database }, record, { phase: 'committed', commit_hash: git(h.fx.wt, 'rev-parse', 'HEAD') });
+    const committed = await loadFollowupHandoff({ database }, KEY);
+    await advanceFollowupHandoff({ database }, committed!, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_not_on_branch' });
+
+    assert.deepEqual(await adoptAs(h, 'task-2'), { blocked: 'predecessor_awaiting_operator' }, 'another task still waits for the operator');
+    assert.deepEqual(await adoptAs(h, 'task-1'), {});
+    const released = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(released?.status, HANDOFF_RELEASED);
+    assert.equal(released?.status_reason, 'superseded_by_retry');
+    assert.equal(h.counters.pushes, 0, 'the failed attempt\'s commit is not published');
+    assert.ok(existsSync(path.join(h.fx.wt, 'feature.txt')), 'the failed attempt\'s files stay on disk');
+    assert.deepEqual(await adoptAs(h, 'task-3'), {}, 'later comments are no longer blocked');
+});
+
+test('the retry takes over right after a handled failure that moved the worktree off the branch', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    await agentEdit(h);
+    git(h.fx.wt, 'checkout', '--detach');
+    await advanceFollowupHandoff({ database }, record, { phase: 'agent_exited', status_reason: 'publication_failed' });
+
+    assert.deepEqual(await adoptAs(h, 'task-1'), {});
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_RELEASED);
+    assert.equal(h.octokit.comments.length, 0);
+});
+
+test('a same-task redelivery whose worktree is still on the branch keeps normal recovery', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    await agentEdit(h);
+    await advanceFollowupHandoff({ database }, record, { phase: 'agent_exited', status_reason: 'publication_failed' });
+
+    const adoption = await adoptAs(h, 'task-1');
+    assert.equal('resumed' in adoption && adoption.resumed?.outcome, 'published');
+    assert.equal(h.counters.pushes, 1);
+});
+
+test('a user-cancelled hold is never taken over by a job of the same task', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' });
+    assert.deepEqual(await adoptAs(h, 'task-1'), { blocked: 'predecessor_awaiting_operator' });
+});
+
+async function heldBy(h: Harness, reason: string, taskState: string) {
+    h.stateManager.states.set('task-1', taskState);
+    const record = await seedHandoff(h);
+    git(h.fx.wt, 'checkout', '--detach');
+    await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: reason });
+}
+
+test('a new comment releases a hold whose attempt failed and gave up its branch, and tells the PR', async () => {
+    const h = await createHarness();
+    await heldBy(h, 'worktree_not_on_branch', 'failed');
+    assert.deepEqual(await adoptAs(h, 'task-2'), {});
+    const released = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(released?.status, HANDOFF_RELEASED);
+    assert.equal(released?.status_reason, 'auto_released_for_new_request');
+    assert.equal(h.counters.pushes, 0);
+    assert.ok(existsSync(path.join(h.fx.wt, 'base.txt')), 'the old worktree stays on disk');
+    assert.equal(h.octokit.comments.length, 1);
+    assert.match(h.octokit.comments[0].body, /Cleared a stuck follow-up[\s\S]*comment again/);
+    assert.doesNotMatch(h.octokit.comments[0].body, /\/tmp|fx-/, 'no host paths on the pull request');
+});
+
+test('a new comment drops a cancelled request\'s comments when it releases the hold', async () => {
+    const h = await createHarness();
+    const withdrawn: number[] = [];
+    h.deps.withdrawRestoredComments = async (_record: unknown, claimed: Array<{ id: number }>) => { withdrawn.push(...claimed.map(comment => comment.id)); };
+    await heldBy(h, 'cancelled_by_user', 'cancelled');
+    assert.deepEqual(await adoptAs(h, 'task-2'), { releasedCancelledClaimIds: [11] });
+    assert.deepEqual(withdrawn, [11]);
+});
+
+test('a hold whose own retry is still pending keeps a new comment waiting for that retry', async () => {
+    const h = await createHarness();
+    await heldBy(h, 'worktree_not_on_branch', 'pending');
+    assert.deepEqual(await adoptAs(h, 'task-2'), { blocked: 'predecessor_awaiting_operator' });
+});
+
+test('holds that need a real decision are never released automatically', async () => {
+    const h = await createHarness();
+    await heldBy(h, 'pr_binding_mismatch', 'failed');
+    assert.deepEqual(await adoptAs(h, 'task-2'), { blocked: 'predecessor_awaiting_operator' });
+    await database(PR_FOLLOWUP_HANDOFFS_TABLE).update({ updated_at: Date.now() - 30 * 24 * 3_600_000 });
+    await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
+    assert.equal(h.octokit.comments.length, 0);
+});
+
+test('a stale failed hold is released by the background pass without any new comment', async () => {
+    const h = await createHarness();
+    await heldBy(h, 'head_advanced_externally', 'failed');
+    await database(PR_FOLLOWUP_HANDOFFS_TABLE).update({ updated_at: Date.now() - 25 * 3_600_000 });
+    await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, 'auto_released_stale_hold');
+    assert.equal(h.octokit.comments.length, 1);
+});
+
+// --- F2: the loss of a worktree is durable evidence, not a local observation.
+
+test('F2: a worker that stops after the rebuild but before the claims are restored still requeues the request', async () => {
+    const h = await createHarness();
+    withWorktreeRestore(h);
+    const record = await seedHandoff(h);
+    await advanceFollowupHandoff({ database }, record, { phase: 'agent_exited', agent_completed: 1, agent_summary: 'all done' });
+    await agentEdit(h);
+    await rm(h.fx.wt, { recursive: true, force: true });
+    // The worker stops right after the rebuild: the restoration of the claimed comments never runs.
+    const restoreComments = h.deps.restoreComments;
+    h.deps.restoreComments = async () => { throw new Error('worker stopped'); };
+    const interrupted = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(interrupted.errors, 1);
+    assert.ok(existsSync(h.fx.wt), 'the worktree was rebuilt before the stop');
+    const marked = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(marked?.status, HANDOFF_ACTIVE);
+    assert.equal(marked?.agent_completed, null, 'the recorded success is invalidated durably, before the rebuild');
+    assert.equal(marked?.agent_summary, null);
+    assert.equal(marked?.status_reason, 'worktree_lost');
+
+    // The next pass (after a restart) finds the folder intact; the loss is on record.
+    h.deps.restoreComments = restoreComments;
+    const second = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(second.noChanges, 1);
+    assert.equal(second.settled, 0, 'the lost run is not reported as an answered request');
+    assert.deepEqual(h.restored.map(comment => comment.id), [11]);
+    assert.equal(h.octokit.comments.length, 1);
+    assert.match(h.octokit.comments[0].body, /worktree was deleted/);
+    assert.doesNotMatch(h.octokit.comments[0].body, /Analyzed the follow-up request/);
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+});
+
+test('F2: the loss marker is written before the rebuild, so a rebuild that fails leaves no trusted success behind', async () => {
+    const h = await createHarness();
+    withWorktreeRestore(h, { failRestore: true });
+    const record = await seedHandoff(h);
+    await advanceFollowupHandoff({ database }, record, { phase: 'agent_exited', agent_completed: 1 });
+    await rm(h.fx.wt, { recursive: true, force: true });
+    assert.equal((await recoverInterruptedFollowupHandoffs(h.deps)).awaitingOperator, 1);
+    const held = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(held?.status_reason, 'worktree_restore_failed');
+    assert.equal(held?.agent_completed, null);
+});
+
+test('F2: a committed handoff whose worktree was deleted is rebuilt and pushes exactly the recorded commit', async () => {
+    const h = await createHarness();
+    const restores = withWorktreeRestore(h);
+    const record = await seedHandoff(h);
+    await agentEdit(h);
+    git(h.fx.wt, 'add', '-A');
+    git(h.fx.wt, 'commit', '-m', 'agent commit');
+    const agentCommit = git(h.fx.wt, 'rev-parse', 'HEAD');
+    await advanceFollowupHandoff({ database }, record, { phase: 'committed', commit_hash: agentCommit, agent_completed: 1 });
+    await rm(h.fx.wt, { recursive: true, force: true });
+
+    const summary = await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal(summary.published, 1);
+    assert.deepEqual(restores, [h.fx.wt]);
+    assert.equal(originHead(h.fx), agentCommit);
+    assert.equal(h.counters.pushes, 1);
+    assert.equal(await loadFollowupHandoff({ database }, KEY), undefined);
+});
+
+// --- S10: re-arming a worktree_missing hold grants no authority and keeps it releasable.
+
+test('S10: a re-armed worktree_missing hold whose rebuild then fails is still released by a new comment', async () => {
+    const h = await createHarness({ taskStates: { 'task-1': 'failed' } });
+    withWorktreeRestore(h, { failRestore: true });
+    const record = await seedHandoff(h);
+    await rm(h.fx.wt, { recursive: true, force: true });
+    await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_missing' });
+
+    assert.equal((await recoverInterruptedFollowupHandoffs(h.deps)).awaitingOperator, 1);
+    const held = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(held?.status_reason, 'worktree_restore_failed');
+    assert.equal(held?.operator_authorized, 0, 're-arming grants no publication authority');
+    assert.deepEqual(await adoptAs(h, 'task-2'), {});
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_RELEASED);
+    // The stale background pass releases such a hold too.
+    await database(PR_FOLLOWUP_HANDOFFS_TABLE).delete();
+    const again = await seedHandoff(h);
+    await advanceFollowupHandoff({ database }, again, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_restore_failed' });
+    await database(PR_FOLLOWUP_HANDOFFS_TABLE).update({ updated_at: Date.now() - 25 * 3_600_000 });
+    await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, 'auto_released_stale_hold');
+});
+
+// --- S11: releasable holds on the liveness path.
+
+test('S11: an inconclusive liveness probe blocks a new comment without making the hold unreleasable', async () => {
+    const h = await createHarness({ liveness: 'unavailable' });
+    await heldBy(h, 'worktree_not_on_branch', 'failed');
+    assert.deepEqual(await adoptAs(h, 'task-2'), { blocked: 'predecessor_liveness_unavailable' });
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, 'worktree_not_on_branch', 'the hold reason is not overwritten');
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
+    h.deps.inspectLiveness = async () => ({ liveness: 'not_found' });
+    assert.deepEqual(await adoptAs(h, 'task-2'), {}, 'a later conclusive probe releases it');
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_RELEASED);
+});
+
+test('S11: a cancelled hold keeps its reason through an inconclusive probe, so resume still demands authorization', async () => {
+    const h = await createHarness({ liveness: 'unavailable' });
+    await heldBy(h, 'cancelled_by_user', 'cancelled');
+    assert.deepEqual(await adoptAs(h, 'task-2'), { blocked: 'predecessor_liveness_unavailable' });
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, 'cancelled_by_user');
+});
+
+test('S11: a same-task takeover that cannot free the branch names the registration, not an operator hold', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    await agentEdit(h);
+    git(h.fx.wt, 'checkout', '--detach');
+    await advanceFollowupHandoff({ database }, record, { phase: 'agent_exited', status_reason: 'publication_failed' });
+    h.deps.git = { ...h.gitOps, branchWorktreeRegistrations: async () => ['/elsewhere/holder'] };
+    assert.deepEqual(await adoptAs(h, 'task-1'), { blocked: 'predecessor_branch_still_held' });
+    const kept = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(kept?.status, HANDOFF_ACTIVE);
+    assert.equal(kept?.status_reason, 'publication_failed');
+});
+
+// --- S15: automatic release when the settled-worktree release refuses.
+
+test('S15: a new comment releases a cancelled attempt with unpublished work by detaching it; the commit stays', async () => {
+    const h = await createHarness();
+    const withdrawn: number[] = [];
+    h.deps.withdrawRestoredComments = async (_record: unknown, claimed: Array<{ id: number }>) => { withdrawn.push(...claimed.map(comment => comment.id)); };
+    h.stateManager.states.set('task-1', 'cancelled');
+    const record = await seedHandoff(h);
+    await agentEdit(h);
+    git(h.fx.wt, 'add', '-A');
+    git(h.fx.wt, 'commit', '-m', 'never published');
+    const unpublished = git(h.fx.wt, 'rev-parse', 'HEAD');
+    await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' });
+
+    assert.deepEqual(await adoptAs(h, 'task-2'), { releasedCancelledClaimIds: [11] });
+    assert.equal(h.counters.released, 0, 'the settled-worktree release refused the unpublished commit');
+    assert.equal(h.counters.detached, 1, 'the worktree was detached in place instead');
+    assert.equal(git(h.fx.wt, 'branch', '--show-current'), '', 'the branch is free');
+    assert.equal(git(h.fx.wt, 'rev-parse', 'HEAD'), unpublished, 'the unpublished commit stays checked out');
+    assert.notEqual(originHead(h.fx), unpublished);
+    assert.equal(h.counters.pushes, 0);
+    assert.deepEqual(withdrawn, [11]);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_RELEASED);
+});
+
+test('S15: the background pass releases a stale cancelled attempt with unpublished work the same way', async () => {
+    const h = await createHarness({ taskStates: { 'task-1': 'cancelled' } });
+    h.deps.withdrawRestoredComments = async () => undefined;
+    const record = await seedHandoff(h);
+    await agentEdit(h);
+    git(h.fx.wt, 'add', '-A');
+    git(h.fx.wt, 'commit', '-m', 'never published');
+    await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' });
+    await database(PR_FOLLOWUP_HANDOFFS_TABLE).update({ updated_at: Date.now() - 25 * 3_600_000 });
+    await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, 'auto_released_stale_hold');
+    assert.equal(h.counters.detached, 1);
+    assert.equal(git(h.fx.wt, 'branch', '--show-current'), '');
+    assert.ok(existsSync(path.join(h.fx.wt, 'feature.txt')), 'files stay on disk');
+});
+
+test('S15: a hold whose worktree and Git registration are both gone is released without touching Git', async () => {
+    const h = await createHarness();
+    await heldBy(h, 'worktree_missing', 'failed');
+    await rm(h.fx.wt, { recursive: true, force: true });
+    git(h.fx.local, 'worktree', 'prune', '--expire=now');
+    assert.deepEqual(await adoptAs(h, 'task-2'), {});
+    assert.equal(h.counters.released + h.counters.detached, 0);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, 'auto_released_for_new_request');
+});
+
+test('S15: a refused release that leaves a registration on the branch keeps the new comment waiting', async () => {
+    const h = await createHarness({ taskStates: { 'task-1': 'failed' } });
+    const record = await seedHandoff(h);
+    await rm(h.fx.wt, { recursive: true, force: true });
+    await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_missing' });
+    // The harness release refuses a missing folder, and its registration still names the branch.
+    assert.deepEqual(await h.gitOps.branchWorktreeRegistrations(h.fx.local, BRANCH), [h.fx.wt]);
+    assert.deepEqual(await adoptAs(h, 'task-2'), { blocked: 'predecessor_awaiting_operator' });
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
 });

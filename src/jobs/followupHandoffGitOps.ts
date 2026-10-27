@@ -88,6 +88,8 @@ function porcelainPaths(status: string): string[] {
 async function releaseGeneratedOnlyWorktree(worktreePath: string, branchName: string): Promise<boolean> {
     // Lazy import: test suites replace @propr/core with enumerated mocks.
     const { isGeneratedRuntimePath } = await import('@propr/core');
+    // A deleted worktree holds nothing to inspect (simple-git throws on a missing directory).
+    if (!await pathExists(worktreePath)) return false;
     const worktreeGit = createHooklessGit(worktreePath);
     try {
         if ((await worktreeGit.raw(['branch', '--show-current'])).trim() !== branchName) return false;
@@ -114,9 +116,9 @@ async function pathExists(target: string): Promise<boolean> {
     }
 }
 
-async function restoreMissingWorktree(localRepoPath: string, worktreePath: string, branchName: string): Promise<boolean> {
+async function restoreMissingWorktree(localRepoPath: string, worktreePath: string, branchName: string, getToken: () => Promise<string>): Promise<boolean> {
     // Lazy import: test suites replace @propr/core with enumerated mocks.
-    const { clearMissingWorktreeRegistration, setupWorktreePermissions } = await import('@propr/core');
+    const { clearMissingWorktreeRegistration, configureGitAuthentication, setupWorktreePermissions } = await import('@propr/core');
     if (await pathExists(worktreePath) || !await pathExists(localRepoPath)) return false;
     const git = createHooklessGit(localRepoPath);
     const listing = await git.raw(['worktree', 'list', '--porcelain']);
@@ -128,6 +130,9 @@ async function restoreMissingWorktree(localRepoPath: string, worktreePath: strin
     if (local) {
         await git.raw(['worktree', 'add', worktreePath, branchName]);
     } else {
+        // The clone's origin is the clean repository URL, so the fetch is
+        // authenticated per command like every other remote operation here.
+        configureGitAuthentication(git, await getToken());
         await git.raw(['fetch', 'origin', `+refs/heads/${branchName}:refs/remotes/origin/${branchName}`]);
         await git.raw(['worktree', 'add', '--no-track', '-b', branchName, worktreePath, `refs/remotes/origin/${branchName}`]);
     }
@@ -223,7 +228,7 @@ export function createFollowupHandoffGitOps(getToken: () => Promise<string>): Fo
             await createHooklessGit(worktreePath).raw(['checkout', '--detach']);
         },
         async restoreMissingWorktree(localRepoPath, worktreePath, branchName) {
-            return restoreMissingWorktree(localRepoPath, worktreePath, branchName);
+            return restoreMissingWorktree(localRepoPath, worktreePath, branchName, getToken);
         },
     };
 }
