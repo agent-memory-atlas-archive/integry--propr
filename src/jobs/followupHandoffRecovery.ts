@@ -258,9 +258,10 @@ export async function adoptPredecessorFollowupHandoff(
             const claimIds = await releasedCancelledClaimIds(record, resolved);
             return claimIds.length > 0 ? { releasedCancelledClaimIds: claimIds } : {};
         }
+        const ownRetry = record.task_id === params.currentTaskId && await failedAttemptGaveUpBranch(record, resolved);
         // An unresolved operator hold is a standing obligation: a new attempt
         // must not run (and later overwrite it) until the operator settles it.
-        if (record.status === HANDOFF_AWAITING_OPERATOR) return { blocked: 'predecessor_awaiting_operator' };
+        if (record.status === HANDOFF_AWAITING_OPERATOR && !ownRetry) return { blocked: 'predecessor_awaiting_operator' };
         const inspection = await resolved.inspectLiveness(record.task_id);
         const identityConflict = containerIdentityConflict(record, inspection);
         if (identityConflict) {
@@ -272,6 +273,7 @@ export async function adoptPredecessorFollowupHandoff(
             await recordFailedClosed(record, resolved);
             return { blocked: 'predecessor_liveness_unavailable' };
         }
+        if (ownRetry) return await supersedeFailedAttempt(record, resolved, params.log);
         const recoveredBy = record.task_id === params.currentTaskId ? undefined : params.currentTaskId;
         // Durable successor ownership, installed before any recovery mutation:
         // a suspended predecessor's normal-path checkpoint treats an unchanged
@@ -300,6 +302,41 @@ export async function adoptPredecessorFollowupHandoff(
     } finally {
         if (resolved.ownRedis) await resolved.redis.quit?.();
     }
+}
+
+/** Holds that only say the failed attempt's own worktree can no longer publish. */
+const RETRY_SUPERSEDES_HOLDS = new Set(['worktree_not_on_branch', 'worktree_missing', 'worktree_restore_failed', 'head_advanced_externally', 'recorded_commit_mismatch']);
+
+/**
+ * A job of the same task after a handled failure is that request's automatic
+ * retry. The failed attempt already reported its failure and gave up the
+ * branch (push salvage or failure cleanup moved its worktree off it), so its
+ * worktree can publish nothing: holding it for an operator only made the
+ * retry wait on its own attempt forever. A crash redelivery, whose worktree
+ * is still on the branch, keeps the normal recovery that publishes it.
+ */
+async function failedAttemptGaveUpBranch(record: FollowupHandoffRecord, resolved: ResolvedRecoveryDeps): Promise<boolean> {
+    if (record.operator_authorized || retryOwnsClaims(record)) return false;
+    if (record.status === HANDOFF_AWAITING_OPERATOR) return RETRY_SUPERSEDES_HOLDS.has(record.status_reason ?? '');
+    return record.status_reason === 'publication_failed'
+        && await resolved.git.worktreeAttachment(record.worktree_path, record.branch_name) !== 'attached';
+}
+
+/** Frees the branch for the retry; the failed attempt's worktree files stay on disk, never published. */
+async function supersedeFailedAttempt(record: FollowupHandoffRecord, resolved: ResolvedRecoveryDeps, log: LoggerLike): Promise<PredecessorAdoption> {
+    const { git } = resolved;
+    if (!await git.releaseSettledWorktree(record.local_repo_path, record.branch_name, record.worktree_path)
+        && await git.worktreeAttachment(record.worktree_path, record.branch_name) === 'attached') {
+        await git.detachWorktreeHead(record.worktree_path);
+    }
+    if ((await git.branchWorktreeRegistrations(record.local_repo_path, record.branch_name)).length > 0) {
+        return { blocked: 'predecessor_awaiting_operator' };
+    }
+    const released = await advanceFollowupHandoff(resolved.store, record, { status: HANDOFF_RELEASED, status_reason: 'superseded_by_retry' });
+    if (!released) return { resumed: { outcome: 'superseded' } };
+    log.info({ repository: record.repository, pullRequest: record.pull_request, taskId: record.task_id, previousReason: record.status_reason, worktreePath: record.worktree_path },
+        'The retry of a failed follow-up took over from its own failed attempt; that worktree is kept but not published');
+    return {};
 }
 
 /** The continuation record's durable publication checkpoint, matching findPRContinuation's mapping. */

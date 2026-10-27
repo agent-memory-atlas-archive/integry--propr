@@ -752,3 +752,60 @@ test('a worktree that cannot be rebuilt is held once as worktree_restore_failed 
     assert.equal(second.inspected, 0);
     assert.equal(h.octokit.comments.length, 0);
 });
+
+const adoptAs = (h: Harness, currentTaskId: string) => adoptPredecessorFollowupHandoff(
+    { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId, log: silentLog, lockToken: `${currentTaskId}-token` },
+    h.deps,
+);
+
+test('the automatic retry of a failed attempt takes over its own not_on_branch hold instead of waiting forever', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    await agentEdit(h);
+    git(h.fx.wt, 'add', '-A');
+    git(h.fx.wt, 'commit', '-m', 'agent commit');
+    // Push salvage after a rejected push: commits kept elsewhere, worktree moved off the branch.
+    git(h.fx.wt, 'checkout', '--detach');
+    await advanceFollowupHandoff({ database }, record, { phase: 'committed', commit_hash: git(h.fx.wt, 'rev-parse', 'HEAD') });
+    const committed = await loadFollowupHandoff({ database }, KEY);
+    await advanceFollowupHandoff({ database }, committed!, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_not_on_branch' });
+
+    assert.deepEqual(await adoptAs(h, 'task-2'), { blocked: 'predecessor_awaiting_operator' }, 'another task still waits for the operator');
+    assert.deepEqual(await adoptAs(h, 'task-1'), {});
+    const released = await loadFollowupHandoff({ database }, KEY);
+    assert.equal(released?.status, HANDOFF_RELEASED);
+    assert.equal(released?.status_reason, 'superseded_by_retry');
+    assert.equal(h.counters.pushes, 0, 'the failed attempt\'s commit is not published');
+    assert.ok(existsSync(path.join(h.fx.wt, 'feature.txt')), 'the failed attempt\'s files stay on disk');
+    assert.deepEqual(await adoptAs(h, 'task-3'), {}, 'later comments are no longer blocked');
+});
+
+test('the retry takes over right after a handled failure that moved the worktree off the branch', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    await agentEdit(h);
+    git(h.fx.wt, 'checkout', '--detach');
+    await advanceFollowupHandoff({ database }, record, { phase: 'agent_exited', status_reason: 'publication_failed' });
+
+    assert.deepEqual(await adoptAs(h, 'task-1'), {});
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_RELEASED);
+    assert.equal(h.octokit.comments.length, 0);
+});
+
+test('a same-task redelivery whose worktree is still on the branch keeps normal recovery', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    await agentEdit(h);
+    await advanceFollowupHandoff({ database }, record, { phase: 'agent_exited', status_reason: 'publication_failed' });
+
+    const adoption = await adoptAs(h, 'task-1');
+    assert.equal('resumed' in adoption && adoption.resumed?.outcome, 'published');
+    assert.equal(h.counters.pushes, 1);
+});
+
+test('a user-cancelled hold is never taken over by a job of the same task', async () => {
+    const h = await createHarness();
+    const record = await seedHandoff(h);
+    await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' });
+    assert.deepEqual(await adoptAs(h, 'task-1'), { blocked: 'predecessor_awaiting_operator' });
+});
