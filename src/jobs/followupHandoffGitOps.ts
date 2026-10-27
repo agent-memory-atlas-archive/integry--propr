@@ -88,6 +88,8 @@ function porcelainPaths(status: string): string[] {
 async function releaseGeneratedOnlyWorktree(worktreePath: string, branchName: string): Promise<boolean> {
     // Lazy import: test suites replace @propr/core with enumerated mocks.
     const { isGeneratedRuntimePath } = await import('@propr/core');
+    // A deleted worktree holds nothing to inspect (simple-git throws on a missing directory).
+    if (!await pathExists(worktreePath)) return false;
     const worktreeGit = createHooklessGit(worktreePath);
     try {
         if ((await worktreeGit.raw(['branch', '--show-current'])).trim() !== branchName) return false;

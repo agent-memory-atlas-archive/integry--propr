@@ -88,3 +88,14 @@ test('startup trust writes managed directory entries once to the isolated global
     const entries = git(root, 'config', '--global', '--get-all', 'safe.directory').split('\n');
     assert.deepEqual(entries.sort(), [`${path.join(root, 'clones')}/*`, `${path.join(root, 'worktrees')}/*`].sort());
 });
+
+test('releasing a deleted worktree reports nothing to release instead of throwing', async () => {
+    const { clone, wt } = await fixture();
+    git(wt, 'checkout', '--detach'); // failure cleanup or push salvage gave up the branch
+    await fs.remove(wt);
+
+    assert.equal(await ops.releaseSettledWorktree(clone, BRANCH, wt), false);
+    assert.deepEqual(await ops.branchWorktreeRegistrations(clone, BRANCH), [], 'the branch is already free');
+    git(clone, 'worktree', 'prune', '--expire=now');
+    assert.equal(await ops.releaseSettledWorktree(clone, BRANCH, wt), false, 'also with no registration left at all');
+});
