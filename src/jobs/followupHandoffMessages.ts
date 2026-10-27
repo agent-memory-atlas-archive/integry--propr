@@ -51,7 +51,16 @@ export function recoveredNoChangeCompletionBody(record: FollowupHandoffRecord): 
     ].filter(Boolean).join('\n\n');
 }
 
-export function interruptedWithoutChangesBody(record: FollowupHandoffRecord, worktreeLost = false): string {
+/** Durable diagnostic that recovery rebuilt a worktree deleted outside ProPR; the rebuild also invalidated any recorded agent success. */
+export const WORKTREE_LOST_REASON = 'worktree_lost';
+
+/** Whether the record carries durable evidence that its worktree was deleted and rebuilt. */
+export function worktreeWasLost(record: Pick<FollowupHandoffRecord, 'status_reason'>): boolean {
+    return record.status_reason === WORKTREE_LOST_REASON;
+}
+
+export function interruptedWithoutChangesBody(record: FollowupHandoffRecord): string {
+    const worktreeLost = worktreeWasLost(record);
     const comments = filterRealComments(parseClaimedComments(record));
     const ids = comments.map(comment => comment.id);
     const authors = [...new Set(comments.map(comment => comment.author))].map(author => `@${author}`).join(', ');

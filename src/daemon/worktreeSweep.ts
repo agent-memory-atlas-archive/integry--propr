@@ -81,8 +81,10 @@ export function scheduleWorktreeSweep(): NodeJS.Timeout | null {
         const intervalMs = sweepSetting('WORKTREE_SWEEP_INTERVAL_MS', 60 * 60 * 1000, 2_147_483_647);
         sweepSetting('WORKTREE_RETENTION_HOURS', 24, Math.floor(Number.MAX_SAFE_INTEGER / 3_600_000));
         void probeWorktreeReclamationDocker();
-        void trustManagedGitDirectoriesAtStartup().catch(() => undefined);
-        void sweepWorktrees();
+        // The first sweep reads every managed worktree, so Git must already
+        // trust them (agent-owned checkouts fail with "dubious ownership"
+        // otherwise); a trust failure only logs and the sweep still runs.
+        void trustManagedGitDirectoriesAtStartup().catch(() => undefined).then(() => sweepWorktrees());
         return setInterval(() => { void sweepWorktrees(); }, intervalMs);
     } catch (error) {
         logger.warn({ error: (error as Error).message }, 'Idle worktree sweep disabled: invalid configuration');

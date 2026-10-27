@@ -184,7 +184,9 @@ export interface PredecessorAdoptionParams {
 export type PredecessorAdoption =
     | {
         blocked: 'predecessor_agent_still_running' | 'predecessor_liveness_unavailable'
-        | 'predecessor_awaiting_operator' | 'predecessor_container_identity_mismatch';
+        | 'predecessor_awaiting_operator' | 'predecessor_container_identity_mismatch'
+        /** The same task's failed attempt could not be taken over: a Git registration still holds the branch. */
+        | 'predecessor_branch_still_held';
     }
     | { resumed?: ResumeOutcome }
     /** Comment IDs a released, unauthorized cancelled predecessor claimed; they must never execute. */
@@ -276,10 +278,17 @@ export async function adoptPredecessorFollowupHandoff(
     }
 }
 
-/** Releases a predecessor that can publish nothing more, so this writer runs instead of waiting. */
+/**
+ * Releases a predecessor that can publish nothing more, so this writer runs
+ * instead of waiting. A release that could not free the branch keeps this
+ * writer waiting: an operator hold stays reported as such, while a failed
+ * same-task attempt that was never held names the branch registration.
+ */
 async function releaseForWriter(record: FollowupHandoffRecord, resolved: ResolvedRecoveryDeps, params: PredecessorAdoptionParams): Promise<PredecessorAdoption> {
     const claimIds = await releasePredecessorInline(record, resolved, params.currentTaskId, params.log);
-    if (!claimIds) return { blocked: 'predecessor_awaiting_operator' };
+    if (!claimIds) {
+        return { blocked: record.status === HANDOFF_AWAITING_OPERATOR ? 'predecessor_awaiting_operator' : 'predecessor_branch_still_held' };
+    }
     return claimIds.length > 0 ? { releasedCancelledClaimIds: claimIds } : {};
 }
 

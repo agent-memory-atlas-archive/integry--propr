@@ -95,6 +95,11 @@ export async function releasePredecessorInline(record: FollowupHandoffRecord, re
         await recordCancelledClaims(resolved.store, record, claimIds);
         await resolved.withdrawRestoredComments(record, parseClaimedComments(record));
     }
+    // A refused release means the worktree still holds unpublished work: it
+    // is detached in place, so the commits stay recoverable from that checkout
+    // (see maintenance.md) while the branch is freed. A deleted folder has
+    // nothing to detach; core's release then detaches its surviving Git
+    // registration instead, so the branch check below sees it free.
     if (!await git.releaseSettledWorktree(record.local_repo_path, record.branch_name, record.worktree_path)
         && await git.worktreeAttachment(record.worktree_path, record.branch_name) === 'attached') {
         await git.detachWorktreeHead(record.worktree_path);
@@ -128,6 +133,9 @@ export async function settleStuckHolds(deps: FollowupHandoffRecoveryDeps, resolv
         try {
             const cancelled = (await resolved.stateManager.getTaskState(record.task_id))?.state === resolved.taskStates.CANCELLED;
             if (record.status_reason === 'worktree_missing' && !cancelled) {
+                // The operator resume re-arms without granting publication
+                // authority: operator_authorized stays 0, so a re-armed hold
+                // that fails its rebuild is still releasable here and above.
                 const result = await resumeOperatorHeldFollowupHandoff(record, shared);
                 resolved.log.info({ repository: record.repository, pullRequest: record.pull_request, taskId: record.task_id, result },
                     'Re-armed a follow-up held only because its worktree was deleted; recovery rebuilds the worktree');

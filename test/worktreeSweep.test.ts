@@ -61,7 +61,7 @@ test('invalid retention and timer settings disable sweeping instead of bypassing
     assert.equal(dockerCalls.length, 0);
 });
 
-test('default and valid settings run once immediately and schedule the requested interval', () => {
+test('default and valid settings run once at startup (after Git trusts the managed folders) and schedule the requested interval', async () => {
     const defaults = scheduleWorktreeSweep();
     assert.ok(defaults);
     clearInterval(defaults);
@@ -70,6 +70,8 @@ test('default and valid settings run once immediately and schedule the requested
     const configured = scheduleWorktreeSweep();
     assert.ok(configured);
     clearInterval(configured);
+    // The first sweep waits for the startup trust entries, which resolve in a few ticks.
+    for (let tick = 0; tick < 50 && sweeps < 2; tick += 1) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(sweeps, 2);
 });
 

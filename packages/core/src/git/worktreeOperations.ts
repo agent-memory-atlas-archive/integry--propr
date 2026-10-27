@@ -156,7 +156,9 @@ export async function addToSafeDirectories(git: SimpleGit, worktreePath: string,
  * them as owned by another user. The per-path entries added on creation live
  * in the container's global config and vanish on restart, which made recovery
  * of an older worktree fail with "dubious ownership". `<base>/*` (Git 2.46+)
- * trusts only paths under ProPR's own folders.
+ * trusts only paths under ProPR's own folders, at any depth: per-repository
+ * worktree roots (`<base>/<owner>/<repo>/...`) always resolve under the
+ * configured base, so they are covered too.
  */
 export async function trustManagedGitDirectories(git: SimpleGit): Promise<void> {
     const clonesBase = process.env.GIT_CLONES_BASE_PATH || '/tmp/git-processor/clones';
