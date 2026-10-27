@@ -3,6 +3,7 @@ import logger from '../utils/logger.js';
 import { getAuthenticatedOctokit } from '../auth/githubAuth.js';
 import { loadMonitoredRepos, loadMonitoredReposRaw, loadSettings, loadAiPrimaryTag, loadPrimaryProcessingLabels } from '../config/configManager.js';
 import { invalidateSettingsCache } from '../services/relevance/keywordExtractor.js';
+import type { RepositoryFilter } from '../webhook/webhookHandler.js';
 
 interface Settings {
     github_user_whitelist?: string[];
@@ -29,11 +30,23 @@ export function getRepos(): string[] {
     return monitoredRepos;
 }
 
+const normalizeRepositoryName = (repository: string): string => repository.trim().toLowerCase();
+
 export function isMonitoredRepository(repository: string, repos: readonly string[] = monitoredRepos): boolean {
-    const normalizedRepository = repository.trim().toLowerCase();
+    const normalizedRepository = normalizeRepositoryName(repository);
     return normalizedRepository.length > 0
-        && repos.some(configured => configured.trim().toLowerCase() === normalizedRepository);
+        && repos.some(configured => normalizeRepositoryName(configured) === normalizedRepository);
 }
+
+/**
+ * The webhook repository filter over the live monitored set. It also lists the
+ * names it accepts, normalized exactly as isMonitoredRepository compares them,
+ * so the routing relay's delivery-interest declaration cannot drift from it.
+ */
+export const monitoredRepositoryFilter: RepositoryFilter = Object.assign(
+    (repository: string) => isMonitoredRepository(repository),
+    { monitoredRepositories: () => monitoredRepos.map(normalizeRepositoryName).filter(name => name.length > 0) },
+);
 
 /**
  * Returns whether automatic failed-CI follow-up is enabled for a repository.

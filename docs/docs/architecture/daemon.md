@@ -46,7 +46,7 @@ It should stay lightweight. The daemon decides what should be processed; workers
 
 The daemon supports three intake modes, selected by `GITHUB_EVENT_INTAKE_MODE`, and runs in exactly one of them — they are mutually exclusive:
 
-- **Routing WebSocket** (`routing_websocket`, default): the daemon opens an outbound WebSocket to the hosted ProPR App's routing service and receives events as they happen. No inbound endpoint, no GitHub App of your own, and no webhook secret are required, and latency is near-immediate.
+- **Routing WebSocket** (`routing_websocket`, default): the daemon opens an outbound WebSocket to the hosted ProPR App's routing service and receives events as they happen. No inbound endpoint, no GitHub App of your own, and no webhook secret are required, and latency is near-immediate. The daemon declares which deliveries it can act on (its monitored repositories and the CI/push states its handlers read), so the relay can drop the rest before forwarding them; see [Delivery Interest](../operations/propr-connect.md#delivery-interest).
 - **Polling** (`polling`): the daemon queries the GitHub API on an interval (`POLLING_INTERVAL_MS`, default `60000`) for open issues with processing labels and for PR events.
 - **Direct webhook** (`direct_webhook`): GitHub delivers events to your own App's public `POST /webhook` endpoint on the dashboard API service (port 4000), verified against `GH_WEBHOOK_SECRET`, and forwarded into the same intake path. This removes polling pressure and latency, but there is no polling backstop — missed deliveries rely on GitHub's webhook redelivery.
 

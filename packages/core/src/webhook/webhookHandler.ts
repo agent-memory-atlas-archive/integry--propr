@@ -3,7 +3,7 @@ import { resolveIssueTriggerLabels } from './issueTriggerRestoration.js';
 import { loadPrimaryProcessingLabels } from '../config/configManager.js';
 import logger from '../utils/logger.js';
 import { handlePlanIssueStatusUpdate, handlePlanPRUpdate, handlePlanPRCommentTracking, handlePlanPRCommentActivity, type CommentEventType } from './planIssueTracking.js';
-import { handleCheckRunEvent, handleCheckSuiteEvent, handleStatusEvent, reevaluatePRAutoMerge, type StatusEventPayload } from './checkRunHandler.js';
+import { handleCheckRunEvent, handleCheckSuiteEvent, handleStatusEvent, reevaluatePRAutoMerge } from './checkRunHandler.js';
 import { clearUltrafixLoopState, getUltrafixStateRedis } from './checkRunHelpers.js';
 import { getAuthenticatedOctokit } from '../auth/githubAuth.js';
 import { retryConfigs, withRetry } from '../utils/retryHandler.js';
@@ -12,14 +12,14 @@ import { handleEpicPRCreationOnMerge, handleEpicPRLabelCleanup } from './epicPRH
 import { getClosedPullRequestCiRedis, recordClosedPullRequestForCiCancellation } from './closedPullRequestCi.js';
 import { handlePullRequestConflictDetection, handlePushConflictDetection } from './mergeConflictDetector.js';
 import { handleAutoMergePolicyPullRequestEvent } from '../services/autoMergeGate.js';
-import type {
-    IssuesEvent, IssuesLabeledEvent,
-    IssueCommentEvent, IssueCommentCreatedEvent, IssueCommentDeletedEvent, IssueCommentEditedEvent,
-    PullRequestReviewCommentEvent, PullRequestReviewCommentCreatedEvent,
-    PullRequestReviewCommentDeletedEvent, PullRequestReviewCommentEditedEvent,
-    PullRequestEvent,
-    CheckRunEvent, CheckSuiteEvent, PushEvent
-} from '@octokit/webhooks-types';
+import type { IssuesEvent, IssueCommentEvent, PullRequestReviewCommentEvent, PullRequestEvent, CheckRunEvent } from '@octokit/webhooks-types';
+import {
+    getRepositoryFullName, isIssuesEvent, isIssuesLabeledEvent, isIssueCommentEvent, isIssueCommentCreatedEvent,
+    isIssueCommentDeletedEvent, isIssueCommentEditedEvent, isPullRequestReviewCommentEvent,
+    isPullRequestReviewCommentCreatedEvent, isPullRequestReviewCommentDeletedEvent,
+    isPullRequestReviewCommentEditedEvent, isPullRequestEvent, isCheckRunEvent, isCheckSuiteEvent, isPushEvent, isStatusEvent,
+} from './webhookPayloadGuards.js';
+import { buildDeliveryInterest, type DeliveryInterest } from '../intake/routingDeliveryInterest.js';
 import type { Redis } from 'ioredis';
 import { ACCEPTED_NO_SEAT_DISPOSITION, normalizeDisposition, type DeliveryDisposition } from '../intake/routingWebSocketProtocol.js';
 
@@ -73,7 +73,14 @@ export type CommentDeletedHandler = (payload: IssueCommentEvent | PullRequestRev
 export type CommentEditedHandler = (payload: IssueCommentEvent | PullRequestReviewCommentEvent, eventType: CommentEventType, correlationId: string) => Promise<void>;
 export type PullRequestProcessor = (payload: PullRequestEvent, correlationId: string) => Promise<void>;
 export type CheckRunProcessor = (payload: CheckRunEvent, correlationId: string) => Promise<void>;
-export type RepositoryFilter = (repository: string) => boolean | Promise<boolean>;
+/**
+ * Decides which repositories' events are processed. A filter that also lists the
+ * normalized names it accepts lets the routing relay drop other repositories'
+ * deliveries (see getWebhookDeliveryInterest); an opaque filter declares `"*"`.
+ */
+export type RepositoryFilter = ((repository: string) => boolean | Promise<boolean>) & {
+    readonly monitoredRepositories?: () => readonly string[];
+};
 
 let processDetectedIssue: IssueProcessor | null = null;
 let processCommentEvent: CommentProcessor | null = null;
@@ -107,54 +114,12 @@ export async function initializeWebhookHandler(options: WebhookHandlerOptions): 
     logger.info('Webhook handler initialized');
 }
 
-function getRepositoryFullName(payload: unknown): string | null {
-    if (typeof payload !== 'object' || payload === null || !('repository' in payload)) return null;
-    const repository = (payload as { repository?: unknown }).repository;
-    if (typeof repository !== 'object' || repository === null || !('full_name' in repository)) return null;
-    const fullName = (repository as { full_name?: unknown }).full_name;
-    return typeof fullName === 'string' && fullName.trim() ? fullName.trim() : null;
-}
-
-function isIssuesEvent(payload: unknown): payload is IssuesEvent {
-    return typeof payload === 'object' && payload !== null && 'issue' in payload && 'action' in payload && !('comment' in payload);
-}
-
-const isIssuesLabeledEvent = (payload: IssuesEvent): payload is IssuesLabeledEvent => payload.action === 'labeled';
-
-function isIssueCommentEvent(payload: unknown): payload is IssueCommentEvent {
-    return typeof payload === 'object' && payload !== null && 'issue' in payload && 'comment' in payload && 'action' in payload;
-}
-
-const isIssueCommentCreatedEvent = (payload: IssueCommentEvent): payload is IssueCommentCreatedEvent => payload.action === 'created';
-const isIssueCommentDeletedEvent = (payload: IssueCommentEvent): payload is IssueCommentDeletedEvent => payload.action === 'deleted';
-const isIssueCommentEditedEvent = (payload: IssueCommentEvent): payload is IssueCommentEditedEvent => payload.action === 'edited';
-
-function isPullRequestReviewCommentEvent(payload: unknown): payload is PullRequestReviewCommentEvent {
-    return typeof payload === 'object' && payload !== null && 'pull_request' in payload && 'comment' in payload && 'action' in payload;
-}
-
-const isPullRequestReviewCommentCreatedEvent = (payload: PullRequestReviewCommentEvent): payload is PullRequestReviewCommentCreatedEvent => payload.action === 'created';
-const isPullRequestReviewCommentDeletedEvent = (payload: PullRequestReviewCommentEvent): payload is PullRequestReviewCommentDeletedEvent => payload.action === 'deleted';
-const isPullRequestReviewCommentEditedEvent = (payload: PullRequestReviewCommentEvent): payload is PullRequestReviewCommentEditedEvent => payload.action === 'edited';
-
-function isPullRequestEvent(payload: unknown): payload is PullRequestEvent {
-    return typeof payload === 'object' && payload !== null && 'pull_request' in payload && 'action' in payload && !('comment' in payload);
-}
-
-function isCheckRunEvent(payload: unknown): payload is CheckRunEvent {
-    return typeof payload === 'object' && payload !== null && 'check_run' in payload && 'action' in payload;
-}
-
-function isCheckSuiteEvent(payload: unknown): payload is CheckSuiteEvent {
-    return typeof payload === 'object' && payload !== null && 'check_suite' in payload && 'action' in payload && !('check_run' in payload);
-}
-
-function isPushEvent(payload: unknown): payload is PushEvent {
-    return typeof payload === 'object' && payload !== null && 'ref' in payload && 'commits' in payload && !('action' in payload);
-}
-
-function isStatusEvent(payload: unknown): payload is StatusEventPayload {
-    return typeof payload === 'object' && payload !== null && 'sha' in payload && 'state' in payload && !('action' in payload) && !('commits' in payload);
+/** The relay delivery-interest declaration matching the handler as currently registered. */
+export function getWebhookDeliveryInterest(): DeliveryInterest {
+    return buildDeliveryInterest({
+        repositories: repositoryFilter?.monitoredRepositories?.() ?? '*',
+        checkRunProcessorRegistered: processCheckRun !== null,
+    });
 }
 
 async function handleIssuesEvent(
