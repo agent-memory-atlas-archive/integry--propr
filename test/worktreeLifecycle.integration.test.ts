@@ -800,3 +800,30 @@ test('storage gate warning delay rejects unsupported Node timer values', async (
         else process.env.WORKTREE_SWEEP_INTERVAL_MS = previous;
     }
 });
+
+test('an existing-branch worktree can be rebuilt at its saved path after the checkout was deleted', async () => {
+    await remoteBranch('goal');
+    const first = await createWorktreeFromExistingBranch(repo, 'goal', { owner: 'owner', repoName, worktreeDirName: 'goal-checkout' });
+    // The checkout disappears (manual cleanup) but Git keeps its registration.
+    await fs.remove(first.worktreePath);
+    assert.match(await git.raw(['worktree', 'list', '--porcelain']), /goal-checkout/);
+    const rebuilt = await createWorktreeFromExistingBranch(repo, 'goal', { owner: 'owner', repoName, worktreeDirName: 'goal-checkout' });
+    assert.equal(rebuilt.worktreePath, first.worktreePath);
+    assert.equal((await simpleGit(rebuilt.worktreePath).raw(['branch', '--show-current'])).trim(), 'goal');
+    assert.equal((await simpleGit(rebuilt.worktreePath).revparse(['HEAD'])).trim(), initial);
+});
+
+test('a missing worktree registration whose HEAD no ref contains is kept and the rebuild fails', async () => {
+    await remoteBranch('goal');
+    const first = await createWorktreeFromExistingBranch(repo, 'goal', { owner: 'owner', repoName, worktreeDirName: 'goal-checkout' });
+    const wt = simpleGit(first.worktreePath);
+    await wt.checkout(['--detach']);
+    await fs.writeFile(path.join(first.worktreePath, 'tracked'), 'only here');
+    await wt.add('.').commit('unpublished detached commit');
+    const head = (await wt.revparse(['HEAD'])).trim();
+    const admin = (await fs.readFile(path.join(first.worktreePath, '.git'), 'utf8')).trim().slice('gitdir: '.length);
+    await fs.remove(first.worktreePath);
+    await assert.rejects(createWorktreeFromExistingBranch(repo, 'goal', { owner: 'owner', repoName, worktreeDirName: 'goal-checkout' }),
+        /missing but already registered/);
+    assert.equal((await fs.readFile(path.join(admin, 'HEAD'), 'utf8')).trim(), head);
+});

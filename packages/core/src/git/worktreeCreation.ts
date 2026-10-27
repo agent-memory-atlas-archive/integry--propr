@@ -113,6 +113,44 @@ async function detachMissingWorktreeRegistration(git: SimpleGit, branchName: str
     return false;
 }
 
+/** Git's refusal to add a worktree at a path whose checkout is gone but whose registration remains. */
+export function isMissingRegisteredWorktreeError(message: string): boolean {
+    return /is a missing but already registered worktree/.test(message);
+}
+
+/**
+ * Clears the registration of a worktree whose checkout directory is gone, so the
+ * same path can be checked out again (a continued goal rebuilds its saved path).
+ * With no checkout there is nothing uncommitted left; the registration is
+ * removed only when a branch, remote-tracking ref or tag already contains its
+ * HEAD, and never when it is locked. Returns false, changing nothing, otherwise.
+ */
+export async function clearMissingWorktreeRegistration(git: SimpleGit, worktreePath: string): Promise<boolean> {
+    if (await fs.pathExists(worktreePath)) return false;
+    const commonDir = (await git.raw(['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+    const registrations = path.join(commonDir, 'worktrees');
+    if (!await fs.pathExists(registrations)) return false;
+    for (const id of await fs.readdir(registrations)) {
+        const admin = path.join(registrations, id);
+        const gitdir = (await fs.readFile(path.join(admin, 'gitdir'), 'utf8').catch(() => '')).trim();
+        if (gitdir !== path.join(worktreePath, '.git')) continue;
+        if (await fs.pathExists(path.join(admin, 'locked'))) return false;
+        const head = (await fs.readFile(path.join(admin, 'HEAD'), 'utf8').catch(() => '')).trim();
+        const symbolic = /^ref: (refs\/heads\/.+)$/.exec(head)?.[1];
+        const commit = symbolic
+            ? (await git.raw(['rev-parse', '--verify', `${symbolic}^{commit}`])).trim()
+            : /^[0-9a-f]{40,64}$/.test(head) ? head : null;
+        if (!commit) return false;
+        // Read a count rather than an exit status (see localBranchExists).
+        const unpublished = (await git.raw(['rev-list', '--count', commit, '--not', '--branches', '--remotes', '--tags'])).trim();
+        if (unpublished !== '0') return false;
+        await fs.remove(admin);
+        logger.warn({ worktreePath, commit }, 'Cleared the registration of a missing worktree whose HEAD is stored in Git, so its path can be checked out again');
+        return true;
+    }
+    return false;
+}
+
 /**
  * Frees a branch held by a worktree that has nothing left to lose: no
  * uncommitted or untracked changes, and a HEAD already contained in the
@@ -238,8 +276,13 @@ async function createWorktreeFromRemote(git: SimpleGit, worktreePath: string, br
         try {
             worktreeAddResult = await addWorktree();
         } catch (error) {
-            const holderPath = worktreeHoldingBranch((error as Error).message || '');
-            if (!holderPath || !await releaseBranchFromSettledWorktree(git, branchName, holderPath)) throw error;
+            const message = (error as Error).message || '';
+            if (isMissingRegisteredWorktreeError(message)) {
+                if (!await clearMissingWorktreeRegistration(git, worktreePath)) throw error;
+            } else {
+                const holderPath = worktreeHoldingBranch(message);
+                if (!holderPath || !await releaseBranchFromSettledWorktree(git, branchName, holderPath)) throw error;
+            }
             worktreeAddResult = await addWorktree();
         }
         logger.info({ branchName, worktreePath, gitOutput: worktreeAddResult.trim() }, 'Git worktree add command completed');
