@@ -10,7 +10,11 @@ import knex from 'knex';
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'propr-handoff-restore-'));
 process.env.GIT_CLONES_BASE_PATH = path.join(root, 'clones');
 process.env.GIT_WORKTREES_BASE_PATH = path.join(root, 'worktrees');
-process.env.GIT_CONFIG_GLOBAL = path.join(root, 'gitconfig');
+// simple-git's environment guard strips GIT_CONFIG_GLOBAL. HOME is shared by
+// both Git clients, so neither reads or writes the runner's global config.
+process.env.HOME = root;
+process.env.XDG_CONFIG_HOME = path.join(root, 'xdg');
+delete process.env.GIT_CONFIG_GLOBAL;
 const bin = path.join(root, 'bin');
 await fs.ensureDir(bin);
 await fs.writeFile(path.join(bin, 'sudo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
@@ -78,7 +82,7 @@ test('a deleted worktree whose registration still holds staged work is not rebui
     assert.match(git(clone, 'worktree', 'list', '--porcelain'), new RegExp(`worktree ${wt}`), 'the registration with staged work is kept');
 });
 
-test('startup trust lets Git read worktrees owned by another user after a restart', async () => {
+test('startup trust writes managed directory entries once to the isolated global config', async () => {
     await trustManagedGitDirectories(createHooklessGit());
     await trustManagedGitDirectories(createHooklessGit()); // idempotent
     const entries = git(root, 'config', '--global', '--get-all', 'safe.directory').split('\n');
