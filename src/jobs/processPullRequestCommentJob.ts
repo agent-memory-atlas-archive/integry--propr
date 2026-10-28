@@ -17,6 +17,7 @@ import {
     buildCommentHistory, updateTaskTitleForPR, resolvePrReasoningLevelOverride
 } from './prCommentJobHelpers.js';
 import { localizeContentImages } from './issueJobHelpers.js';
+import { pullRequestJobAllowed } from './prCommentLabelGate.js';
 import {
     buildCombinedComment, extractModelFromLabels, fetchAllComments, buildPrompt,
     handleJobError, cleanupJob, toClaudeResult, buildStartingWorkCommentBody
@@ -108,7 +109,8 @@ async function initializePRJobContext(job: Job<CommentJobData>): Promise<PRJobCo
     const { commentsToProcess, pickedUpComments } = await pickUpPendingCommentsWithClaim(initialComments, { repoOwner, repoName, pullRequestNumber, correlatedLogger, redisClient });
     applyPendingCommentCommandContext(job.data, commentsToProcess, correlatedLogger);
     const { branchName: jobBranchName, llm: jobLlm } = job.data;
-    return { pullRequestNumber, jobBranchName, repoOwner, repoName, llm: jobLlm, correlationId, correlatedLogger, primaryProcessingLabels, isBatchJob, commentsToProcess, pickedUpComments, originalUltrafixMeta };
+    const jobRequest = { commandMode: job.data.commandMode, ultrafixMeta: job.data.ultrafixMeta };
+    return { pullRequestNumber, jobBranchName, repoOwner, repoName, llm: jobLlm, correlationId, correlatedLogger, primaryProcessingLabels, isBatchJob, commentsToProcess, pickedUpComments, originalUltrafixMeta, jobRequest };
 }
 
 async function validatePRAndComments(octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>>, context: PRJobContext & { llm: string | null | undefined }): Promise<ValidationResult> {
@@ -127,8 +129,8 @@ async function validatePRAndComments(octokit: Awaited<ReturnType<typeof getAuthe
     const prCommentsForValidation = allCommentsForValidation.filter(c => !('diff_hunk' in c));
     const validatedComments = await validateAndFilterComments(commentsToProcess, allCommentsForValidation, pullRequestNumber, correlatedLogger);
     if (validatedComments.length === 0) return { skip: true, reason: 'all_comments_deleted' };
-    // Check if PR has ANY of the primary processing labels (e.g., 'AI' or 'gitfix')
-    if (!prData.data.labels.some(label => primaryProcessingLabels.includes(label.name))) return { skip: true, reason: 'missing_required_label' };
+    // A processing label (e.g. 'AI') opts the PR in; without one only explicit requests run.
+    if (!await pullRequestJobAllowed(prData.data.labels, primaryProcessingLabels, { data: context.jobRequest ?? {}, comments: validatedComments, correlationId: context.correlationId })) return { skip: true, reason: 'missing_required_label' };
     const llm = extractModelFromLabels(prData.data.labels, initialLlm, pullRequestNumber, correlatedLogger);
     const unprocessedComments = filterUnprocessedComments(validatedComments, prCommentsForValidation, botUsername, { pullRequestNumber, correlatedLogger });
     if (unprocessedComments.length === 0) return { skip: true, reason: 'already_processed' };
