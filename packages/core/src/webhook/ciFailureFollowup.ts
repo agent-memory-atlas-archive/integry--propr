@@ -7,6 +7,7 @@ import logger from '../utils/logger.js';
 import { withRetry } from '../utils/retryHandler.js';
 import { getUltrafixStateRedis } from './checkRunHelpers.js';
 import { findCancellationProvenance, type LoadProprCancelledRuns } from './ciCancellationProvenance.js';
+import { isActedCheckRunAction, isFailureStatusState } from './webhookEventGates.js';
 
 export const CI_FAILURE_FOLLOWUP_MARKER_PREFIX = '<!-- propr:ci-failure-followup';
 const CI_FAILURE_FOLLOWUP_MARKER_RE = /\n?<!-- propr:ci-failure-followup key="[a-f0-9]{64}" -->/gu;
@@ -83,7 +84,7 @@ export function isFailingCheckRunConclusion(conclusion: string | null | undefine
 }
 
 export function extractCheckRunFailure(payload: CheckRunEvent): CiFailureEvidence | null {
-    if (payload.action !== 'completed' || !isFailingCheckRunConclusion(payload.check_run.conclusion)) return null;
+    if (!isActedCheckRunAction(payload.action) || !isFailingCheckRunConclusion(payload.check_run.conclusion)) return null;
 
     const output = payload.check_run.output;
     const fallbackExcerpt = joinUsefulText([output.title, output.summary, output.text]);
@@ -104,8 +105,8 @@ export function extractCheckRunFailure(payload: CheckRunEvent): CiFailureEvidenc
 }
 
 export function extractStatusFailure(payload: StatusFailurePayload): CiFailureEvidence | null {
+    if (!isFailureStatusState(payload.state)) return null;
     const state = payload.state.toLowerCase();
-    if (state !== 'failure' && state !== 'error') return null;
 
     const context = payload.context?.trim() || 'Commit status';
     return {

@@ -164,9 +164,10 @@ export { recoverCiFailureFollowups } from './webhook/ciFailureRecovery.js';
 export * from './webhook/ciFailureFollowup.js';
 export * from './webhook/closedPullRequestCi.js';
 export { retryPendingEpicMergeProgress } from './webhook/epicPRHandler.js';
-export { processWebhookEvent, initializeWebhookHandler, SUPPORTED_WEBHOOK_EVENTS } from './webhook/webhookHandler.js';
-export type { WebhookEventType, DetectedIssue, IssueProcessor, CommentProcessor, CommentDeletedHandler, CommentEditedHandler, CheckRunProcessor, WebhookHandlerOptions } from './webhook/webhookHandler.js';
+export { processWebhookEvent, initializeWebhookHandler, getWebhookDeliveryInterest, SUPPORTED_WEBHOOK_EVENTS } from './webhook/webhookHandler.js';
+export type { WebhookEventType, RepositoryFilter, DetectedIssue, IssueProcessor, CommentProcessor, CommentDeletedHandler, CommentEditedHandler, CheckRunProcessor, WebhookHandlerOptions } from './webhook/webhookHandler.js';
 export { RoutingWebSocketIntakeService } from './intake/RoutingWebSocketIntakeService.js';
+export { buildDeliveryInterest, DELIVERY_INTEREST_CAPABILITY, MAX_INTEREST_FRAME_BYTES, MAX_INTEREST_REPOSITORIES, type DeliveryInterest, type DeliveryInterestEventRule } from './intake/routingDeliveryInterest.js';
 export type { RoutingWebSocketIntakeServiceOptions, RoutingWebSocketStatus, ConnectAccountStatus, MinimalWebSocket, RawData, WebSocketCtor, FetchLike, DeliveryAckBilling, DeliveryAckEvidence, DeliveryAckStatus, DeliveryDisposition } from './intake/RoutingWebSocketIntakeService.js';
 // The routing wire-protocol primitives (BoundedDeliverySet, BoundedTokenCache,
 // DeliveryTracker, URL/payload/token helpers) are internal to the intake service
@@ -390,7 +391,7 @@ export type {
 export {
     getReposFromEnv,
     getRepos,
-    isMonitoredRepository, isAutoCiFollowupEnabledForRepository, isCancelCiDuringFollowupEnabledForRepository,
+    isMonitoredRepository, monitoredRepositoryFilter, isAutoCiFollowupEnabledForRepository, isCancelCiDuringFollowupEnabledForRepository,
     getCancelCiDuringFollowupWorkflowsForRepository,
     getNonBlockingChecksForRepository,
     resolveRepositoryAutoAssignment,

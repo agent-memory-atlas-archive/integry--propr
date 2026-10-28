@@ -34,13 +34,12 @@ import {
     runMigrations
 } from '@propr/core';
 import type { CommentPayload, CommentEventConfig, CommentEventType, DeliveryDisposition } from '@propr/core';
-import { logger } from '@propr/core';
 import { pollForPullRequestComments } from './polling/prCommentPolling.js';
 import {
-    loadAllConfigs,
+    logger, loadAllConfigs,
     reloadConfigs,
     getRepos,
-    isMonitoredRepository,
+    monitoredRepositoryFilter,
     getBotUsername,
     getUserWhitelist,
     getPrimaryProcessingLabels,
@@ -363,7 +362,7 @@ async function startDaemon(options: DaemonOptions = {}): Promise<void> {
             commentDeletedHandler: (payload: CommentPayload, eventType: CommentEventType, correlationId: string) => handleCommentDeleted(payload, eventType, correlationId, commentConfig),
             commentEditedHandler: (payload: CommentPayload, eventType: CommentEventType, correlationId: string) => handleCommentEdited(payload, eventType, correlationId, commentConfig),
             redisClient,
-            repositoryFilter: (repository: string) => isMonitoredRepository(repository),
+            repositoryFilter: monitoredRepositoryFilter,
         });
     };
 
@@ -373,6 +372,9 @@ async function startDaemon(options: DaemonOptions = {}): Promise<void> {
     const enqueueConfigReload = (): Promise<void> => {
         configReloadQueue = configReloadQueue
             .then(reloadConfigs)
+            // The relay's delivery interest mirrors the monitored repositories;
+            // an unchanged declaration is not re-sent.
+            .then(() => routingService?.refreshDeliveryInterest())
             .catch((error: unknown) => {
                 const err = error as Error;
                 logger.error({ error: err.message }, 'Failed to reload daemon config');
@@ -446,7 +448,9 @@ async function startDaemon(options: DaemonOptions = {}): Promise<void> {
         safePoll,
         pollingIntervalMs: POLLING_INTERVAL_MS,
         initWebhookHandler: initSharedWebhookHandler,
-        createRoutingService: () => new RoutingWebSocketIntakeService(),
+        // Assigned on creation, not after startup resolves, so a config reload
+        // while the status publisher starts still refreshes the delivery interest.
+        createRoutingService: () => (routingService = new RoutingWebSocketIntakeService()),
         startRoutingStatusPublisher: (service) => startRoutingStatusPublisher(service, heartbeatRedis),
         logger,
         startupLogContext: baseStartupLog,

@@ -5,6 +5,7 @@ import { generateCorrelationId } from '../utils/logger.js';
 import type { MergeConflictJobData } from '../queue/taskQueue.types.js';
 import type { PullRequestEvent, PushEvent } from '@octokit/webhooks-types';
 import { isRescueRef } from '../git/rescueRefs.js';
+import { isBranchUpdatePush, PUSH_BRANCH_REF_PREFIX } from './webhookEventGates.js';
 import { loadEffectiveAutoResolveMergeConflicts } from '../config/mergeConflictSettings.js';
 import {
     evaluateOpenPullRequests,
@@ -142,8 +143,8 @@ export async function handlePushConflictDetection(
         log.debug({ repository, ref: payload.ref }, 'Merge conflict detection: ignoring push salvage rescue ref');
         return [];
     }
-    if (!payload.ref.startsWith('refs/heads/') || payload.deleted) return [];
-    const branchName = payload.ref.slice('refs/heads/'.length);
+    if (!isBranchUpdatePush(payload)) return [];
+    const branchName = payload.ref.slice(PUSH_BRANCH_REF_PREFIX.length);
 
     // Evaluate the setting first so disabled repositories cost no GitHub calls.
     const setting = await loadEffectiveAutoResolveMergeConflicts(repository);

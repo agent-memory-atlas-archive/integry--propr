@@ -23,6 +23,7 @@ import {
     type CiFailureEvidence,
 } from './ciFailureFollowup.js';
 import type { CheckRunEvent, CheckSuiteEvent } from '@octokit/webhooks-types';
+import { isActedCheckRunAction, isActedCheckSuiteAction, isPassingCheckSuiteConclusion, STATUS_SUCCESS_STATE } from './webhookEventGates.js';
 import { getNonBlockingChecksForRepository } from '../daemon/configLoader.js';
 import { isNonBlockingCheck } from './nonBlockingChecks.js';
 import { evaluatePullRequestAutoMerge, resolveDirectMergeMethod } from '../services/autoMergeGate.js';
@@ -316,7 +317,7 @@ export async function handleCheckRunEvent(
         prCount: payload.check_run.pull_requests?.length ?? 0,
     }, 'check_run event received');
 
-    if (payload.action !== 'completed') return;
+    if (!isActedCheckRunAction(payload.action)) return;
 
     // Check runs dispatched on branch pushes often arrive with an empty
     // pull_requests array even though the branch backs an open PR.
@@ -426,12 +427,9 @@ export async function handleCheckSuiteEvent(
         prCount: suite.pull_requests?.length ?? 0,
     }, 'check_suite event received');
 
-    if (payload.action !== 'completed') return;
+    if (!isActedCheckSuiteAction(payload.action)) return;
 
-    // Skipped counts as passing, as it does for individual check runs
-    // (GitHub sends it even though the payload types omit it).
-    const conclusion: string | null = suite.conclusion;
-    if (conclusion !== 'success' && conclusion !== 'neutral' && conclusion !== 'skipped') {
+    if (!isPassingCheckSuiteConclusion(suite.conclusion)) {
         log.debug({ owner, repoName, conclusion: suite.conclusion }, 'check_suite skipped: not success/neutral/skipped');
         return;
     }
@@ -466,7 +464,7 @@ export async function handleStatusEvent(
     log.debug({ owner, repoName, state: payload.state, sha: payload.sha, context: payload.context }, 'status event received');
 
     const failure = await unlessNonBlocking(extractStatusFailure(payload), owner, repoName);
-    if (!failure && payload.state !== 'success') return;
+    if (!failure && payload.state !== STATUS_SUCCESS_STATE) return;
     if (!failure && !_ultrafixCheckRunHook) return;
 
     const prs = await findPRsForCommit(owner, repoName, payload.sha);
