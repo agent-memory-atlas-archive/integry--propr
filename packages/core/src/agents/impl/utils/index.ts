@@ -25,6 +25,7 @@ export {
     extractMetricRecords,
     isAgentTankEnabled,
     type UsageTrackingResult,
+    type UsageTrackingOptions,
     type UsageTrackingMetrics,
     type UsageMetricRecord
 } from './usageTrackingWrapper.js';

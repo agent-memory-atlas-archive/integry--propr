@@ -1117,6 +1117,11 @@ function migrationSpec(cfg) {
             '-e', 'NODE_ENV=production',
             '-e', 'PROPR_CONTAINERIZED=1',
             '-e', 'PROPR_MIGRATIONS_PREAPPLIED=0',
+            // Docker's --init reaps as PID 1, so the image's tini ENTRYPOINT
+            // runs as its child. Registered as a subreaper it still reaps
+            // grandchildren and no longer prints the "not running as PID 1"
+            // warning ahead of the real migration error.
+            '-e', 'TINI_SUBREAPER=1',
             '-v', `${cfg.hostData}:/usr/src/app/data`,
         ],
         command: ['node', 'dist/src/migrate.js'],
@@ -1388,9 +1393,31 @@ function migrationDockerArgs(cfg) {
     ];
 }
 
+const MIGRATION_FAILURE_DETAIL_MAX_CHARS = 500;
+// Notices from Docker's --init or the image's tini entrypoint. A tini FATAL
+// (for example a failed exec) is the actual failure and is kept.
+const TINI_NOTICE_LINE = /^\[(?:WARN|INFO|DEBUG|TRACE)\s+tini\s+\(\d+\)\]/;
+// Node prints an uncaught error as source location, caret, then `Error: ...`.
+const ERROR_LINE = /^[A-Za-z]*Error\b/;
+
+function boundedDetail(line) {
+    return line.length > MIGRATION_FAILURE_DETAIL_MAX_CHARS ? `${line.slice(0, MIGRATION_FAILURE_DETAIL_MAX_CHARS)}…` : line;
+}
+
+// One bounded line naming the migration error, never the raw container output.
+function migrationFailureDetail(res) {
+    const outputs = [res.stderr, res.stdout].map((output) => (output || '').split('\n').map((line) => line.trim()).filter(Boolean));
+    for (const lines of outputs) {
+        const candidates = lines.filter((line) => !TINI_NOTICE_LINE.test(line));
+        const detail = candidates.find((line) => ERROR_LINE.test(line)) ?? candidates[0];
+        if (detail) return boundedDetail(detail);
+    }
+    const notice = outputs.flat()[0];
+    return boundedDetail(notice || firstLine(res.error?.message || 'migration container exited unsuccessfully'));
+}
+
 function migrationFailure(res) {
-    const detail = firstLine(res.stderr || res.stdout || res.error?.message || 'migration container exited unsuccessfully');
-    return new Error(`Database migration phase failed: ${detail}`);
+    return new Error(`Database migration phase failed: ${migrationFailureDetail(res)}`);
 }
 
 function containerRunning(cfg, name) {

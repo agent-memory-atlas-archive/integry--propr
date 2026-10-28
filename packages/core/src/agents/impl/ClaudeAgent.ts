@@ -159,8 +159,7 @@ export class ClaudeAgent implements Agent {
                     streamToRedis: true, preserveOutputOnTimeout: true, model: effectiveModel,
                     ...(toolPolicy && { extraEnvVars: claudeToolPolicyArgs(toolPolicy).env })
                 }),
-                undefined,
-                this.config.alias
+                { alias: this.config.alias }
             );
 
             const executionTime = Date.now() - startTime;
@@ -296,9 +295,7 @@ export class ClaudeAgent implements Agent {
                 async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, credentials: this.config.envVars },
                     timeout: timeoutMs ?? 1800000, stdinData: analysisPrompt, taskId, model: effectiveModel
                 }),
-                ANALYSIS_AGENT_TANK_TIMEOUT_MS,
-                this.config.alias,
-                options?.skipUsageTracking
+                { timeoutMs: ANALYSIS_AGENT_TANK_TIMEOUT_MS, alias: this.config.alias, skipUsageTracking: options?.skipUsageTracking }
             );
 
             const executionTimeMs = Date.now() - startTime;

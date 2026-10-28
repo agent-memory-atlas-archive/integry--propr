@@ -46,6 +46,16 @@ import logger from '../../../utils/logger.js';
 import { refreshAgent, getStatus, calculateDelta, type AgentStatusResponse } from '../../../services/agentTankService.js';
 import { loadAgentTankSettings } from '../../../config/configManager.js';
 
+/** Options accepted by {@link executeWithUsageTracking}. */
+export interface UsageTrackingOptions {
+    /** Timeout for each HTTP request; bundled mode uses AGENT_TANK_BUNDLED_TIMEOUT_MS. */
+    timeoutMs?: number;
+    /** Executing account alias (defaults to the agent); bundled probes require matching cached provenance. */
+    alias?: string;
+    /** Execute without quota probes, for latency-sensitive health checks. */
+    skipUsageTracking?: boolean;
+}
+
 /** Result returned by {@link executeWithUsageTracking}. */
 export interface UsageTrackingResult<T> {
     /** The value returned by the wrapped LLM execution function. */
@@ -333,18 +343,15 @@ function startStatusSnapshot(
  *
  * @param agent - The agent identifier to query (e.g. "claude", "antigravity", "codex").
  * @param executeFn - An async function that performs the LLM call and returns its result.
- * @param timeoutMs - Optional timeout for each HTTP request; bundled mode uses AGENT_TANK_BUNDLED_TIMEOUT_MS.
- * @param alias - Executing account alias; bundled probes require matching cached provenance.
- * @param skipUsageTracking - Execute without quota probes, for latency-sensitive health checks.
+ * @param options - Optional probe timeout, executing account alias and skip flag.
  * @returns The execution result and usage metrics (metrics are null if tracking was skipped).
  */
 export async function executeWithUsageTracking<T>(
     agent: string,
     executeFn: () => Promise<T>,
-    timeoutMs?: number,
-    alias: string = agent,
-    skipUsageTracking = false,
+    options: UsageTrackingOptions = {},
 ): Promise<UsageTrackingResult<T>> {
+    const { timeoutMs, alias = agent, skipUsageTracking = false } = options;
     if (skipUsageTracking) return { result: await executeFn(), usageMetrics: null };
 
     if (!(await isAgentTankEnabled())) {

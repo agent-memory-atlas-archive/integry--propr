@@ -20,6 +20,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+# Bounded removal of the private data root, shared with the other image smokes.
+# shellcheck source=apps/desktop/scripts/smoke-local-runtime-cleanup.sh disable=SC1091
+source "$REPO_ROOT/apps/desktop/scripts/smoke-local-runtime-cleanup.sh"
 
 STACK="${STACK:-propr-smoke-${GITHUB_RUN_ID:-local-$$}}"
 if [[ ! "$STACK" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
@@ -27,9 +30,7 @@ if [[ ! "$STACK" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
   exit 1
 fi
 NETWORK="${STACK}-net"
-DATA_DIR="/tmp/${STACK}-data"
 STACK_LABEL_KEY="com.propr.smoke.stack"
-DATA_OWNER_FILE="$DATA_DIR/.propr-smoke-owner"
 API_PORT="${API_PORT:-14000}"
 APP_TAG="${APP_TAG:-propr/app:latest}"
 UI_TAG="${UI_TAG:-propr/ui:latest}"
@@ -74,30 +75,35 @@ remove_stack_resources() {
 
   for resource in "${STACK_CONTAINERS[@]}"; do
     if docker container inspect "$resource" >/dev/null 2>&1; then
-      docker rm -f "$resource" >/dev/null
+      docker rm -f "$resource" >/dev/null || return 1
     fi
   done
   if docker network inspect "$NETWORK" >/dev/null 2>&1; then
-    docker network rm "$NETWORK" >/dev/null
+    docker network rm "$NETWORK" >/dev/null || return 1
   fi
 }
 
-remove_data_dir() {
-  if [ ! -e "$DATA_DIR" ] && [ ! -L "$DATA_DIR" ]; then
-    return 0
-  fi
-  if [ -L "$DATA_DIR" ] || [ ! -f "$DATA_OWNER_FILE" ] || [ "$(< "$DATA_OWNER_FILE")" != "$STACK" ]; then
-    echo "✗ refusing to remove unowned smoke data directory $DATA_DIR" >&2
-    return 1
-  fi
-  rm -rf -- "$DATA_DIR"
-}
+# A private per-run data root.  The app containers run as root and leave
+# root-owned 0700 entries (e.g. data/web-push) in its bind mounts, so removal
+# goes through the bounded helper rather than a host `rm -rf`.
+SMOKE_TMP_BASE="$(cd "${RUNNER_TEMP:-${TMPDIR:-/tmp}}" && pwd -P)"
+DATA_DIR="$(mktemp -d "$SMOKE_TMP_BASE/propr-image-smoke.XXXXXX")"
+DATA_DIR_IDENTITY="$(smoke_root_identity "$DATA_DIR")"
 
+# The smoke's own exit status is preserved; a cleanup failure is reported and
+# turns an otherwise successful run into a failure.
 cleanup() {
+  local status=$? failed=0
+  set +e
   echo ""
   echo "▸ cleaning up"
-  remove_stack_resources 2>/dev/null || true
-  remove_data_dir 2>/dev/null || true
+  remove_stack_resources || failed=1
+  remove_smoke_root "$DATA_DIR" "$SMOKE_TMP_BASE" "$DATA_DIR_IDENTITY" "$APP_TAG" "$STACK_LABEL_KEY" "$STACK" || failed=1
+  if (( failed )); then
+    echo "✗ image smoke cleanup did not remove every owned resource" >&2
+    (( status )) || status=1
+  fi
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -119,9 +125,6 @@ reconcile_stale_stack() {
       exit 1
     fi
   fi
-  if ! remove_data_dir; then
-    exit 1
-  fi
 }
 
 echo "▸ propr image smoke test"
@@ -138,7 +141,6 @@ reconcile_stale_stack
 
 # --- Prepare throwaway data dir and fake .env ------------------------------
 mkdir -p "$DATA_DIR"/{data,logs}
-printf '%s\n' "$STACK" > "$DATA_OWNER_FILE"
 
 # Dummy GitHub App private key — structurally valid RSA PEM so openssl-based
 # parsers accept it. The smoke test doesn't make actual GitHub API calls.
