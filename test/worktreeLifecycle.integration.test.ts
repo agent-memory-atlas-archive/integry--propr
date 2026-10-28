@@ -955,3 +955,53 @@ for (const late of ['staged', 'locked', 'checkout']) {
         } finally { intercept.mock.restore(); }
     });
 }
+
+/** One pull request run on branch `pr`: a worktree created from it, one local commit, then released. */
+async function failedAttempt(dirName: string, message: string): Promise<string> {
+    const { worktreePath } = await createWorktreeFromExistingBranch(repo, 'pr', { worktreeDirName: dirName, owner: 'owner', repoName });
+    const wt = simpleGit(worktreePath);
+    await fs.writeFile(path.join(worktreePath, 'tracked'), message);
+    await wt.add('.').commit(message);
+    const head = (await wt.revparse(['HEAD'])).trim();
+    await git.raw(['worktree', 'remove', '--force', worktreePath]); // push rejected; attempt cleaned up
+    return head;
+}
+async function pushToRemote(parent: string, message: string, force = false): Promise<string> {
+    const commit = (await git.raw(['commit-tree', `${initial}^{tree}`, '-p', parent, '-m', message])).trim();
+    await git.push('origin', `${commit}:refs/heads/pr`, force ? ['--force'] : []);
+    return commit;
+}
+const headOf = async (dirName: string) => (await simpleGit((await createWorktreeFromExistingBranch(repo, 'pr', { worktreeDirName: dirName, owner: 'owner', repoName })).worktreePath).revparse(['HEAD'])).trim();
+
+test('a local branch left diverged by failed attempts restarts from the rebased PR head and keeps a backup', async () => {
+    await remoteBranch('pr');
+    const stale = await failedAttempt('attempt-1', 'failed attempt');
+    const rebased = await pushToRemote(initial, 'dependabot rebase', true);
+
+    assert.equal(await headOf('attempt-2'), rebased, 'the next run starts from the pull request head');
+    const backups = (await git.raw(['for-each-ref', '--format=%(objectname)', 'refs/propr/superseded/pr/'])).trim();
+    assert.equal(backups, stale, 'the failed attempt\'s commit is kept under a backup ref');
+
+    // S19: a second realignment of the same branch within the same second keeps its own backup.
+    await git.raw(['worktree', 'remove', '--force', path.join(root, 'worktrees', 'owner', repoName, 'attempt-2')]);
+    const staleAgain = await failedAttempt('attempt-3', 'failed again');
+    const rebasedAgain = await pushToRemote(initial, 'dependabot rebase again', true);
+    assert.equal(await headOf('attempt-4'), rebasedAgain);
+    const named = (await git.raw(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/propr/superseded/pr/'])).trim().split('\n');
+    assert.deepEqual(named.map(line => line.split(' ')[1]).sort(), [stale, staleAgain].sort(), 'both superseded tips are kept');
+    for (const line of named) {
+        const [ref, tip] = line.split(' ');
+        assert.match(ref, new RegExp(`^refs/propr/superseded/pr/\\d{8}T\\d{6}Z-${tip.slice(0, 12)}$`), 'the backup name carries the tip it saves');
+    }
+});
+
+test('a local branch behind the PR head is fast-forwarded, and one ahead keeps its unpushed commit', async () => {
+    await remoteBranch('pr');
+    const unpushed = await failedAttempt('attempt-1', 'unpushed work');
+    assert.equal(await headOf('attempt-2'), unpushed, 'ahead: the unpushed commit is kept');
+    await git.raw(['worktree', 'remove', '--force', path.join(root, 'worktrees', 'owner', repoName, 'attempt-2')]);
+
+    const advanced = await pushToRemote(unpushed, 'someone built on it');
+    assert.equal(await headOf('attempt-3'), advanced, 'behind: fast-forwarded to the head');
+    assert.equal((await git.raw(['for-each-ref', 'refs/propr/superseded/'])).trim(), '', 'nothing needed a backup');
+});

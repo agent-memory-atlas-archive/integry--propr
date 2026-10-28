@@ -8,7 +8,7 @@ import { restorePendingComments, withdrawPendingComments } from './prPendingComm
 import { createFollowupHandoffGitOps, type FollowupHandoffGitOps } from './followupHandoffGitOps.js';
 import { splitHandoffRepository, type HandoffOctokit, type HandoffStateManager, type HandoffTaskStates, type LoggerLike } from './followupHandoffResume.js';
 import {
-    parseHandoffJobData, recordFollowupHandoffDiagnostic, type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
+    parseHandoffJobData, recordFollowupHandoffDiagnostic, HANDOFF_AWAITING_OPERATOR, type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
 } from './followupHandoffStore.js';
 
 /** Shared dependency resolution for follow-up handoff recovery and operator actions. */
@@ -154,8 +154,14 @@ export async function recordFailedClosed(
     deps: Pick<ResolvedRecoveryDeps, 'store' | 'log'>,
     reason = 'liveness_unavailable',
 ): Promise<void> {
-    deps.log.warn({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, reason },
+    deps.log.warn({ taskId: record.task_id, repository: record.repository, pullRequest: record.pull_request, reason, holdReason: record.status_reason },
         'Agent container evidence is unavailable or ambiguous; failing closed and leaving the handoff untouched');
+    // An operator hold's reason is its classification: it decides whether the
+    // hold can be released automatically or resumed without authorization, so
+    // a probe that merely could not read a long-gone container must not
+    // overwrite it. publication_failed likewise protects ownership by a queued
+    // retry. The warning above carries the diagnostic instead.
+    if (record.status === HANDOFF_AWAITING_OPERATOR || record.status_reason === 'publication_failed') return;
     if (record.status_reason !== reason) {
         // Diagnostic only: this runs without the PR lease, so it must not
         // advance the generation and invalidate a live owner's checkpoints.

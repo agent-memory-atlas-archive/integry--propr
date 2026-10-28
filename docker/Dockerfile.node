@@ -48,8 +48,10 @@ RUN cd packages/core && npm run build
 # Build TypeScript (main app)
 RUN npm run build
 
-# Create necessary directories
-RUN mkdir -p /tmp/git-processor
+# Create necessary directories. Worktrees are chowned for agent containers, so
+# Git must trust everything under ProPR's folders, also after a restart.
+RUN mkdir -p /tmp/git-processor \
+    && git config --system --add safe.directory '/tmp/git-processor/*'
 
 # Set environment
 ENV NODE_ENV=production

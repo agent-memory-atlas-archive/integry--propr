@@ -105,6 +105,7 @@ export interface OperatorResumeResult { resumed: boolean; reason?: string }
 export async function resumeOperatorHeldFollowupHandoff(
     key: FollowupHandoffKey,
     deps: FollowupHandoffRecoveryDeps = {},
+    options: { automatic?: boolean } = {},
 ): Promise<OperatorResumeResult> {
     const store = deps.store ?? {};
     const record = await loadFollowupHandoff(store, key);
@@ -119,10 +120,20 @@ export async function resumeOperatorHeldFollowupHandoff(
     // An unconfirmed usage-limit retry is resolved by this decision: the
     // operator found no retry job, so resuming returns the request to the queue.
     const result = await withOperatorRedis(deps, redis => underOperatorLease(record, { store, redis }, 'resume',
-        fresh => advanceFollowupHandoff(store, fresh, {
-            status: HANDOFF_ACTIVE, status_reason: 'operator_resumed',
-            ...(fresh.settlement === SETTLEMENT_RETRY_SCHEDULING ? { settlement: null } : {}),
-        })));
+        async fresh => {
+            if (options.automatic) {
+                const resolved = await resolveRecoveryDeps({ ...deps, redis });
+                // Recheck after acquiring the lease: the queue may have scheduled
+                // a retry while this pass waited. Explicit operator resumes keep
+                // their existing semantics.
+                const state = (await resolved.stateManager.getTaskState(fresh.task_id))?.state;
+                if (state && ![resolved.taskStates.COMPLETED, resolved.taskStates.FAILED].includes(state)) return null;
+            }
+            return advanceFollowupHandoff(store, fresh, {
+                status: HANDOFF_ACTIVE, status_reason: 'operator_resumed',
+                ...(fresh.settlement === SETTLEMENT_RETRY_SCHEDULING ? { settlement: null } : {}),
+            });
+        }));
     if (!('value' in result)) return { resumed: false, reason: result.refused };
     return result.value ? { resumed: true } : { resumed: false, reason: 'superseded' };
 }
@@ -210,7 +221,17 @@ async function confirmUnconfirmedRetryOwnership(
  */
 export async function releaseFollowupHandoffRecord(
     key: FollowupHandoffKey,
-    options: { force?: boolean; /** Recorded status reason; defaults to an operator release. */ reason?: string },
+    options: {
+        force?: boolean;
+        /** Recorded status reason; defaults to an operator release. */
+        reason?: string;
+        /**
+         * Restart the freed branch from the remote head when it still carries the
+         * attempt's unpublished commits (kept under refs/propr/superseded/), so the
+         * next worktree does not inherit them; refused when that cannot be ensured.
+         */
+        restartBranch?: boolean;
+    },
     deps: FollowupHandoffRecoveryDeps = {},
 ): Promise<{ released: boolean; reason?: string }> {
     const resolved = await resolveRecoveryDeps(deps);
@@ -252,6 +273,9 @@ export async function releaseFollowupHandoffRecord(
             // repository's own registrations must show the branch free.
             const refusal = await branchReleaseRefusal(resolved.git, fresh);
             if (refusal) return { released: false, reason: refusal };
+            if (options.restartBranch && !await resolved.git.restartBranchFromRemoteHead(fresh.local_repo_path, fresh.branch_name)) {
+                return { released: false, reason: 'unpublished_commits_still_on_branch' };
+            }
             const advanced = await advanceFollowupHandoff(resolved.store, fresh, {
                 status: HANDOFF_RELEASED,
                 status_reason: options.reason ?? (options.force ? 'released_by_operator_force' : 'released_by_operator'),

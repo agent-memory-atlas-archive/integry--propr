@@ -330,10 +330,11 @@ function predecessorBlockReason(adoption: Awaited<ReturnType<typeof adoptPredece
     // blocks too — publication settled but the branch is still attached to the
     // retained worktree, so preparing another worktree on it would fail. An
     // unresolved superseded outcome (the row kept moving under re-reads) is
-    // equally unsafe to race.
+    // equally unsafe to race. retry_pending also blocks if the worktree vanished
+    // during resume, after adoption's initial retry check.
     if ('resumed' in adoption && adoption.resumed
         && (adoption.resumed.outcome === 'awaiting_operator' || adoption.resumed.outcome === 'ownership_lost'
-            || adoption.resumed.outcome === 'cleanup_pending' || adoption.resumed.outcome === 'superseded')) {
+            || adoption.resumed.outcome === 'retry_pending' || adoption.resumed.outcome === 'cleanup_pending' || adoption.resumed.outcome === 'superseded')) {
         return `predecessor_${adoption.resumed.outcome}`;
     }
     return undefined;

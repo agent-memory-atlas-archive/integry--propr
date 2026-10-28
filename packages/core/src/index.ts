@@ -109,7 +109,7 @@ export type { CommitResult } from './git/commitOperations.js';
 export { configureGitAuthentication, setupAuthenticatedRemote, ensureBranchAndPush, pushBranch } from './git/repoBranching.js';
 export { ensureRepoCloned, createWorktreeForIssue, getRepoUrl, fetchLatestChanges } from './git/repoManager.js';
 export type { WorktreeResult, WorktreeInfo, FetchLatestChangesOptions, FetchLatestChangesResult } from './git/repoManager.js';
-export { cleanupExistingBranch, createWorktreeFromExistingBranch, releaseBranchFromSettledWorktree, releaseLostAttemptBranch, worktreeHoldingBranch } from './git/worktreeCreation.js';
+export { cleanupExistingBranch, clearMissingWorktreeRegistration, createWorktreeFromExistingBranch, releaseBranchFromSettledWorktree, releaseLostAttemptBranch, restartBranchFromRemoteHead, worktreeHoldingBranch } from './git/worktreeCreation.js';
 export { classifyPushError, classifyPushRejectionText, extractUnblockUrls, formatPushRejectionClass, type PushRejectionClass, type PushRejectionDiagnosis } from './git/pushRejection.js';
 export {
     salvageFailedPush, createWorktreePushSalvageOperations, PushFailedError, getPushFailure, pushFailureHistoryMetadata,
@@ -120,7 +120,7 @@ export {
     RESCUE_REF_PREFIX, rescueRefName, rescueRefCreatedAt, isRescueRef, sanitizeRescueId, getRescueRetentionDays, getRescueBundleDirectory, getSalvageRetentionRecordDirectory, rescueBundlePath,
     pruneRescueRefs, pruneRescueBundles, createGitRescueRefPruneDependencies, type RescueRefPruneDependencies, type RemoteRescueRef,
 } from './git/rescueRefs.js';
-export { cleanupWorktree, cleanupExpiredWorktrees, safePruneWorktrees, setupWorktreePermissions, addToSafeDirectories, verifyWorktreeCreation, setupWorktreeRemote, getWorktreePath } from './git/worktreeOperations.js';
+export { cleanupWorktree, cleanupExpiredWorktrees, safePruneWorktrees, setupWorktreePermissions, addToSafeDirectories, trustManagedGitDirectories, verifyWorktreeCreation, setupWorktreeRemote, getWorktreePath } from './git/worktreeOperations.js';
 export { proveWorktreeDisposable, removeWorktreeIfDisposable, sweepIdleWorktrees, worktreeRemovalDisabled, type WorktreeKeepReason, type WorktreeSweepResult } from './git/worktreeReclaim.js';
 export { isGitCorruptionError, GIT_CORRUPTION_PATTERNS, getCorruptionPatternStrings } from './git/gitCorruption.js';
 export { assertCommitIsAncestor, mergeBaseIntoBranch } from './git/mergeOperations.js';

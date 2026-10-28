@@ -236,21 +236,23 @@ test('F32: a worker death after restoration is reconciled on restart, and releas
     assert.equal(h.states.get('task-1'), 'cancelled');
 });
 
-test('F32: release withdraws claims a cancelled hold left pending, deciding by task state rather than the overwritable reason', async () => {
-    const h = await createHarness();
-    const record = await seedHandoff(h);
-    // A hold recorded without withdrawal (for example by an earlier build),
-    // whose diagnostic reason a later liveness warning then overwrote.
-    h.states.set('task-1', 'cancelled');
-    h.pending.add(11);
-    const held = await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'cancelled_by_user' });
-    assert.ok(held);
-    await recordFollowupHandoffDiagnostic({ database }, held, 'liveness_unavailable');
-    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, 'liveness_unavailable');
+for (const reason of ['cancelled_by_user', 'liveness_unavailable']) {
+    test(`F32: release withdraws a cancelled hold's pending claims with reason ${reason}`, async () => {
+        const h = await createHarness();
+        const record = await seedHandoff(h);
+        // Earlier builds could overwrite a hold's reason with a liveness warning.
+        // Seed that historical state directly; current diagnostics preserve holds.
+        h.states.set('task-1', 'cancelled');
+        h.pending.add(11);
+        const held = await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: reason });
+        assert.ok(held);
+        assert.equal(await recordFollowupHandoffDiagnostic({ database }, held, 'liveness_unavailable'), false);
+        assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, reason);
 
-    assert.equal((await releaseFollowupHandoffRecord(KEY, {}, h.deps as never)).released, true);
-    assert.deepEqual(laterFollowupPickup(h), [], 'the cancelled request cannot run after its release');
-});
+        assert.equal((await releaseFollowupHandoffRecord(KEY, {}, h.deps as never)).released, true);
+        assert.deepEqual(laterFollowupPickup(h), [], 'the cancelled request cannot run after its release');
+    });
+}
 
 test('F32: a failed withdrawal keeps the hold, and release refuses until the withdrawal succeeds', async () => {
     const h = await createHarness();

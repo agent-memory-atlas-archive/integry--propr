@@ -51,14 +51,25 @@ export function recoveredNoChangeCompletionBody(record: FollowupHandoffRecord): 
     ].filter(Boolean).join('\n\n');
 }
 
+/** Durable diagnostic that recovery rebuilt a worktree deleted outside ProPR; the rebuild also invalidated any recorded agent success. */
+export const WORKTREE_LOST_REASON = 'worktree_lost';
+
+/** Whether the record carries durable evidence that its worktree was deleted and rebuilt. */
+export function worktreeWasLost(record: Pick<FollowupHandoffRecord, 'status_reason'>): boolean {
+    return record.status_reason === WORKTREE_LOST_REASON;
+}
+
 export function interruptedWithoutChangesBody(record: FollowupHandoffRecord): string {
+    const worktreeLost = worktreeWasLost(record);
     const comments = filterRealComments(parseClaimedComments(record));
     const ids = comments.map(comment => comment.id);
     const authors = [...new Set(comments.map(comment => comment.author))].map(author => `@${author}`).join(', ');
     return [
         handoffCommentMarker(record),
         `⚠️ **Follow-up interrupted before any changes were produced**${authors ? ` (requested by ${authors})` : ''}`,
-        'A worker restart interrupted the agent run and its worktree holds no unpublished work. The request has been returned to the queue and will be picked up by the next follow-up on this pull request.',
+        worktreeLost
+            ? 'The agent run was interrupted and its worktree was deleted before any changes were committed, so nothing could be published. The request has been returned to the queue and will be picked up by the next follow-up on this pull request.'
+            : 'A worker restart interrupted the agent run and its worktree holds no unpublished work. The request has been returned to the queue and will be picked up by the next follow-up on this pull request.',
         ids.length ? `Returned comment ID${ids.length > 1 ? 's' : ''}: ${ids.join(', ')}` : '',
         buildWorkEvidenceMarker('failed', ids),
     ].filter(Boolean).join('\n\n');

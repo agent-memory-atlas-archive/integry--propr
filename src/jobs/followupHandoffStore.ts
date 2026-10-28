@@ -317,6 +317,10 @@ export async function recordFollowupHandoffDiagnostic(
             task_id: record.task_id,
             incarnation: record.incarnation,
         })
+        // Discovery can await liveness while the owner checkpoints a failure or
+        // a hold. Protect the current classification, not only the caller's snapshot.
+        .whereNot({ status: HANDOFF_AWAITING_OPERATOR })
+        .andWhere(builder => builder.whereNull('status_reason').orWhereNot('status_reason', 'publication_failed'))
         .update({ status_reason: statusReason, updated_at: nowMs(deps) });
     return updated > 0;
 }

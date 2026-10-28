@@ -13,6 +13,7 @@ import {
     HANDOFF_ACTIVE, HANDOFF_AWAITING_OPERATOR, HANDOFF_RELEASED,
     type FollowupHandoffKey, type FollowupHandoffRecord, type FollowupHandoffStoreDeps,
 } from './followupHandoffStore.js';
+import { pendingRetryHold } from './followupHandoffTaskState.js';
 import { createFollowupHandoffGitOps } from './followupHandoffGitOps.js';
 import {
     reportHandoffOnTaskTimeline, resumeFollowupHandoff,
@@ -25,6 +26,7 @@ export {
     resumeOperatorHeldFollowupHandoff,
     type FollowupHandoffStatus, type OperatorResumeResult,
 } from './followupHandoffOperator.js';
+import { predecessorReleasable, releasePredecessorInline, settleStuckHolds } from './followupHandoffAutoRelease.js';
 
 /**
  * Discovers follow-up publication handoffs a worker restart interrupted and
@@ -129,6 +131,7 @@ export async function recoverInterruptedFollowupHandoffs(
         failedClosed: 0, awaitingOperator: 0, lockedByOtherWriter: 0, errors: 0,
     };
     try {
+        if (!key) await settleStuckHolds(deps, resolved);
         const handoffs = key
             ? [await loadFollowupHandoff(resolved.store, key)]
                 .filter((record): record is FollowupHandoffRecord => record?.status === HANDOFF_ACTIVE)
@@ -182,7 +185,13 @@ export interface PredecessorAdoptionParams {
 export type PredecessorAdoption =
     | {
         blocked: 'predecessor_agent_still_running' | 'predecessor_liveness_unavailable'
-        | 'predecessor_awaiting_operator' | 'predecessor_container_identity_mismatch';
+        | 'predecessor_awaiting_operator' | 'predecessor_container_identity_mismatch'
+        /**
+         * The same task's failed attempt could not be taken over: a Git registration
+         * still holds the branch, or the branch could not be restarted from the pull
+         * request head (see maintenance.md).
+         */
+        | 'predecessor_branch_still_held' | 'predecessor_retry_pending';
     }
     | { resumed?: ResumeOutcome }
     /** Comment IDs a released, unauthorized cancelled predecessor claimed; they must never execute. */
@@ -203,6 +212,12 @@ async function releasedCancelledClaimIds(record: FollowupHandoffRecord, resolved
     const task = await resolved.stateManager.getTaskState(record.task_id);
     if (task?.state !== resolved.taskStates.CANCELLED) return [];
     return parseClaimedComments(record).map(comment => comment.id);
+}
+
+async function pendingRetryOwnsMissingWorktree(record: FollowupHandoffRecord, resolved: ResolvedRecoveryDeps): Promise<boolean> {
+    return record.status_reason === 'publication_failed'
+        && await resolved.git.worktreeAttachment(record.worktree_path, record.branch_name) === 'missing'
+        && await pendingRetryHold(record, resolved) !== null;
 }
 
 /**
@@ -228,9 +243,10 @@ export async function adoptPredecessorFollowupHandoff(
             const claimIds = await releasedCancelledClaimIds(record, resolved);
             return claimIds.length > 0 ? { releasedCancelledClaimIds: claimIds } : {};
         }
-        // An unresolved operator hold is a standing obligation: a new attempt
-        // must not run (and later overwrite it) until the operator settles it.
-        if (record.status === HANDOFF_AWAITING_OPERATOR) return { blocked: 'predecessor_awaiting_operator' };
+        // An operator hold is a standing obligation unless its attempt is over
+        // and can publish nothing more; then this writer releases it instead.
+        const releasable = await predecessorReleasable(record, resolved, params.currentTaskId);
+        if (record.status === HANDOFF_AWAITING_OPERATOR && !releasable) return { blocked: 'predecessor_awaiting_operator' };
         const inspection = await resolved.inspectLiveness(record.task_id);
         const identityConflict = containerIdentityConflict(record, inspection);
         if (identityConflict) {
@@ -242,6 +258,10 @@ export async function adoptPredecessorFollowupHandoff(
             await recordFailedClosed(record, resolved);
             return { blocked: 'predecessor_liveness_unavailable' };
         }
+        if (releasable) return await releaseForWriter(record, resolved, params);
+        // A queued retry owns a missing failed-attempt worktree. Block before
+        // installing successor ownership or consulting Git inside that directory.
+        if (await pendingRetryOwnsMissingWorktree(record, resolved)) return { blocked: 'predecessor_retry_pending' };
         const recoveredBy = record.task_id === params.currentTaskId ? undefined : params.currentTaskId;
         // Durable successor ownership, installed before any recovery mutation:
         // a suspended predecessor's normal-path checkpoint treats an unchanged
@@ -270,6 +290,21 @@ export async function adoptPredecessorFollowupHandoff(
     } finally {
         if (resolved.ownRedis) await resolved.redis.quit?.();
     }
+}
+
+/**
+ * Releases a predecessor that can publish nothing more, so this writer runs
+ * instead of waiting. A release that could not free the branch (or restart it
+ * from the pull request head) keeps this writer waiting: an operator hold
+ * stays reported as such, while a failed same-task attempt that was never
+ * held names the branch.
+ */
+async function releaseForWriter(record: FollowupHandoffRecord, resolved: ResolvedRecoveryDeps, params: PredecessorAdoptionParams): Promise<PredecessorAdoption> {
+    const claimIds = await releasePredecessorInline(record, resolved, params.currentTaskId, params.log);
+    if (!claimIds) {
+        return { blocked: record.status === HANDOFF_AWAITING_OPERATOR ? 'predecessor_awaiting_operator' : 'predecessor_branch_still_held' };
+    }
+    return claimIds.length > 0 ? { releasedCancelledClaimIds: claimIds } : {};
 }
 
 /** The continuation record's durable publication checkpoint, matching findPRContinuation's mapping. */

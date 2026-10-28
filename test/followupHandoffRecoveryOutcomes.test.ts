@@ -228,12 +228,14 @@ test('F28: a cancellation while the restored-comment follow-up is queued withdra
     assert.equal(held?.status_reason, 'cancelled_by_user');
     assert.equal(branchOf(h.fx.wt), BRANCH, 'the branch is not released behind an operator hold');
 
-    // The queued job's admission gate meets the hold instead of executing the claims.
+    // The queued job's admission gate releases the ended, cancelled attempt
+    // (so the pull request is not blocked) and drops the cancelled claims
+    // from its batch instead of executing them.
     const adoption = await adoptPredecessorFollowupHandoff(
         { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog, lockToken: 'task-2-token' },
         h.deps,
     );
-    assert.deepEqual(adoption, { blocked: 'predecessor_awaiting_operator' });
+    assert.deepEqual(adoption, { releasedCancelledClaimIds: [11] });
 });
 
 test('F31: a cancellation inside the final task transition withdraws the claims and keeps the handoff held', async () => {
@@ -262,11 +264,12 @@ test('F31: a cancellation inside the final task transition withdraws the claims 
     assert.equal(held?.phase, 'agent_exited', 'no cleanup_pending checkpoint is recorded');
     assert.equal(branchOf(h.fx.wt), BRANCH, 'the branch is not released behind an operator hold');
 
+    // A later job releases the ended, cancelled attempt and drops its claims.
     const adoption = await adoptPredecessorFollowupHandoff(
         { repoOwner: 'acme', repoName: 'widgets', pullRequestNumber: 7, currentTaskId: 'task-2', log: silentLog, lockToken: 'task-2-token' },
         h.deps,
     );
-    assert.deepEqual(adoption, { blocked: 'predecessor_awaiting_operator' });
+    assert.deepEqual(adoption, { releasedCancelledClaimIds: [11] });
 });
 
 test('F28: an operator-authorized cancelled no-change recovery still returns the request to the queue', async () => {

@@ -1,5 +1,6 @@
 import { db, logger, probeWorktreeReclamationDocker, sweepIdleWorktrees, runningContainerMountSources, resolveRepositoryWorktreeRoot, type WorktreeSweepResult } from '@propr/core';
 import { HANDOFF_RELEASED, PR_FOLLOWUP_HANDOFFS_TABLE } from '../jobs/followupHandoffStore.js';
+import { trustManagedGitDirectoriesAtStartup } from '../gitDirectoryTrust.js';
 
 /** Terminal goals cannot resume: both goal routes and recovery fence continuation
  * with result_state IS NULL. Unreconciled terminal results still need their checkout.
@@ -80,7 +81,10 @@ export function scheduleWorktreeSweep(): NodeJS.Timeout | null {
         const intervalMs = sweepSetting('WORKTREE_SWEEP_INTERVAL_MS', 60 * 60 * 1000, 2_147_483_647);
         sweepSetting('WORKTREE_RETENTION_HOURS', 24, Math.floor(Number.MAX_SAFE_INTEGER / 3_600_000));
         void probeWorktreeReclamationDocker();
-        void sweepWorktrees();
+        // The first sweep reads every managed worktree, so Git must already
+        // trust them (agent-owned checkouts fail with "dubious ownership"
+        // otherwise); a trust failure only logs and the sweep still runs.
+        void trustManagedGitDirectoriesAtStartup().catch(() => undefined).then(() => sweepWorktrees());
         return setInterval(() => { void sweepWorktrees(); }, intervalMs);
     } catch (error) {
         logger.warn({ error: (error as Error).message }, 'Idle worktree sweep disabled: invalid configuration');

@@ -120,7 +120,7 @@ interface UndoContextParams {
 
 async function commitAndPush(
     state: ReadyPostExecutionState,
-    context: PostExecutionContext & { salvage?: PublicationSalvage },
+    context: PostExecutionContext & { salvage?: PublicationSalvage; integrateConflicts?: (worktreePath: string) => Promise<{ commitHash?: string } | null> },
     llm: string | null | undefined,
     completionInputs: Omit<PublicationCompletion, 'commitResult' | 'changesSummary' | 'commitMessage'>,
 ) {
@@ -133,7 +133,7 @@ async function commitAndPush(
         // Durable phase checkpoints around the push: restart recovery must know a
         // clean, pushed worktree means completed publication, not missing work.
         await markExecutionHandoffCommitted(state, commitResult.commitHash);
-        const pushResult = await context.publication.push(state.worktreeInfo.worktreePath, { ...completionInputs, commitResult, changesSummary, commitMessage }, { salvage: context.salvage });
+        const pushResult = await context.publication.push(state.worktreeInfo.worktreePath, { ...completionInputs, commitResult, changesSummary, commitMessage }, { salvage: context.salvage, integrateConflicts: context.integrateConflicts });
         if (pushResult.commitHash) {
             commitResult.commitHash = pushResult.commitHash;
         }
@@ -316,6 +316,25 @@ function buildAddressedFeedbackHistoryMeta(comments: AIReviewComment[]): Record<
     };
 }
 
+/**
+ * A follow-up whose push conflicts with commits pushed meanwhile merges them in
+ * with the conflict agent instead of failing and rerunning the implementation.
+ * Fork heads publish through continuations and keep the salvage path.
+ */
+function conflictIntegrator(params: PostExecutionParams) {
+    const { state, context, stateManager, taskId, redisClient, job } = params;
+    const { worktreeInfo, octokit } = state;
+    if (!worktreeInfo || !octokit || context.publication.target?.isFork !== false) return undefined;
+    // Lazy import: the conflict agent's dependencies load only when a push conflicts.
+    return async (worktreePath: string) => (await import('./pushConflictIntegration.js')).integrateRemoteAndPush({
+        publication: context.publication, worktreeInfo,
+        pullRequestNumber: context.pullRequestNumber, repoOwner: context.repoOwner, repoName: context.repoName,
+        getGithubToken: async () => (await octokit.auth({ type: 'installation' }) as { token: string }).token,
+        stateManager, taskId, correlationId: job.data.correlationId ?? taskId, correlatedLogger: context.correlatedLogger, redisClient,
+        checkpointCommit: commitHash => markExecutionHandoffCommitted(state, commitHash),
+    }, worktreePath);
+}
+
 export async function handlePostExecution(params: PostExecutionParams, taskUrl: string): Promise<{ commitHash?: string; partial: boolean }> {
     const {
         state,
@@ -345,6 +364,7 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
         preparedVisualPreview = await preparePostExecutionPreviews(state, `${repoOwner}/${repoName}`, taskId, params.visualPreviewSettings);
         const { commitResult, changesSummary, commitMessage } = params.recoveredCompletion ?? await commitAndPush(state, {
             ...context, salvage: { taskId, onEvent: recordPushSalvageEvent(stateManager, taskId, correlatedLogger) },
+            integrateConflicts: conflictIntegrator(params),
         }, llm, {
             taskId, instructionCommentIds: state.unprocessedComments.map(comment => comment.id),
             jobData: job.data, claudeResult: state.claudeResult, authorsText: state.authorsText,
