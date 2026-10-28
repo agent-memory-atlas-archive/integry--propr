@@ -159,8 +159,9 @@ export async function recordFailedClosed(
     // An operator hold's reason is its classification: it decides whether the
     // hold can be released automatically or resumed without authorization, so
     // a probe that merely could not read a long-gone container must not
-    // overwrite it. The warning above carries the diagnostic instead.
-    if (record.status === HANDOFF_AWAITING_OPERATOR) return;
+    // overwrite it. publication_failed likewise protects ownership by a queued
+    // retry. The warning above carries the diagnostic instead.
+    if (record.status === HANDOFF_AWAITING_OPERATOR || record.status_reason === 'publication_failed') return;
     if (record.status_reason !== reason) {
         // Diagnostic only: this runs without the PR lease, so it must not
         // advance the generation and invalidate a live owner's checkpoints.

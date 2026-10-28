@@ -228,7 +228,9 @@ function createOctokit(seedComments: FakeComment[] = []) {
     let nextId = 1000;
     return {
         comments,
+        pull: { state: 'open', merged: false },
         async request(route: string, params?: Record<string, unknown>) {
+            if (route.startsWith('GET ') && route.includes('/pulls/')) return { data: this.pull };
             if (route.startsWith('PATCH ')) {
                 const found = comments.find(comment => comment.id === params?.comment_id);
                 if (!found) throw Object.assign(new Error('Not Found'), { status: 404 });
@@ -730,7 +732,7 @@ test('a deleted worktree without commits returns the request to the queue, even 
 });
 
 test('a worktree_missing hold from before the fix is re-armed and recovered by the next pass', async () => {
-    const h = await createHarness();
+    const h = await createHarness({ taskStates: { 'task-1': 'failed' } });
     withWorktreeRestore(h);
     const record = await seedHandoff(h);
     await rm(h.fx.wt, { recursive: true, force: true });
@@ -1158,5 +1160,72 @@ test('S15: a refused release that leaves a registration on the branch keeps the 
     // The harness release refuses a missing folder, and its registration still names the branch.
     assert.deepEqual(await h.gitOps.branchWorktreeRegistrations(h.fx.local, BRANCH), [h.fx.wt]);
     assert.deepEqual(await adoptAs(h, 'task-2'), { blocked: 'predecessor_awaiting_operator' });
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
+});
+
+for (const probe of ['not_found', 'unavailable']) {
+    test(`F5/F7: a missing failed attempt blocks another task after ${probe} liveness`, async () => {
+        const h = await createHarness({ taskStates: { 'task-1': 'pending' }, liveness: probe });
+        const restores = withWorktreeRestore(h);
+        const record = await seedHandoff(h);
+        await agentEdit(h);
+        git(h.fx.wt, 'add', '-A');
+        git(h.fx.wt, 'commit', '-m', 'failed attempt');
+        await advanceFollowupHandoff({ database }, record, {
+            phase: 'committed', commit_hash: git(h.fx.wt, 'rev-parse', 'HEAD'), status_reason: 'publication_failed',
+        });
+        await rm(h.fx.wt, { recursive: true, force: true });
+        if (probe === 'unavailable') {
+            assert.deepEqual(await adoptAs(h, 'task-2'), { blocked: 'predecessor_liveness_unavailable' });
+            await recoverInterruptedFollowupHandoffs(h.deps);
+            assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, 'publication_failed');
+            h.deps.inspectLiveness = async () => ({ liveness: 'not_found' });
+        }
+        assert.deepEqual(await adoptAs(h, 'task-2'), { blocked: 'predecessor_retry_pending' });
+        await recoverInterruptedFollowupHandoffs(h.deps);
+        assert.deepEqual(restores, []);
+        assert.equal(h.counters.pushes, 0);
+        assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_ACTIVE);
+        assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, 'publication_failed');
+    });
+}
+
+test('S22: legacy missing-worktree holds wait for the pending retry', async () => {
+    const h = await createHarness({ taskStates: { 'task-1': 'pending' } });
+    const restores = withWorktreeRestore(h);
+    const record = await seedHandoff(h);
+    await rm(h.fx.wt, { recursive: true, force: true });
+    await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_missing' });
+    await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.deepEqual(restores, []);
+    assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
+    assert.deepEqual(await adoptAs(h, 'task-2'), { blocked: 'predecessor_awaiting_operator' });
+});
+
+for (const merged of [false, true]) {
+    test(`S25: automatic release skips the PR notice on a closed PR (merged=${merged})`, async () => {
+        const h = await createHarness();
+        h.octokit.pull = { state: 'closed', merged };
+        await heldBy(h, 'worktree_not_on_branch', 'failed');
+        assert.deepEqual(await adoptAs(h, 'task-2'), {});
+        assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_RELEASED);
+        assert.equal(h.octokit.comments.length, 0);
+        assert.ok(h.stateManager.updates.length > 0, 'task timeline still records the release');
+    });
+}
+
+test('S22: automatic re-arm rechecks retry state after acquiring the lease', async () => {
+    const h = await createHarness({ taskStates: { 'task-1': 'failed' } });
+    const restores = withWorktreeRestore(h);
+    const record = await seedHandoff(h);
+    await rm(h.fx.wt, { recursive: true, force: true });
+    await advanceFollowupHandoff({ database }, record, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_missing' });
+    const evaluate = h.redis.eval.bind(h.redis);
+    h.redis.eval = async (...args) => {
+        if (args[0].includes('ttl')) h.stateManager.states.set('task-1', 'pending');
+        return evaluate(...args);
+    };
+    await recoverInterruptedFollowupHandoffs(h.deps);
+    assert.deepEqual(restores, []);
     assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
 });

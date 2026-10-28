@@ -121,3 +121,25 @@ test('unresolved conflicts fall back with the follow-up commit untouched and not
     assert.equal(git(fx.wt, 'status', '--porcelain'), '', 'the local merge was aborted');
     assert.equal(git(fx.origin, 'rev-parse', `refs/heads/${BRANCH}`), fx.remote);
 });
+
+test('S23: another remote push after integration leaves the checkpointed merge for salvage', async () => {
+    const fx = await movedBranch();
+    agentResolution = async worktreePath => fs.writeFile(path.join(worktreePath, 'doc.md'), 'intro\nfrom another push\nfrom the follow-up\n');
+    events.length = 0;
+    const params = options(fx);
+    params.checkpointCommit = async sha => {
+        events.push({ step: 'checkpoint', sha });
+        const other = path.join(fx.dir, 'other');
+        await fs.writeFile(path.join(other, 'later.txt'), 'another update\n');
+        git(other, 'add', '.');
+        git(other, 'commit', '-m', 'moved again');
+        git(other, 'push', 'origin', BRANCH);
+    };
+    await assert.rejects(integrateRemoteAndPush(params, fx.wt), /rejected/);
+    const head = git(fx.wt, 'rev-parse', 'HEAD');
+    assert.notEqual(head, fx.followup);
+    assert.deepEqual(events, [{ step: 'checkpoint', sha: head }, { step: 'push', sha: head }]);
+    assert.deepEqual(git(fx.wt, 'rev-list', '--parents', '-n', '1', head).split(' ').slice(1).sort(), [fx.followup, fx.remote].sort());
+    assert.equal(git(fx.wt, 'status', '--porcelain'), '', 'the completed merge stays available to salvage');
+    assert.notEqual(git(fx.origin, 'rev-parse', `refs/heads/${BRANCH}`), head);
+});

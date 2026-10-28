@@ -66,8 +66,14 @@ async function announceRelease(record: FollowupHandoffRecord, resolved: Resolved
         'released automatically: the attempt was over and could not publish');
     try {
         const { owner, repo } = splitHandoffRepository(record.repository);
+        const octokit = await resolved.getOctokit();
+        const { data: pull } = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+            owner, repo, pull_number: record.pull_request,
+        });
+        const state = pull as { state?: string; merged?: boolean };
+        if (state.state !== 'open' || state.merged) return;
         const why = HOLD_EXPLANATIONS[record.status_reason ?? ''] ?? 'could not publish anything more';
-        await (await resolved.getOctokit()).request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
+        await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
             owner, repo, issue_number: record.pull_request,
             body: `ℹ️ **Cleared a stuck follow-up** so new requests on this pull request can run.\n\nAn earlier follow-up (task \`${record.task_id}\`) ${why}, so nothing more could be published from it. If its request still matters, comment again.`,
         });
@@ -147,10 +153,13 @@ export async function settleStuckHolds(deps: FollowupHandoffRecoveryDeps, resolv
         try {
             const cancelled = (await resolved.stateManager.getTaskState(record.task_id))?.state === resolved.taskStates.CANCELLED;
             if (record.status_reason === 'worktree_missing' && !cancelled) {
+                // Legacy holds lack publication_failed, so their task state is
+                // the only evidence that a queued retry still owns the attempt.
+                if (!await heldTaskEnded(record, resolved)) continue;
                 // The operator resume re-arms without granting publication
                 // authority: operator_authorized stays 0, so a re-armed hold
                 // that fails its rebuild is still releasable here and above.
-                const result = await resumeOperatorHeldFollowupHandoff(record, shared);
+                const result = await resumeOperatorHeldFollowupHandoff(record, shared, { automatic: true });
                 resolved.log.info({ repository: record.repository, pullRequest: record.pull_request, taskId: record.task_id, result },
                     'Re-armed a follow-up held only because its worktree was deleted; recovery rebuilds the worktree');
                 continue;

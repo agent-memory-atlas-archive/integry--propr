@@ -35,6 +35,9 @@ export interface PushConflictIntegrationOptions {
  * (markers are verified), and the merge is pushed without rebasing. Returns
  * null when the conflicts could not be resolved; the local merge is then
  * aborted and the caller falls back to push salvage with the original HEAD.
+ * If the push fails after the merge is committed, it throws with HEAD and the
+ * handoff checkpoint at the merge SHA: salvage preserves that merge, including
+ * both histories, rather than resetting to the original follow-up commit.
  */
 export async function integrateRemoteAndPush(options: PushConflictIntegrationOptions, worktreePath: string): Promise<{ commitHash?: string } | null> {
     const { publication, pullRequestNumber, correlatedLogger } = options;

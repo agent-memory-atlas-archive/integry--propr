@@ -164,6 +164,11 @@ export async function trustManagedGitDirectories(git: SimpleGit): Promise<void> 
     const clonesBase = process.env.GIT_CLONES_BASE_PATH || '/tmp/git-processor/clones';
     const wanted = [`${path.resolve(WORKTREES_BASE_PATH)}/*`, `${path.resolve(clonesBase)}/*`];
     try {
+        const version = (await git.raw(['--version'])).trim();
+        const parsed = /git version (\d+)\.(\d+)/.exec(version);
+        if (!parsed || Number(parsed[1]) < 2 || (Number(parsed[1]) === 2 && Number(parsed[2]) < 46)) {
+            logger.warn({ version }, 'Managed safe.directory wildcards require Git 2.46 or newer; upgrade Git to trust existing worktrees after restart (per-path creation entries still apply)');
+        }
         const existing = new Set((await git.raw(['config', '--global', '--get-all', 'safe.directory']).catch(() => '')).split('\n').map(line => line.trim()));
         for (const entry of wanted) {
             if (!existing.has(entry)) await git.raw(['config', '--global', '--add', 'safe.directory', entry]);

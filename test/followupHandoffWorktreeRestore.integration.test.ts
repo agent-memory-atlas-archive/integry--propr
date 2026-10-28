@@ -152,7 +152,10 @@ async function heldHandoff(clone: string, wt: string, hold: { reason: string; ta
         },
         taskStates: { COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled' },
         withdrawRestoredComments: async (_record: unknown, claimed: Array<{ id: number }>) => { withdrawn.push(...claimed.map(comment => comment.id)); },
-        getOctokit: async () => ({ request: async (_route: string, params: { body?: string }) => { posted.push(params.body ?? ''); return { data: {} }; } }),
+        getOctokit: async () => ({ request: async (route: string, params: { body?: string }) => {
+            if (route.startsWith('GET ')) return { data: { state: 'open', merged: false } };
+            posted.push(params.body ?? ''); return { data: {} };
+        } }),
     };
     return { held: held!, resolved: resolved as never, posted, withdrawn, key: { repository: 'acme/widgets', pull_request: pullRequest } };
 }
@@ -251,4 +254,20 @@ test('F3: a cancelled follow-up\'s unpublished commit is not inherited by the ne
     assert.equal(published, git(nextWt, 'rev-parse', 'HEAD'));
     assert.throws(() => git(fx.origin, 'merge-base', '--is-ancestor', cancelledCommit, published), 'the cancelled commit never reached the pull request');
     assert.equal(git(fx.clone, 'cat-file', '-t', cancelledCommit), 'commit', 'while the clone still keeps it');
+});
+
+test('S24: startup warns when Git cannot match managed directory wildcards', async () => {
+    const { logger } = await import('@propr/core');
+    const warnings: string[] = [];
+    const warning = mock.method(logger, 'warn', (_fields: unknown, message: string) => { warnings.push(message); });
+    try {
+        for (const version of ['2.45.4', '2.46.0', '3.0.0']) {
+            warnings.length = 0;
+            await trustManagedGitDirectories({ raw: async (args: string[]) => args[0] === '--version' ? `git version ${version}` : '' } as never);
+            assert.equal(warnings.length, version === '2.45.4' ? 1 : 0);
+            if (warnings.length) assert.match(warnings[0], /Git 2.46 or newer/);
+        }
+    } finally {
+        warning.mock.restore();
+    }
 });

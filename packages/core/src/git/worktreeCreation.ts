@@ -68,8 +68,10 @@ export async function addWorktreeWithoutTracking(
  * Brings a reused local branch onto its start point (the pull request head)
  * without losing commits. A branch behind is fast-forwarded. A branch ahead
  * keeps its unpushed commits. A diverged branch (the remote was rebased or
- * force-pushed) can never publish its local-only commits, which are failed
- * attempts' leftovers: they are kept under refs/propr/superseded/ and the
+ * force-pushed) is treated as failed-attempt history rather than rebased here.
+ * Push salvage may already have saved it remotely at refs/propr/rescue/<taskId>;
+ * refs/propr/superseded/<branch>/<time>-<sha> additionally keeps the old tip
+ * locally (compare commit SHAs to reconcile the backups), and the
  * branch restarts from the start point. Otherwise every later run would build
  * on the stale history and every push would be rejected. A branch checked out
  * in any worktree is never moved.

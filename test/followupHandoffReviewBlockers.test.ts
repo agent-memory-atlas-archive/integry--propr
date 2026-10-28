@@ -1526,3 +1526,42 @@ test('the periodic pass leaves a hold whose agent is still running for a later p
     assert.deepEqual(summary, { inspected: 1, released: 0, refused: 1, errors: 0 });
     assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_AWAITING_OPERATOR);
 });
+
+for (const deletedDuringResume of [false, true]) {
+    test(`F6: pending retry defers successor admission (deleted during resume=${deletedDuringResume})`, async () => {
+        const h = await createHarness({ taskStates: { 'task-1': 'pending' } });
+        octokitForDefaults = h.octokit;
+        const record = await seedHandoff(h);
+        await agentEdit(h.fx);
+        const commit = commitInWorktree(h.fx);
+        await advanceFollowupHandoff({ database }, record, { phase: deletedDuringResume ? 'agent_exited' : 'committed', commit_hash: commit, status_reason: 'publication_failed' });
+        if (deletedDuringResume) {
+            const readState = h.stateManager.getTaskState.bind(h.stateManager);
+            h.stateManager.getTaskState = async taskId => {
+                // After the early attachment check and adoption, resume awaits
+                // cancellation state before collecting the attempt's output.
+                if (taskId === 'task-1') await rm(h.fx.wt, { recursive: true, force: true });
+                return readState(taskId);
+            };
+        } else {
+            await rm(h.fx.wt, { recursive: true, force: true });
+        }
+        const result = await gatePredecessorHandoff(gateParams(h, 'task-2'));
+        assert.equal(result?.status, 'rescheduled');
+        assert.equal((result as { reason?: string }).reason, 'predecessor_retry_pending');
+        assert.equal(queuedRecoveryJobs.length, 1);
+        assert.equal(h.redis.store.has(LOCK), false);
+        assert.equal((await loadFollowupHandoff({ database }, KEY))?.status, HANDOFF_ACTIVE);
+        assert.equal(pushBranchCalls.length, 0);
+    });
+}
+
+for (const patch of [{ status_reason: 'publication_failed' }, { status: HANDOFF_AWAITING_OPERATOR, status_reason: 'worktree_missing' }]) {
+    test(`F7: stale diagnostic cannot overwrite a newly checkpointed ${patch.status_reason}`, async () => {
+        const h = await createHarness();
+        const stale = await seedHandoff(h);
+        await advanceFollowupHandoff({ database }, stale, patch);
+        await recordFailedClosed(stale, { store: { database }, log: silentLog });
+        assert.equal((await loadFollowupHandoff({ database }, KEY))?.status_reason, patch.status_reason);
+    });
+}
