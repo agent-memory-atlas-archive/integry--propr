@@ -23,6 +23,9 @@ process.env.DATA_DIR = root;
 process.env.DB_FILENAME = path.join(root, 'core.sqlite');
 process.env.NODE_ENV = 'test';
 process.env.PRIMARY_PROCESSING_LABELS = 'AI';
+// With no configured keywords every comment is an explicit trigger. This
+// fixture needs plain comments to remain subject to the processing-label gate.
+process.env.PR_FOLLOWUP_TRIGGER_KEYWORDS = '@propr';
 process.env.GITHUB_BOT_USERNAME = 'propr-dev[bot]';
 delete process.env.CONFIG_REPO;
 

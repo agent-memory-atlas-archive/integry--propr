@@ -1,8 +1,14 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 
 process.env.PR_FOLLOWUP_TRIGGER_KEYWORDS = '@propr';
 const { pullRequestJobAllowed } = await import('../src/jobs/prCommentLabelGate.js');
+
+after(async () => {
+    // The fallback label lookup opens core's database connection.
+    const { closeConnection } = await import('@propr/core');
+    await closeConnection();
+});
 
 const PRIMARY = ['AI', 'gitfix'];
 const comment = (body: string) => ({ id: 1, body, author: 'integry', type: 'issue' as const });
