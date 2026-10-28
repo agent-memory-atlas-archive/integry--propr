@@ -109,8 +109,7 @@ export class AntigravityAgent implements Agent {
                     timeout: this.timeoutMs, cwd: worktreePath, onSessionId, onContainerId, worktreePath, stdinData: prompt,
                     taskId, streamToRedis: true, preserveOutputOnTimeout: true, model: effectiveModel
                 }),
-                undefined,
-                this.config.alias
+                { alias: this.config.alias }
             );
 
             const executionTime = Date.now() - startTime;
@@ -379,9 +378,7 @@ export class AntigravityAgent implements Agent {
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'antigravity',
                 async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, authenticationRoot: this.getHostConfigPath(), credentials: this.config.envVars }, timeout: effectiveTimeoutMs, stdinData: fullPrompt, taskId, model: effectiveModel }),
-                ANALYSIS_AGENT_TANK_TIMEOUT_MS,
-                this.config.alias,
-                options?.skipUsageTracking
+                { timeoutMs: ANALYSIS_AGENT_TANK_TIMEOUT_MS, alias: this.config.alias, skipUsageTracking: options?.skipUsageTracking }
             );
             const executionTimeMs = Date.now() - startTime;
             const { summary, tokenUsage, sessionId, modelUsed, reportedModel, terminalStatus, protocolError, hasStreamEnvelopes } = parseAntigravityJsonl(result.stdout);

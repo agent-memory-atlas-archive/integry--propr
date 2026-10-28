@@ -238,9 +238,7 @@ export class VibeAgent implements Agent {
                     taskId,
                     model: effectiveModel
                 }),
-                undefined,
-                this.config.alias,
-                options?.skipUsageTracking
+                { alias: this.config.alias, skipUsageTracking: options?.skipUsageTracking }
             );
             const executionTimeMs = Date.now() - startTime;
             const parsedOutput = parseVibeOutput(result.stdout);

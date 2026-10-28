@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   resolveConfig,
+  runMigrationPhase,
   runMigrationPhaseAsync,
   startService,
   startServiceAsync,
@@ -106,6 +107,22 @@ case " $* " in
     if [ "$DOCKER_FAKE_MIGRATION_FAIL" = "1" ]; then
       echo "synthetic migration failure" >&2
       exit 17
+    fi
+    if [ "$DOCKER_FAKE_MIGRATION_FAIL" = "node-trace" ]; then
+      # A nested tini warning precedes Node's uncaught-error report.
+      echo "[WARN  tini (7)] Tini is not running as PID 1 and isn't registered as a child subreaper." >&2
+      echo "file:///usr/src/app/dist/src/migrate.js:12" >&2
+      echo "    await runMigrations();" >&2
+      echo "    ^" >&2
+      echo "" >&2
+      echo "Error: The migration directory is corrupt, the following files are missing: 19000101000000_missing_release_smoke.js" >&2
+      echo "    at validateMigrationList (/usr/src/app/node_modules/knex/lib/migrations/migrate/Migrator.js:600:11)" >&2
+      echo "SESSION_SECRET=must-not-appear-in-the-error" >&2
+      exit 1
+    fi
+    if [ "$DOCKER_FAKE_MIGRATION_FAIL" = "long" ]; then
+      printf 'Error: %0800d\n' 0 >&2
+      exit 1
     fi
     exit 0
     ;;
@@ -255,7 +272,7 @@ test('migration owner argv contains only its data bind and forced migration runt
     const run = fake.lines().find(line => line.startsWith('run --rm --init --name propr-migrate '));
     assert.equal(
       run,
-      `run --rm --init --name propr-migrate --network propr-net --label propr.stack=propr --label propr.service=migrate --env-file /stack/.env -e NODE_ENV=production -e PROPR_CONTAINERIZED=1 -e PROPR_MIGRATIONS_PREAPPLIED=0 -v /stack/data:/usr/src/app/data ${manifest.images.app} node dist/src/migrate.js`,
+      `run --rm --init --name propr-migrate --network propr-net --label propr.stack=propr --label propr.service=migrate --env-file /stack/.env -e NODE_ENV=production -e PROPR_CONTAINERIZED=1 -e PROPR_MIGRATIONS_PREAPPLIED=0 -e TINI_SUBREAPER=1 -v /stack/data:/usr/src/app/data ${manifest.images.app} node dist/src/migrate.js`,
     );
   } finally {
     fake.restore();
@@ -278,6 +295,26 @@ test('migration failure aborts startup before any service container is created',
     fake.restore();
   }
 });
+
+for (const [kind, runMigration] of [['sync', runMigrationPhase], ['async', runMigrationPhaseAsync]]) {
+  test(`${kind} migration failure reports the Node error, not an init notice or later output`, async () => {
+    const fake = installFakeDocker();
+    try {
+      process.env.DOCKER_FAKE_MIGRATION_FAIL = 'node-trace';
+      const error = await Promise.resolve().then(() => runMigration(config())).then(() => null, (err) => err);
+      assert.equal(
+        error?.message,
+        'Database migration phase failed: Error: The migration directory is corrupt, the following files are missing: 19000101000000_missing_release_smoke.js',
+      );
+
+      process.env.DOCKER_FAKE_MIGRATION_FAIL = 'long';
+      const long = await Promise.resolve().then(() => runMigration(config())).then(() => null, (err) => err);
+      assert.match(long?.message, /^Database migration phase failed: Error: 0{493}…$/);
+    } finally {
+      fake.restore();
+    }
+  });
+}
 
 test('direct database service start with no live peers forces the migration marker to zero', () => {
   const fake = installFakeDocker();

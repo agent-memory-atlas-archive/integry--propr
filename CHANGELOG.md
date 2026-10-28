@@ -419,6 +419,10 @@ through `c2de30509`.
 
 ### Fixed
 
+- **Database migration failures**: when the launcher's migration phase fails,
+  the startup error now names the migration error (for example a corrupt
+  migration directory) instead of an unrelated tini init warning or Node's
+  source-location line. The message is one line of at most 500 characters.
 - **Ultrafix and CI**: a loop paused on failing CI resumes when green `check_run`
   or `check_suite` events or polling show the build fixed, and a deferred step
   survives restarts and failed jobs. Review readiness honours the repository's

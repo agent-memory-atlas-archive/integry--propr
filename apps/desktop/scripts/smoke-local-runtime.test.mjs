@@ -196,13 +196,16 @@ describe('desktop source runtime smoke root boundary', { skip: unsupported }, ()
   test('removes its own root even when a container-owned subdirectory blocks the host user', async (t) => {
     const workspace = makeWorkspace();
     t.after(() => forceRemove(workspace.root));
-    for (const name of ['propr-desktop-runtime-smoke.Ab12Cd', 'propr-preview-runtime-smoke.Ab12Cd']) {
+    const names = [
+      'propr-desktop-runtime-smoke.Ab12Cd', 'propr-preview-runtime-smoke.Ab12Cd', 'propr-image-smoke.Ab12Cd', 'propr-sqlite-startup-smoke.Ab12Cd',
+    ];
+    for (const name of names) {
       const root = privateRoot(workspace, name);
       const result = await removeRoot(workspace, root, await identityOf(workspace, root));
       assert.equal(result.code, 0, result.stderr);
       assert.equal(existsSync(root), false);
     }
-    assert.equal(dockerCalls(workspace).length, hostCannotRemovePrivateSubtree ? 2 : 0);
+    assert.equal(dockerCalls(workspace).length, hostCannotRemovePrivateSubtree ? names.length : 0);
   });
 
   test('refuses a symlink that impersonates the smoke root', async (t) => {
@@ -229,6 +232,7 @@ describe('desktop source runtime smoke root boundary', { skip: unsupported }, ()
     }
     for (const name of [
       'propr-desktop-runtime-smoke.Ab12Cd-personal', 'propr-preview-runtime-smoke.Ab12Cd-personal', 'propr-other-runtime-smoke.Ab12Cd',
+      'propr-image-smoke.Ab12Cd-personal', 'propr-sqlite-startup-smoke.Ab12Cd-personal', 'propr-sqlite-smoke.Ab12Cd', 'propr-image-runtime-smoke.Ab12Cd',
     ]) {
       const misnamed = join(workspace.tmp, name);
       mkdirSync(misnamed, { mode: 0o700 });

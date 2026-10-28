@@ -150,7 +150,7 @@ for (const provider of ['claude', 'codex', 'antigravity']) {
         cachedSnapshot = { [provider]: snapshot(42, 31, '2026-09-27T12:00:00.000Z') };
         const { result, usageMetrics } = await executeWithUsageTracking(provider, () => shortCall('output', () => {
             cachedSnapshot = { [provider]: snapshot(58, 35, '2026-09-27T12:03:00.000Z') };
-        }), undefined, `${provider}-secondary`);
+        }), { alias: `${provider}-secondary` });
         assert.equal(result, 'output');
         assert.equal(usageMetrics, null);
         assert.equal(refreshes, 1);
@@ -161,7 +161,7 @@ for (const provider of ['claude', 'codex', 'antigravity']) {
         cachedSnapshot = { [provider]: snapshot(42, 31, '2026-09-27T12:00:00.000Z') };
         const { usageMetrics } = await executeWithUsageTracking(provider, () => shortCall('output', () => {
             cachedSnapshot = { [provider]: snapshot(58, 35, '2026-09-27T12:03:00.000Z') };
-        }), undefined, inspectedAlias);
+        }), { alias: inspectedAlias });
         assert.ok(usageMetrics);
         assert.deepEqual(usageMetrics.records, [
             { agent: provider, metricKey: 'Session', metricValue: 16 },
@@ -177,14 +177,14 @@ test('post-call provenance is checked again after execution yields', async () =>
         // A refresh during execution inspected the other configured account.
         inspectedAlias = 'claude-secondary';
         cachedSnapshot = { claude: snapshot(58, 35, '2026-09-27T12:03:00.000Z') };
-    }), undefined, 'claude-primary');
+    }), { alias: 'claude-primary' });
     assert.equal(usageMetrics, null);
 });
 
 
 test('health probes return the execution result without collecting usage', async () => {
     cachedSnapshot = { claude: snapshot(42, 31, '2026-09-27T12:00:00.000Z') };
-    const result = await executeWithUsageTracking('claude', () => shortCall('auth failed'), 2000, 'claude', true);
+    const result = await executeWithUsageTracking('claude', () => shortCall('auth failed'), { timeoutMs: 2000, alias: 'claude', skipUsageTracking: true });
     assert.deepEqual(result, { result: 'auth failed', usageMetrics: null });
     assert.equal(refreshes, 0);
     assert.equal(scheduledRefreshes, 0);

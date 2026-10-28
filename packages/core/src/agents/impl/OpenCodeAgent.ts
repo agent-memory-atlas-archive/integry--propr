@@ -165,9 +165,7 @@ export class OpenCodeAgent implements Agent {
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'opencode',
                 async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, credentials: this.config.envVars }, timeout: resolveAnalysisTimeout(timeoutMs), stdinData: analysisPrompt, taskId, model: effectiveModel === 'unknown' ? undefined : effectiveModel }),
-                undefined,
-                this.config.alias,
-                options?.skipUsageTracking
+                { alias: this.config.alias, skipUsageTracking: options?.skipUsageTracking }
             );
             const executionTimeMs = Date.now() - startTime;
             const parsedOutput = this.parseOpenCodeJsonl(result.stdout);

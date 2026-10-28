@@ -518,7 +518,7 @@ for (const executingAlias of ['claude-primary', 'claude-secondary']) {
                 claude: { name: 'claude', usage: { session: { percent: 58 } }, lastUpdated: '2026-09-26T00:01:00.000Z' },
             }) };
             return 'output';
-        }, undefined, executingAlias);
+        }, { alias: executingAlias });
         assert.equal(result, 'output');
         assert.equal(dockerRuns.length, executingAlias === 'claude-primary' ? 2 : 1);
         assert.ok(bindMounts(dockerRuns[0]).includes(mountSpec(claudeHome, '/home/node/.claude')));
@@ -561,7 +561,7 @@ for (const provider of ['claude', 'codex', 'antigravity'] as const) {
                 assert.equal(getBundledStatusForAlias(alias), undefined, 'the baseline has aged out of the shared cache');
                 dockerResult.stdout = output(58);
                 return 'output';
-            }, undefined, alias);
+            }, { alias });
             assert.equal(result, 'output');
             assert.deepEqual(usageMetrics?.records, [{ agent: provider, metricKey: 'Session', metricValue: 16 }]);
             assert.equal(usageMetrics?.postCall.lastUpdated, new Date().toISOString());
